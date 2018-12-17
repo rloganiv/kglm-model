@@ -1,0 +1,10 @@
+# Python
+
+*.pyc
+__pycache__
+
+
+# Testing
+
+.pytest_cache/
+.mypy_cache/
