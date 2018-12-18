@@ -3,7 +3,7 @@ Modified vocabulary for computing unknown penalized perplexity. The only differe
 instead of eliminating tokens that would be mapped to <UNK>, we keep them and modify the indexing
 functions to return <UNK>.
 """
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Union
+from typing import Dict, Iterable, List, Optional, Union
 from collections import defaultdict
 
 from allennlp.common.checks import ConfigurationError
@@ -23,13 +23,15 @@ class ExtendedVocabulary(Vocabulary):
     """
     def __init__(self,
                  non_padded_namespaces: Iterable[str] = EXTENDED_NON_PADDED_NAMESPACES,
-                 *args, **kwargs):
-        # The only modification we make to the initialization is to override the default non-padded namespaces.
-        super(ExtendedVocabulary, self).__init__(*args, **kwargs, non_padded_namespaces=non_padded_namespaces)
+                 **kwargs):
+        # The only modification we make to the initialization is to override the default non-padded
+        # namespaces.
+        super(ExtendedVocabulary, self).__init__(non_padded_namespaces=non_padded_namespaces,
+                                                 **kwargs)
 
     def _extend(self,
                 counter: Dict[str, Dict[str, int]] = None,
-                min_count : Dict[str, int] = None,
+                min_count: Dict[str, int] = None,
                 max_vocab_size: Union[int, Dict[str, int]] = None,
                 non_padded_namespaces: Iterable[str] = EXTENDED_NON_PADDED_NAMESPACES,
                 pretrained_files: Optional[Dict[str, str]] = None,
@@ -72,7 +74,7 @@ class ExtendedVocabulary(Vocabulary):
         self._index_to_token.add_non_padded_namespaces(non_padded_namespaces)
         self._non_padded_namespaces.update(non_padded_namespaces)
 
-        for namespace in counter:
+        for namespace in counter:  # pylint: disable=too-many-nested-blocks
             if namespace in pretrained_files:
                 pretrained_list = _read_pretrained_tokens(pretrained_files[namespace])
                 min_embeddings = min_pretrained_embeddings.get(namespace, 0)
@@ -91,7 +93,7 @@ class ExtendedVocabulary(Vocabulary):
                 max_vocab = -1
             if max_vocab:
                 token_counts = token_counts[:max_vocab]
-                unk_counts = token_counts[max_vocab:]  # Add these to the corresponding *unk namespace
+                unk_counts = token_counts[max_vocab:]  # Add these to *unk namespace
             for token, count in token_counts:
                 if pretrained_set is not None:
                     if only_include_pretrained_words:
