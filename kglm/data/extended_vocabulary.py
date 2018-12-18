@@ -82,13 +82,13 @@ class ExtendedVocabulary(Vocabulary):
                     tokens_to_add[namespace] = tokens_old + tokens_new
                 pretrained_set = set(pretrained_list)
             else:
-                pretrained_set = None
+                pretrained_set = set()
             token_counts = list(counter[namespace].items())
             token_counts.sort(key=lambda x: x[1], reverse=True)
             try:
                 max_vocab = max_vocab_size[namespace]
             except KeyError:
-                max_vocab = None
+                max_vocab = -1
             if max_vocab:
                 token_counts = token_counts[:max_vocab]
                 unk_counts = token_counts[max_vocab:]  # Add these to the corresponding *unk namespace
