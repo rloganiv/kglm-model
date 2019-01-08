@@ -12,3 +12,6 @@ __pycache__
 # Dev
 
 .vscode/
+
+# AlleNLP
+results/
