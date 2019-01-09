@@ -7,7 +7,7 @@ from kglm.modules import DynamicEmbedding
 # pylint: disable=invalid-name
 
 
-class TestDynEnt(TestCase):
+class TestDynamicEmbedding(TestCase):
     def setUp(self):
         self.dim = 4
         self.r = torch.randn(self.dim, requires_grad=True)
