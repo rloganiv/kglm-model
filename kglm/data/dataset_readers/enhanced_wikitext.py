@@ -58,10 +58,10 @@ class EnhancedWikitextReader(DatasetReader):
             # Initialize fields.
             # Note: +1 here is to make these fields line up with output.
             # tail_entities = [Token('NA')] * (len(tokens) + 1)
-            z = np.zeros(shape=(len(tokens) + 1,))
+            z = np.zeros(shape=(len(tokens),))
             if self._enumerate_entities:
-                e = np.zeros(shape=(len(tokens) + 1,))
-                l = np.zeros(shape=(len(tokens) + 1,))
+                e = np.zeros(shape=(len(tokens),))
+                l = np.zeros(shape=(len(tokens),))
 
             # Fill in annotations
             for annotation in data['annotations']:

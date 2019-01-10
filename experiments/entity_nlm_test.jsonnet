@@ -16,12 +16,24 @@
                 },
             },
         },
+        "dim": 10,
+        "max_length": 10
+    },
+    "iterator": {
+        "type": "split",
+        "splitter": {
+            "type": "random",
+            "mean_split_size": 4,
+            "min_split_size": 4,
+            "max_split_size": 10,
+            "splitting_keys": ["input", "output", "z", "e", "l"],
+        },
+        "sorting_keys": [["input", "num_tokens"]],
     },
     "trainer": {
         "num_epochs": 40,
         "patience": 5,
         "grad_norm": 5.0,
-        "validation_metric": "+accuracy",
         "optimizer": {
         "type": "adam",
         "lr": 0.001
