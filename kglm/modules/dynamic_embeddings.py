@@ -1,61 +1,66 @@
-from typing import Dict, List
+import logging
+from typing import Dict, List, Optional, Tuple
 
 from overrides import overrides
 import torch
 import torch.nn.functional as F
 
-# pylint: disable=invalid-name
+logger = logging.getLogger(__name__)
 
 
 class DynamicEmbedding(torch.nn.Module):
     def __init__(self,
-                 r: torch.Tensor,
-                 dim: int) -> None:
-                 #fe_dim: int):
+                 mean_embedding: torch.Tensor,
+                 embedding_projection: torch.nn.Linear,
+                 delta_projection: torch.nn.Linear) -> None:
         super(DynamicEmbedding, self).__init__()
 
-        self.W_ent = torch.nn.Linear(in_features=dim, out_features=dim)
-        self.W_delta = torch.nn.Linear(in_features=dim, out_features=dim)
-        # self.Wdist = torch.nn.Linear(in_features=fe_dim, out_features=1)
-        self.entity_embeddings: List[torch.Tensor] = []
-        self._add_entity(r)
+        self._mean_embedding = mean_embedding
+        self._embedding_projection = embedding_projection
+        self._delta_projection = delta_projection
+
+        self.embeddings: List[torch.Tensor] = []
+        self._add_entity()
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
-                h: torch.Tensor,
-                r: torch.Tensor,
-                entity_idx: int = None) -> Dict[str, torch.Tensor]:
+                hidden: torch.Tensor,
+                entity_idx: torch.Tensor = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
 
-        logits = []
-        for e in self.entity_embeddings:
-            score = torch.dot(h, self.W_ent(e))
-            logits.append(score)
-        logits = torch.cat(logits)
-        out = {'logits': logits}
+        if len(self.embeddings) > 1:
+            embedding_tensor = self._embedding_projection(torch.stack(self.embeddings))
+            logits = torch.einsum('j,ij->i', hidden, embedding_tensor)
+        else:
+            embedding = self.embeddings[0]
+            logits = torch.dot(hidden, self._embedding_projection(embedding))
 
-        if entity_idx:
-            assert entity_idx < len(self.entity_embeddings)
-            loss = F.cross_entropy(logits, entity_idx)
-            out['loss'] = loss
+        if entity_idx is not None:
+            if entity_idx >= len(self.embeddings):
+                logger.info('idx: %i - len: %i', entity_idx, len(self.embeddings))
+                raise RuntimeError('Entity index is too great')
+            loss = F.cross_entropy(logits.view(1, -1), entity_idx.view(1))
 
-            self._update_entity(h, entity_idx)
-            if entity_idx == len(self.entity_embeddings):
-                self._add_entity(r)
+            self._update_entity(hidden, entity_idx)
+            if entity_idx == (len(self.embeddings) - 1):
+                self._add_entity()
+        else:
+            loss = None
 
-        return out
+        return logits, loss
 
     def detach(self) -> None:
-        # TODO: Check if this needs to be called after training on one batch.
-        self.entity_embeddings = [e.detach() for e in self.entity_embeddings]
+        self.embeddings = [e.detach() for e in self.embeddings]
 
-    def _add_entity(self, r: torch.Tensor) -> None:
-        u = r + 0.01 * torch.randn(r.shape, device=r.device)
-        e = u / torch.norm(u, p=2)
-        self.entity_embeddings.append(e)
+    def _add_entity(self) -> None:
+        mean = self._mean_embedding.clone()
+        noisy = mean + 0.0001 * torch.randn(self._mean_embedding.shape,
+                                         device=self._mean_embedding.device)
+        normalized = noisy / torch.norm(noisy, p=2)
+        self.embeddings.append(normalized)
 
-    def _update_entity(self, h: torch.Tensor, entity_idx: int) -> None:
-        e = self.entity_embeddings[entity_idx]
-        delta = torch.sigmoid(torch.dot(h, self.W_delta(e)))
-        u = delta * e + (1 - delta) * h
-        e_new = u / torch.norm(u, p=2)
-        self.entity_embeddings[entity_idx] = e_new
+    def _update_entity(self, hidden: torch.Tensor, entity_idx: int) -> None:
+        embedding = self.embeddings[entity_idx].clone()
+        delta = torch.sigmoid(torch.dot(hidden, self._delta_projection(embedding)))
+        new_embedding = delta * embedding + (1 - delta) * hidden
+        normalized = new_embedding / torch.norm(new_embedding, p=2)
+        self.embeddings[entity_idx] = normalized

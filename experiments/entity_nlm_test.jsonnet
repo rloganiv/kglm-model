@@ -11,32 +11,48 @@
             "token_embedders": {
                 "tokens": {
                     "type": "embedding",
-                    "embedding_dim": 300,
+                    "embedding_dim": 512,
                     "trainable": true
                 },
             },
         },
-        "dim": 10,
-        "max_length": 10
+        "encoder": {
+            "type": "lstm",
+            "input_size": 512,
+            "hidden_size": 512,
+            "stateful": true
+        },
+        "embedding_dim": 512,
+        "max_mention_length": 512,
+        "initializer": [
+            ["_entity_type_embeddings", {"type":  "orthogonal"}],
+            ["_null_entity_embedding", {"type": "orthogonal"}],
+        ],
     },
     "iterator": {
         "type": "split",
+        "batch_size": 16,
         "splitter": {
             "type": "random",
-            "mean_split_size": 4,
-            "min_split_size": 4,
-            "max_split_size": 10,
-            "splitting_keys": ["input", "output", "z", "e", "l"],
+            "mean_split_size": 50,
+            "min_split_size": 60,
+            "max_split_size": 30,
+            "splitting_keys": [
+                "inputs",
+                "outputs",
+                "entity_types",
+                "entity_ids",
+                "entity_mention_lengths"
+            ],
         },
-        "sorting_keys": [["input", "num_tokens"]],
+        "sorting_keys": [["inputs", "num_tokens"]],
     },
     "trainer": {
         "num_epochs": 40,
-        "patience": 5,
-        "grad_norm": 5.0,
+        "cuda_device": 0,
         "optimizer": {
-        "type": "adam",
-        "lr": 0.001
+            "type": "adam",
+            "lr": 3e-8
         }
     }
 }

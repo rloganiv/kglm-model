@@ -1,7 +1,7 @@
 import itertools
 import logging
 import random
-from typing import Deque, Dict, Iterable, Iterator, List, Tuple, Union
+from typing import Iterable, Iterator, List, Tuple, Union
 
 from allennlp.common.registrable import Registrable
 from allennlp.data.iterators import BucketIterator
@@ -11,7 +11,7 @@ import numpy as np
 from overrides import overrides
 import torch
 
-logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+logger = logging.getLogger(__name__)
 
 
 def get_sequence_length(tensorized_field: Union[torch.Tensor, TensorDict]) -> int:
@@ -22,6 +22,8 @@ def get_sequence_length(tensorized_field: Union[torch.Tensor, TensorDict]) -> in
         # the same sequence length.
         tensorized_subfield = next(iter(tensorized_field.values()))  # Get any value
         return get_sequence_length(tensorized_subfield)
+    else:
+        raise RuntimeError('Failed to get sequence length of one of the fields.')
 
 
 class Splitter(Registrable):
@@ -51,9 +53,9 @@ class Splitter(Registrable):
         for i, (start, stop) in enumerate(zip(split_indices[:-1], split_indices[1:])):
             sliced_tensor_dict = self._slice_tensor_dict(tensor_dict, start, stop)
             if i == 0:
-                sliced_tensor_dict['reset_state'] = True
+                sliced_tensor_dict['reset_states'] = True
             else:
-                sliced_tensor_dict['reset_state'] = False
+                sliced_tensor_dict['reset_states'] = False
             yield sliced_tensor_dict
 
     def _create_split_indices(self, sequence_length) -> List[int]:
@@ -66,7 +68,6 @@ class Splitter(Registrable):
             tensorized_field = tensor_dict[key]
             sequence_length = get_sequence_length(tensorized_field)
             sequence_lengths.append(sequence_length)
-        logger.info('Sequence lengths: %s' % sequence_lengths)
         if not all(length == sequence_lengths[0] for length in sequence_lengths):
             raise RuntimeError('Cannot split sequences of unequal lengths')
         return sequence_lengths.pop()

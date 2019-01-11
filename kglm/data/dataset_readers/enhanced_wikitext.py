@@ -44,8 +44,8 @@ class EnhancedWikitextReader(DatasetReader):
         tokens = ['@@START@@', *tokens, '@@END@@']
         tokens = [Token(x) for x in tokens]
         fields = {
-                'input': TextField(tokens[:-1], self._token_indexers),
-                'output': TextField(tokens[1:], self._token_indexers)
+                'inputs': TextField(tokens[:-1], self._token_indexers),
+                'outputs': TextField(tokens[1:], self._token_indexers)
         }
 
         # If annotations provided (e.g. during training)
@@ -56,14 +56,13 @@ class EnhancedWikitextReader(DatasetReader):
         if 'annotations' in data:
 
             # Initialize fields.
-            # Note: +1 here is to make these fields line up with output.
-            # tail_entities = [Token('NA')] * (len(tokens) + 1)
-            z = np.zeros(shape=(len(tokens),))
+            entity_types = np.zeros(shape=(len(tokens),))
             if self._enumerate_entities:
-                e = np.zeros(shape=(len(tokens),))
-                l = np.zeros(shape=(len(tokens),))
+                entity_ids = np.zeros(shape=(len(tokens),))
+                entity_mention_lengths = np.zeros(shape=(len(tokens),))
 
             # Fill in annotations
+            annotations = data['annotations']
             for annotation in data['annotations']:
 
                 if self._enumerate_entities:
@@ -71,16 +70,16 @@ class EnhancedWikitextReader(DatasetReader):
                     start, end = annotation['span']
                     length = end - start
 
-                for i in range(*annotation['span']):
-                    z[i] = 1
-                    if self._enumerate_entities:
-                        e[i] = len(seen_entities) - 1
-                        l[i] = length
-                        length -= 1
+                    for i in range(*annotation['span']):
+                        entity_types[i+1] = 1
+                        if self._enumerate_entities:
+                            entity_ids[i+1] = len(seen_entities) - 1
+                            entity_mention_lengths[i+1] = length
+                            length -= 1
 
-            fields['z'] = ArrayField(z[1:])
+            fields['entity_types'] = ArrayField(entity_types[1:])
             if self._enumerate_entities:
-                fields['e'] = ArrayField(e[1:])
-                fields['l'] = ArrayField(l[1:])
+                fields['entity_ids'] = ArrayField(entity_ids[1:])
+                fields['entity_mention_lengths'] = ArrayField(entity_mention_lengths[1:])
 
         return Instance(fields)
