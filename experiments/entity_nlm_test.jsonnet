@@ -11,45 +11,44 @@
             "token_embedders": {
                 "tokens": {
                     "type": "embedding",
-                    "embedding_dim": 512,
+                    "embedding_dim": 10,
                     "trainable": true
                 },
             },
         },
         "encoder": {
             "type": "lstm",
-            "input_size": 512,
-            "hidden_size": 512,
+            "input_size": 10,
+            "hidden_size": 10,
             "stateful": true
         },
-        "embedding_dim": 512,
-        "max_mention_length": 512,
+        "embedding_dim": 10,
+        "max_mention_length": 100,
         "initializer": [
-            ["_entity_type_embeddings", {"type":  "orthogonal"}],
-            ["_null_entity_embedding", {"type": "orthogonal"}],
+            ["_dummy_entity_embedding", {"type":  "xavier_uniform"}],
+            ["_dummy_context_embedding", {"type": "xavier_uniform"}],
         ],
     },
     "iterator": {
         "type": "split",
-        "batch_size": 16,
+        "batch_size": 2,
         "splitter": {
             "type": "random",
-            "mean_split_size": 50,
-            "min_split_size": 60,
-            "max_split_size": 30,
+            "mean_split_size": 10,
+            "min_split_size": 12,
+            "max_split_size": 8,
             "splitting_keys": [
                 "inputs",
                 "outputs",
                 "entity_types",
                 "entity_ids",
-                "entity_mention_lengths"
+                "mention_lengths"
             ],
         },
         "sorting_keys": [["inputs", "num_tokens"]],
     },
     "trainer": {
         "num_epochs": 40,
-        "cuda_device": 0,
         "optimizer": {
             "type": "adam",
             "lr": 3e-8

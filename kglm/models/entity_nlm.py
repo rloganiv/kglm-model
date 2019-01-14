@@ -4,7 +4,7 @@ Implementation of the EntityNLM from: https://arxiv.org/abs/1708.00781
 import logging
 from typing import Dict, List, Optional, Union
 
-from allennlp.nn.util import get_text_field_mask, sequence_cross_entropy_with_logits
+from allennlp.nn.util import get_text_field_mask
 from allennlp.data.vocabulary import Vocabulary
 from allennlp.models import Model
 from allennlp.modules.text_field_embedders import TextFieldEmbedder
@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 DynamicEmbeddingList = List[DynamicEmbedding]  # pylint: disable=invalid-name
 StateDict = Dict[str, Union[torch.Tensor, DynamicEmbeddingList]]  # pylint: disable=invalid-name
 
+
+def scalar_cross_entropy(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    logits = logits.view(1, -1)
+    target = target.view(1)
+    return F.cross_entropy(logits, target)
 
 @Model.register('entitynlm')
 class EntityNLM(Model):
@@ -58,26 +63,35 @@ class EntityNLM(Model):
 
         self._state: Optional[StateDict] = None
 
-        # Entity type log probability is proportional to a bilinear form applied to the current
-        # hidden state and the entity type embedding. Currently there are only two entity types:
-        # entities and non-entities. We compute the bilinear form by first projecting the entity
-        # type embeddings (achieved by the linear layer), then computing the dot product with
-        # the current hidden state (by using einsum).
-        self._entity_type_embeddings = Parameter(torch.empty(2, embedding_dim))
+        # For entity type prediction
         self._entity_type_projection = torch.nn.Linear(in_features=embedding_dim,
-                                                       out_features=embedding_dim,
+                                                       out_features=2,
                                                        bias=False)
 
-        self._null_entity_embedding = Parameter(torch.empty(1, embedding_dim))
+        # For entity prediction / updates
+        self._dummy_entity_embedding = Parameter(torch.empty(1, embedding_dim))
         self._entity_projection = torch.nn.Linear(in_features=embedding_dim,
                                                   out_features=embedding_dim,
                                                   bias=False)
+        self._distance_scalar = Parameter(torch.tensor(1e-6))  # pylint: disable=not-callable
         self._delta_projection = torch.nn.Linear(in_features=embedding_dim,
                                                  out_features=embedding_dim,
                                                  bias=False)
 
-        # TODO: Entity distance features - probably going to need to define a maximum cutoff...
-        #self._length_projection = torch.nn.Linear(in_features=2*dim, out_features=max_length)
+        # For mention length prediction
+        self._length_projection = torch.nn.Linear(in_features=2*embedding_dim,
+                                                  out_features=max_mention_length)
+
+        # For next word prediction
+        self._dummy_context_embedding = Parameter(torch.empty(1, embedding_dim))
+        self._entity_output_projection = torch.nn.Linear(in_features=embedding_dim,
+                                                         out_features=embedding_dim,
+                                                         bias=False)
+        self._context_output_projection = torch.nn.Linear(in_features=embedding_dim,
+                                                          out_features=embedding_dim,
+                                                          bias=False)
+        self._vocab_projection = torch.nn.Linear(in_features=embedding_dim,
+                                                 out_features=vocab.get_vocab_size("tokens"))
 
         initializer(self)
 
@@ -88,9 +102,9 @@ class EntityNLM(Model):
                 outputs: Dict[str, torch.Tensor] = None,
                 entity_types: torch.Tensor = None,
                 entity_ids: torch.Tensor = None,
-                entity_mention_lengths: torch.Tensor = None)-> Dict[str, torch.Tensor]:
+                mention_lengths: torch.Tensor = None)-> Dict[str, torch.Tensor]:
         # TODO: Inference
-        batch_size, sequence_length = inputs['tokens'].shape
+        batch_size = inputs['tokens'].shape[0]
 
         if reset_states:
             # Seq2SeqEncoder tracks its own state, it just needs to know to reset.
@@ -109,18 +123,18 @@ class EntityNLM(Model):
             assert outputs is not None
             assert entity_types is not None
             assert entity_ids is not None
-            assert entity_mention_lengths is not None
+            assert mention_lengths is not None
 
             # TODO: Make ArrayField able to use int dtypes.
             entity_types = entity_types.long()
             entity_ids = entity_ids.long()
-            entity_mention_lengths = entity_mention_lengths.long()
+            mention_lengths = mention_lengths.long()
 
             loss = self._compute_loss(inputs=inputs,
-                                    outputs=outputs,
-                                    entity_types=entity_types,
-                                    entity_ids=entity_ids,
-                                    entity_mention_lengths=entity_mention_lengths)
+                                      outputs=outputs,
+                                      entity_types=entity_types,
+                                      entity_ids=entity_ids,
+                                      mention_lengths=mention_lengths)
             out['loss'] = loss
 
         return out
@@ -130,7 +144,7 @@ class EntityNLM(Model):
                       outputs: Dict[str, torch.Tensor],
                       entity_types: torch.Tensor,
                       entity_ids: torch.Tensor,
-                      entity_mention_lengths: torch.Tensor) -> torch.Tensor:
+                      mention_lengths: torch.Tensor) -> torch.Tensor:
 
         assert self._state is not None
 
@@ -140,62 +154,105 @@ class EntityNLM(Model):
         embeddings = self._text_field_embedder(inputs)
         encoded = self._encoder(embeddings, mask)
 
-        projected_type_embeddings = self._entity_type_projection(self._entity_type_embeddings)
-        # TODO: Investigate if this slows things down (could use a different BLAS function if so)
-        # THIS DOES NOT WORK - TYPES ALSO ARE ONLY PREDICTED WHEN L=1
-        type_logits = torch.einsum('ijk,lk->ijl', encoded, projected_type_embeddings).contiguous()
-        total_type_loss = sequence_cross_entropy_with_logits(type_logits, entity_types, mask, average=None).sum()
-
-        total_entity_loss = 0.0
-        total_length_loss = 0.0
-        for i in range(batch_size):
-            dynamic_embedding = self._state['dynamic_embeddings'][i]
-            for j in range(sequence_length):
+        total_loss = 0.0
+        for j in range(sequence_length):
+            for i in range(batch_size):
                 if mask[i, j] == 0:
                     continue
 
-                # current_token_embedding = embeddings[i,j]
-                # current_type = entity_types[i,j]
-                # current_entity_id = entity_ids[i,j]
-                # current_length = entity_mention_lengths[i,j]
-                # next_token_embedding = embeddings[i,j+1]
-                # next_type = entity_types[i,j+1]
-                # next_entity_id = entity_ids[i,j+1]
-                # next_length = entity_mention_lengths[i,j+1]
+                dynamic_embedding = self._state['dynamic_embeddings'][i]
 
-                # Following Yangfeng's code we start by updating entities if needed
+                # Note: We need to access self._state to prevent issues when continuing sequences
+                # across splits.
+                current_entity_type = self._state['entity_types'][i]
+                current_entity_id = self._state['entity_ids'][i]
+                current_mention_length = self._state['mention_lengths'][i]
+                context = self._state['context'][i]
+
+                next_token = outputs['tokens'][i, j]
+                next_entity_type = entity_types[i, j]
+                next_entity_id = entity_ids[i, j]
+                next_mention_length = mention_lengths[i, j]
 
                 hidden = encoded[i, j]
-                # We only measure entity and length prediction loss when an entity is first observed.
-                # (e.g. not when length deterministically decrements).
-                if (self._state['prev_mention_lengths'][i] == 1) and (entity_types[i, j] == 1):
-                    _, entity_loss = dynamic_embedding(hidden, entity_ids[i, j])
-                    total_entity_loss += entity_loss
 
-        total_type_loss = total_type_loss / mask.sum()
-        total_entity_loss = total_entity_loss / mask.sum()
+                zero = torch.tensor(0, device=hidden.device)  # pylint: disable=not-callable
 
-        loss = (total_type_loss + total_entity_loss) / 2
+                # Update entity at end of mention (This could also go at the end...)
+                if current_entity_type > 0 and current_entity_id > 0:
+                    if current_entity_id == len(dynamic_embedding.embeddings):
+                        dynamic_embedding.add_entity(j)
+                    dynamic_embedding.update_entity(hidden, current_entity_id, j)
 
-        return loss
+                # Make entity/type predictions if we are not currently in the middle of a mention
+                if  current_mention_length == 1:
+
+                    # Next entity type prediction
+                    entity_type_logits = self._entity_type_projection(hidden)
+                    entity_type_loss = scalar_cross_entropy(entity_type_logits, next_entity_type)
+                    total_loss += entity_type_loss
+
+                    if next_entity_type == 1:
+
+                        # Entity prediction
+                        entity_logits = dynamic_embedding(hidden, j)
+                        if next_entity_id < len(dynamic_embedding.embeddings):
+                            entity_loss = scalar_cross_entropy(entity_logits, next_entity_id)
+                        else:
+                            entity_loss = scalar_cross_entropy(entity_logits, zero)  # Weird...
+                        total_loss += entity_loss
+
+                        # Length prediction
+                        if next_entity_id < len(dynamic_embedding.embeddings):
+                            embedding = dynamic_embedding.embeddings[next_entity_id].clone().squeeze()
+                        else:
+                            embedding = dynamic_embedding.embeddings[0].clone().squeeze()
+                        concatenated = torch.cat((hidden, embedding))
+                        length_logits = self._length_projection(concatenated)
+                        length_loss = scalar_cross_entropy(length_logits, next_mention_length)
+                        total_loss += length_loss
+
+                # Word prediction
+                if next_entity_type == 1:
+                    if next_entity_id < len(dynamic_embedding.embeddings):
+                        entity_embedding = dynamic_embedding.embeddings[next_entity_id].clone()
+                    else:
+                        entity_embedding = dynamic_embedding.embeddings[0].clone()
+                    combined = hidden + self._entity_output_projection(entity_embedding).squeeze()
+                else:
+                    combined = hidden + self._context_output_projection(context).squeeze()
+                token_logits = self._vocab_projection(combined)
+                token_loss = scalar_cross_entropy(token_logits, next_token)
+                total_loss += token_loss
+
+            self._state['entity_types'] = entity_types[:, j]
+            self._state['entity_ids'] = entity_ids[:, j]
+            self._state['mention_lengths'] = mention_lengths[:, j]
+            self._state['context'] = encoded[:, j]
+
+        return total_loss
 
     def _reset_states(self, batch_size: int) -> None:
         self._state = {}
 
-        # Initialize dynamic embeddings
-        mean_embedding = self._entity_type_embeddings[1]
+        # Initialize dynamic embeddings.
         dynamic_embeddings: List[DynamicEmbedding] = []
         for _ in range(batch_size):
-            dynamic_embedding = DynamicEmbedding(mean_embedding=mean_embedding,
+            dynamic_embedding = DynamicEmbedding(mean_embedding=self._dummy_entity_embedding,
+                                                 distance_scalar=self._distance_scalar,
                                                  embedding_projection=self._entity_projection,
                                                  delta_projection=self._delta_projection)
             dynamic_embeddings.append(dynamic_embedding)
-
         self._state['dynamic_embeddings'] = dynamic_embeddings
 
-        self._state['prev_mention_lengths'] = torch.ones(batch_size, dtype=torch.int64)
-        self._state['prev_entity_ids'] = torch.zeros(batch_size, dtype=torch.int64)
+        # Initialize metadata - these are the `curr_` values in the original implementation,
+        # applied to the <START> token.
+        self._state['entity_types'] = torch.zeros(batch_size, dtype=torch.int64)
+        self._state['entity_ids'] = torch.zeros(batch_size, dtype=torch.int64)
+        self._state['mention_lengths'] = torch.ones(batch_size, dtype=torch.int64)
+        self._state['context'] = self._dummy_context_embedding.repeat(batch_size, 1)
 
     def _detach_states(self):
         for dynamic_embedding in self._state['dynamic_embeddings']:
             dynamic_embedding.detach()
+        self._state['context'] = self._state['context'].detach()

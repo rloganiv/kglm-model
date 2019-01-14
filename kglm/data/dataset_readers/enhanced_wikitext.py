@@ -59,10 +59,9 @@ class EnhancedWikitextReader(DatasetReader):
             entity_types = np.zeros(shape=(len(tokens),))
             if self._enumerate_entities:
                 entity_ids = np.zeros(shape=(len(tokens),))
-                entity_mention_lengths = np.zeros(shape=(len(tokens),))
+                mention_lengths = np.zeros(shape=(len(tokens),))
 
             # Fill in annotations
-            annotations = data['annotations']
             for annotation in data['annotations']:
 
                 if self._enumerate_entities:
@@ -73,13 +72,13 @@ class EnhancedWikitextReader(DatasetReader):
                     for i in range(*annotation['span']):
                         entity_types[i+1] = 1
                         if self._enumerate_entities:
-                            entity_ids[i+1] = len(seen_entities) - 1
-                            entity_mention_lengths[i+1] = length
+                            entity_ids[i+1] = len(seen_entities)
+                            mention_lengths[i+1] = length
                             length -= 1
 
             fields['entity_types'] = ArrayField(entity_types[1:])
             if self._enumerate_entities:
                 fields['entity_ids'] = ArrayField(entity_ids[1:])
-                fields['entity_mention_lengths'] = ArrayField(entity_mention_lengths[1:])
+                fields['mention_lengths'] = ArrayField(mention_lengths[1:])
 
         return Instance(fields)
