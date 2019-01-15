@@ -261,3 +261,4 @@ class SplitIterator(BucketIterator):
 
             # Increment epoch tracker
             self._epochs[key] = epoch + 1
+
