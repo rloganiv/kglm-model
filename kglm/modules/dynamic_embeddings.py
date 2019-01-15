@@ -1,77 +1,214 @@
 import logging
-from typing import List
+from typing import Dict, Optional
 
+from allennlp.nn import InitializerApplicator
 from overrides import overrides
 import torch
+from torch.nn import Module, Parameter
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
 
-class DynamicEmbedding(torch.nn.Module):
+class DynamicEmbedding(Module):
+    """Dynamic embedding module.
+
+    PyTorch friendly implementation of the dynamic entity embeddings from:
+        Cite entity_nlm
+    Designed so that entity lookups and updates can be efficiently done in batch.
+    The tricks are:
+        1. To pre-allocate a tensor for storing the entity embeddings on each reset.
+        2. To use logical indexing to perform the updates.
+
+    Parameters
+    ----------
+    embedding_dim : ``int``
+        Dimension of the entity embeddings.
+    max_embeddings : ``int``
+        Maximum number of allowed embeddings.
+    initializer : ``InitializerApplicator``, optional (default=``InitializerApplicator()``)
+        Initializes the initial embedding vector.
+    """
     def __init__(self,
-                 mean_embedding: torch.Tensor,
-                 distance_scalar: torch.Tensor,
-                 embedding_projection: torch.nn.Linear,
-                 delta_projection: torch.nn.Linear) -> None:
+                 embedding_dim: int,
+                 max_embeddings: int) -> None:
         super(DynamicEmbedding, self).__init__()
 
-        self._mean_embedding = mean_embedding
-        self._distance_scalar = distance_scalar
-        self._embedding_projection = embedding_projection
-        self._delta_projection = delta_projection
+        self._embedding_dim = embedding_dim
+        self._max_embeddings = max_embeddings
+        self._initial_embedding = Parameter(F.normalize(torch.randn(embedding_dim), dim=0))
 
-        self.embeddings: List[torch.Tensor] = []
-        self.last_seen: List[int] = []
-        self.add_entity(0)
+        self._distance_scalar = Parameter(torch.tensor(1e-6))  # pylint: disable=E1102
+        self._embedding_projection = torch.nn.Linear(in_features=embedding_dim,
+                                                     out_features=embedding_dim,
+                                                     bias=False)
+        self._delta_projection = torch.nn.Linear(in_features=embedding_dim,
+                                                 out_features=embedding_dim,
+                                                 bias=False)
+
+        self.embeddings: torch.Tensor = None  # Storage for embeddings
+        self.num_embeddings: torch.Tensor = None  # Tracks how many embeddings are in use
+        self.last_seen: torch.Tensor = None  # Tracks last time embedding was seen
+
+    def reset_states(self, batch_size: int) -> None:
+        """
+        Resets the DynamicEmbedding module for use on a new sequence.
+
+        Parameters
+        ----------
+        batch_size : ``int``
+            The batch_size of the new sequence.
+        """
+        self.embeddings = self._initial_embedding.new_zeros((batch_size, self._max_embeddings, self._embedding_dim))
+        self.num_embeddings = self._initial_embedding.new_zeros(batch_size, dtype=torch.int64)
+        self.last_seen = self._initial_embedding.new_zeros((batch_size, self._max_embeddings),
+                                                           dtype=torch.int64)
+        self.add_embeddings(0)
+
+    def detach_states(self) -> None:
+        """
+        Detaches embeddings from the computation graph. This can be neccesary when working with
+        long sequences.
+        """
+        self.embeddings = self.embeddings.detach()
+
+    def add_embeddings(self,
+                       timestep: int,
+                       mask: Optional[torch.Tensor] = None) -> None:
+        """
+        Adds new embeddings to the current collection of embeddings.
+
+        Parameters
+        ----------
+        timestep: ``int``, (optional)
+            The current time step.
+        mask: ``Optional[torch.Tensor]``
+            A tensor of shape ``(batch_size)`` indicating which sequences to add a new dynamic
+            embedding to. If no mask is provided then a new embedding is added for each sequence
+            in the batch.
+        """
+        if mask is None:
+            batch_size = self.num_embeddings.shape[0]
+            mask = self.num_embeddings.new_ones(batch_size, dtype=torch.uint8)
+        elif mask.sum() == 0:
+            return
+
+        # Embeddings are initialized by adding a small amount of random noise to the initial
+        # embedding tensor then normalizing.
+        initial = self._initial_embedding.repeat((mask.sum(), 1, 1))
+        noise = 1e-4 * torch.randn_like(initial)
+        unnormalized = initial + noise
+        normalized = F.normalize(unnormalized, dim=-1)
+
+        self.embeddings[mask, self.num_embeddings[mask]] = normalized.squeeze()
+        self.last_seen[mask, self.num_embeddings[mask]] = timestep
+        self.num_embeddings[mask] += 1
+
+    def update_embeddings(self,
+                          hidden: torch.Tensor,
+                          update_indices: torch.Tensor,
+                          timestep: int,
+                          mask: Optional[torch.Tensor] = None) -> None:
+        """
+        Updates existing embeddings.
+
+        Parameters
+        ----------
+        hidden : ``torch.Tensor``
+            A tensor of shape ``(batch_size, embedding_dim)`` used to update existing embeddings.
+        update_indices : ``torch.Tensor``
+            A tensor of shape ``(batch_size)`` whose elements specify which of the existing
+            embeddings to update. Only one embedding per sequence can be updated at a time.
+        timestep : ``int``
+            The current time step.
+        mask: ``Optional[torch.Tensor]``
+            A tensor of shape ``(batch_size)`` indicating which sequences in the batch to update
+            the dynamic embeddings for. If a mask is not provided then all sequences will be
+            updated.
+        """
+        if mask is None:
+            batch_size = self.num_embeddings.shape[0]
+            mask = self.num_embeddings.new_ones(batch_size, dtype=torch.uint8)
+        elif mask.sum() == 0:
+            return
+        else:
+            batch_size = mask.sum()
+
+        embeddings = self.embeddings[mask, update_indices[mask]]
+        hidden = hidden.clone()[mask]
+
+        projected = self._delta_projection(embeddings)
+        score = torch.bmm(hidden.view(batch_size, 1, -1),
+                          projected.view(batch_size, -1, 1))
+        score = score.view(batch_size, 1)
+        delta = torch.sigmoid(score)
+
+        unnormalized = delta * embeddings + (1 - delta) * hidden
+        normalized = F.normalize(unnormalized, dim=-1)
+
+        self.embeddings[mask, update_indices[mask]] = normalized.squeeze()  # Squeeze in case batch_size is 1
+        self.last_seen[mask, update_indices[mask]] = timestep
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
                 hidden: torch.Tensor,
-                timestep: int) -> torch.Tensor:
-        """Computes logits for entity id prediction.
+                target: Optional[torch.Tensor] = None,
+                mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """
+        Computes logits over the existing embeddings given the current hidden state. If target ids are provided then a loss is returned as well.
 
         Parameters
         ----------
-        hidden : ``torch.Tensor(shape=embedding_dim)``
-            Current hidden state.
+        hidden : ``torch.Tensor``
+            A tensor with shape ``(batch_size, embedding_dim)`` containing the current hidden states.
+        target : ``Optional[torch.Tensor]``
+            An optional tensor with shape ``(batch_size,)`` containing the target ids.
+        mask : ``Optional[torch.Tensor]``
+            An optional tensor with shape ``(batch_size,)`` indicating which terms to include in the final loss.
 
         Returns
         -------
-        logits : ``torch.Tensor(shape=num_entities)``
-            Logits corresponding to which entity is predicted.
+        An output dictionary consisting of:
+        logits : ``torch.Tensor``
+            The entity prediction logits.
+        logit_mask : ``torch.Tensor``
+            Mask for the logit tensor.
+        loss : ``Optional[torch.Tensor]``
+            The loss.
         """
-        if len(self.embeddings) > 1:
-            embedding_tensor = self._embedding_projection(torch.cat(self.embeddings))
-            embedding_feature = torch.einsum('j,ij->i', hidden, embedding_tensor)
+        if mask is None:
+            batch_size = self.num_embeddings.shape[0]
+            mask = self.num_embeddings.new_ones(batch_size, dtype=torch.uint8)
+        elif mask.sum() == 0:
+            return {'loss': 0.0}
         else:
-            embedding = self.embeddings[0]
-            embedding_feature = torch.dot(hidden, self._embedding_projection(embedding).squeeze())
+            batch_size = mask.sum()
 
-        last_seen = torch.tensor(self.last_seen, dtype=torch.float32, device=hidden.device)  # pylint: disable=not-callable
-        distance_feature = torch.exp(self._distance_scalar * (timestep - last_seen))
+        embeddings = self.embeddings[mask]
+        projected_embeddings = self._embedding_projection(embeddings)
+        hidden = hidden[mask].unsqueeze(1)
+        bilinear = torch.bmm(hidden, projected_embeddings.transpose(1, 2))
+        bilinear = bilinear.view(batch_size, -1)
+        distance_score = torch.exp(self._distance_scalar * self.last_seen[mask].float())
+        logits = bilinear + distance_score
 
-        logits = embedding_feature + distance_feature
+        num_embeddings = self.num_embeddings[mask].unsqueeze(1)
+        arange = torch.arange(self._max_embeddings).repeat(mask.sum(), 1)
+        logit_mask = arange.lt(num_embeddings)
 
-        return logits
+        out = {
+            'logits': logits,
+            'logit_mask': logit_mask
+        }
 
-    def detach(self) -> None:
-        self.embeddings = [e.detach() for e in self.embeddings]
+        if target is not None:
+            # Is there a better way to do this?
+            logits[logit_mask != 1] = -float('inf')
+            target = target[mask]
+            loss = F.cross_entropy(logits, target, reduction='none')
+            loss = loss.sum()
+            if loss == float('inf'):
+                import pdb; pdb.set_trace()
+            out['loss'] = loss
 
-    def add_entity(self, timestep: int) -> None:
-        mean = self._mean_embedding.clone()
-        noisy = mean + 0.0001 * torch.randn(self._mean_embedding.shape,
-                                            device=self._mean_embedding.device)
-        normalized = noisy / torch.norm(noisy, p=2)
-        self.embeddings.append(normalized)
-        self.last_seen.append(timestep)
-
-    def update_entity(self,
-                      hidden: torch.Tensor,
-                      entity_idx: torch.Tensor,
-                      timestep: int) -> None:
-        embedding = self.embeddings[entity_idx].clone()
-        delta = torch.sigmoid(torch.dot(hidden, self._delta_projection(embedding).squeeze()))
-        new_embedding = delta * embedding + (1 - delta) * hidden
-        normalized = new_embedding / torch.norm(new_embedding, p=2)
-        self.embeddings[entity_idx] = normalized
-        self.last_seen[entity_idx] = timestep
+        return out

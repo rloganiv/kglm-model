@@ -24,6 +24,7 @@
         },
         "embedding_dim": 10,
         "max_mention_length": 100,
+        "max_embeddings": 1000,
         "initializer": [
             ["_dummy_entity_embedding", {"type":  "xavier_uniform"}],
             ["_dummy_context_embedding", {"type": "xavier_uniform"}],
@@ -38,14 +39,13 @@
             "min_split_size": 12,
             "max_split_size": 8,
             "splitting_keys": [
-                "inputs",
-                "outputs",
+                "tokens",
                 "entity_types",
                 "entity_ids",
                 "mention_lengths"
             ],
         },
-        "sorting_keys": [["inputs", "num_tokens"]],
+        "sorting_keys": [["tokens", "num_tokens"]],
     },
     "trainer": {
         "num_epochs": 40,

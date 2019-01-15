@@ -5,12 +5,14 @@ from typing import Any, Dict, Iterable, Set
 import json
 
 from allennlp.data.dataset_readers import DatasetReader
-from allennlp.data.fields import ArrayField, TextField
+from allennlp.data.fields import TextField
 from allennlp.data.instance import Instance
 from allennlp.data.token_indexers import TokenIndexer, SingleIdTokenIndexer
 from allennlp.data.tokenizers import Token
 import numpy as np
 from overrides import overrides
+
+from kglm.data.fields import SequentialArrayField
 
 
 def _flatten(nested: Iterable[str]):
@@ -44,8 +46,7 @@ class EnhancedWikitextReader(DatasetReader):
         tokens = ['@@START@@', *tokens, '@@END@@']
         tokens = [Token(x) for x in tokens]
         fields = {
-                'inputs': TextField(tokens[:-1], self._token_indexers),
-                'outputs': TextField(tokens[1:], self._token_indexers)
+                'tokens': TextField(tokens, self._token_indexers),
         }
 
         # If annotations provided (e.g. during training)
@@ -70,15 +71,16 @@ class EnhancedWikitextReader(DatasetReader):
                     length = end - start
 
                     for i in range(*annotation['span']):
+                        # Note: +1 offset to account for start token.
                         entity_types[i+1] = 1
                         if self._enumerate_entities:
                             entity_ids[i+1] = len(seen_entities)
                             mention_lengths[i+1] = length
                             length -= 1
 
-            fields['entity_types'] = ArrayField(entity_types[1:])
+            fields['entity_types'] = SequentialArrayField(entity_types, dtype=np.uint8)
             if self._enumerate_entities:
-                fields['entity_ids'] = ArrayField(entity_ids[1:])
-                fields['mention_lengths'] = ArrayField(mention_lengths[1:])
+                fields['entity_ids'] = SequentialArrayField(entity_ids, dtype=np.int64)
+                fields['mention_lengths'] = SequentialArrayField(mention_lengths, dtype=np.int64)
 
         return Instance(fields)

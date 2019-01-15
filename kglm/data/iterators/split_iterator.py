@@ -53,9 +53,9 @@ class Splitter(Registrable):
         for i, (start, stop) in enumerate(zip(split_indices[:-1], split_indices[1:])):
             sliced_tensor_dict = self._slice_tensor_dict(tensor_dict, start, stop)
             if i == 0:
-                sliced_tensor_dict['reset_states'] = True
+                sliced_tensor_dict['reset'] = True
             else:
-                sliced_tensor_dict['reset_states'] = False
+                sliced_tensor_dict['reset'] = False
             yield sliced_tensor_dict
 
     def _create_split_indices(self, sequence_length) -> List[int]:
@@ -262,3 +262,5 @@ class SplitIterator(BucketIterator):
             # Increment epoch tracker
             self._epochs[key] = epoch + 1
 
+    def get_num_batches(self, instances: Iterable[Instance]) -> float:
+        return float("inf")
