@@ -2,7 +2,7 @@
 Implementation of the EntityNLM from: https://arxiv.org/abs/1708.00781
 """
 import logging
-from typing import Dict, List, Optional, Union
+from typing import Dict, Optional, Union
 
 from allennlp.nn.util import get_text_field_mask
 from allennlp.data.vocabulary import Vocabulary
@@ -31,17 +31,20 @@ class EntityNLM(Model):
 
     Parameters
     ----------
-    vocab : Vocabulary
-    dim : int
-        Dimension of embeddings.
-    max_mention_length : int
-        Maximum entity mention length.
-    max_embeddings : int
-        Maximum number of embeddings.
-    text_field_embedder : TextFieldEmbedder
+    vocab : ``Vocabulary``
+        The model vocabulary.
+    text_field_embedder : ``TextFieldEmbedder``
         Used to embed tokens.
-    initializer : InitializerApplicator
-        Used to initialize parameters.
+    encoder : ``Seq2SeqEncoder``
+        Used to encode the sequence of token embeddings.
+    embedding_dim : ``int``
+        The dimension of entity / length embeddings. Should match the encoder output size.
+    max_mention_length : ``int``
+        Maximum entity mention length.
+    max_embeddings : ``int``
+        Maximum number of embeddings.
+    initializer : ``InitializerApplicator``, optional
+        Used to initialize model parameters.
     """
     def __init__(self,
                  vocab: Vocabulary,
@@ -92,6 +95,36 @@ class EntityNLM(Model):
                 entity_ids: Optional[torch.Tensor] = None,
                 mention_lengths: Optional[torch.Tensor] = None,
                 reset: bool = False)-> Dict[str, torch.Tensor]:
+        """
+        Computes the loss during training / validation.
+
+        TODO: Compute perplexity for evaluation. Not sure if sample generation should also go
+        here.
+
+        Parameters
+        ----------
+        tokens : ``Dict[str, torch.Tensor]``
+            A tensor of shape ``(batch_size, sequence_length)`` containing the sequence of
+            tokens.
+        entity_types : ``torch.Tensor``
+            A tensor of shape ``(batch_size, sequence_length)`` indicating whether or not the
+            corresponding token belongs to a mention.
+        entity_ids : ``torch.Tensor``
+            A tensor of shape ``(batch_size, sequence_length)`` containing the ids of the
+            entities the corresponding token is mentioning.
+        mention_lengths : ``torch.Tensor``
+            A tensor of shape ``(batch_size, sequence_length)`` tracking how many remaining
+            tokens (including the current one) there are in the mention.
+        reset : ``bool``
+            Whether or not to reset the model's state. This should be done at the start of each
+            new sequence.
+
+        Returns
+        -------
+        An output dictionary consisting of:
+        loss : ``torch.Tensor``
+            The combined loss.
+        """
         batch_size = tokens['tokens'].shape[0]
 
         if reset:
@@ -117,8 +150,41 @@ class EntityNLM(Model):
                       tokens: Dict[str, torch.Tensor],
                       entity_types: torch.Tensor,
                       entity_ids: torch.Tensor,
-                      mention_lengths: torch.Tensor) -> torch.Tensor:
-        # The model state is updated at the end of every split. In order to
+                      mention_lengths: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Performs the forward pass to calculate the loss on a chunk of training data.
+
+        Parameters
+        ----------
+        tokens : ``Dict[str, torch.Tensor]``
+            A tensor of shape ``(batch_size, sequence_length)`` containing the sequence of
+            tokens.
+        entity_types : ``torch.Tensor``
+            A tensor of shape ``(batch_size, sequence_length)`` indicating whether or not the
+            corresponding token belongs to a mention.
+        entity_ids : ``torch.Tensor``
+            A tensor of shape ``(batch_size, sequence_length)`` containing the ids of the
+            entities the corresponding token is mentioning.
+        mention_lengths : ``torch.Tensor``
+            A tensor of shape ``(batch_size, sequence_length)`` tracking how many remaining
+            tokens (including the current one) there are in the mention.
+
+        Returns
+        -------
+        An output dictionary consisting of:
+        entity_type_loss : ``torch.Tensor``
+            The loss of entity type predictions.
+        entity_id_loss : ``torch.Tensor``
+            The loss of entity id predictions.
+        mention_length_loss : ``torch.Tensor``
+            The loss of mention length predictions.
+        vocab_loss : ``torch.Tensor``
+            The loss of vocab word predictions.
+        loss : ``torch.Tensor``
+            The combined loss.
+        """
+        # The model state allows us to recover the last timestep from the previous chunk in the
+        # split. If it does not exist, then we are processing a new batch.
         if self._state is not None:
             tokens = {field: torch.cat((self._state['prev_tokens'][field], tokens[field]), dim=1) for field in tokens}
             entity_types = torch.cat((self._state['prev_entity_types'], entity_types), dim=1)
@@ -141,6 +207,10 @@ class EntityNLM(Model):
         mention_length_loss = 0.0
         vocab_loss = 0.0
 
+        # We dynamically add entities and update their representations in sequence. The following
+        # loop is designed to imitate as closely as possible lines 219-313 in:
+        #   https://github.com/jiyfeng/entitynlm/blob/master/entitynlm.h
+        # while still being carried out in batch.
         for timestep in range(sequence_length - 1):
 
             current_entity_types = entity_types[:, timestep]
@@ -154,8 +224,9 @@ class EntityNLM(Model):
             next_mask = mask[:, timestep + 1]
             next_tokens = tokens['tokens'][:, timestep + 1]
 
-            # A new entity embedding is added if the current entity id matches the number of
-            # existing embeddings for the sequence.
+            # We add new entities to any sequence where the current entity id matches the number of
+            # embeddings that currently exist for that sequence (this means we need a new one since
+            # there is an additional dummy embedding).
             new_entities = current_entity_ids == self._dynamic_embeddings.num_embeddings
             self._dynamic_embeddings.add_embeddings(timestep, new_entities)
 
@@ -165,34 +236,36 @@ class EntityNLM(Model):
                                                        timestep=timestep,
                                                        mask=current_entity_types)
 
-            print(self._dynamic_embeddings.embeddings)
-
-            # This is kind of stupid, but because we only update when the current entity id equals
-            # the number of entities we do not have a well defined embeddings when next entity is a
-            # new entity. The approach in the original code is to use the null embedding in this
-            # case.
-            next_entity_ids = next_entity_ids.clone()  # Prevent manipulating source data...
+            # This part is a little counter-intuitive. Because the above code adds a new embedding
+            # whenever the **current** entity id matches the number of embeddings, we are one
+            # embedding short if the **next** entity id has not been seen before. To deal with
+            # this, we use the null embedding (e.g. the first one we created) as a proxy for the
+            # new entity's embedding (since it is on average what the new entity's embedding will
+            # be initialized in the next timestep). It might seem more sensible to just create the
+            # embedding now, but we cannot because of the subsequent update (since this would
+            # require access to the **next** hidden state, which does not exist during generation).
+            next_entity_ids = next_entity_ids.clone()  # This prevents mutating the source data.
             next_entity_ids[next_entity_ids == self._dynamic_embeddings.num_embeddings] = 0
 
-            # The only time we predict entity types, ids and mention lengths is when the current
-            # mention length is 1.
+            # We only predict the types / ids / lengths of the next mention if we are not currently
+            # in the process of generating it (e.g. if the current remaining mention length is 1).
+            # Indexing / masking with ``predict_all`` makes it possible to do this in batch.
             predict_all = current_mention_lengths == 1
             if predict_all.sum() > 0:
 
-                # Index with predict all to omit any irrelevant elements.
+                # Equation 3 in the paper.
                 entity_type_logits = self._entity_type_projection(current_hidden[predict_all])
                 entity_type_loss += F.cross_entropy(entity_type_logits,
                                                     next_entity_types[predict_all].long(),
                                                     reduction='sum')
 
-                # Somewhat strangely, we use the null embedding to predict new entities. This is
-                # because their embedding won't be added until the next timestep.
-                embedding_output_dict = self._dynamic_embeddings(hidden=current_hidden,
-                                                                 target=next_entity_ids,
-                                                                 mask=next_entity_types * predict_all)
-                entity_id_loss += embedding_output_dict['loss']
+                # Equation 4 in the paper.
+                entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
+                                                                        target=next_entity_ids,
+                                                                        mask=next_entity_types * predict_all)
+                entity_id_loss += entity_id_prediction_outputs['loss']
 
-                # Use the next entity embeddings to predict mention length.
+                # Equation 5 in the paper.
                 next_entity_embeddings = self._dynamic_embeddings.embeddings[predict_all, next_entity_ids[predict_all]]
                 concatenated = torch.cat((current_hidden[predict_all], next_entity_embeddings), dim=-1)
                 mention_length_logits = self._mention_length_projection(concatenated)
@@ -204,12 +277,15 @@ class EntityNLM(Model):
             context_embeddings = contexts[1 - next_entity_types]
             context_embeddings = self._context_output_projection(context_embeddings)
 
+            # The checks in the following block of code are required to prevent adding empty
+            # tensors to vocab_features (which causes a floating point error).
             vocab_features = current_hidden.clone()
             if next_entity_types.sum() > 0:
                 vocab_features[next_entity_types] = vocab_features[next_entity_types] + entity_embeddings
             if (1 - next_entity_types.sum()) > 0:
                 vocab_features[1 - next_entity_types] = vocab_features[1 - next_entity_types] + context_embeddings
             vocab_logits = self._vocab_projection(vocab_features)
+
             _vocab_loss = F.cross_entropy(vocab_logits, next_tokens, reduction='none')
             _vocab_loss = _vocab_loss * next_mask.float()
             vocab_loss += _vocab_loss.sum()
@@ -225,29 +301,30 @@ class EntityNLM(Model):
         total_loss = entity_type_loss + entity_id_loss + mention_length_loss + vocab_loss
 
         output_dict = {
-            'entity_type_loss': entity_type_loss,
-            'entity_id_loss': entity_id_loss,
-            'mention_length_loss': mention_length_loss,
-            'vocab_loss': vocab_loss,
-            'loss': total_loss
+                'entity_type_loss': entity_type_loss,
+                'entity_id_loss': entity_id_loss,
+                'mention_length_loss': mention_length_loss,
+                'vocab_loss': vocab_loss,
+                'loss': total_loss
         }
 
         # Update the model state
         self._state = {
-            'prev_tokens': {field: tokens[field][:, -1].unsqueeze(1).detach() for field in tokens},
-            'prev_entity_types': entity_types[:, -1].unsqueeze(1).detach(),
-            'prev_entity_ids': entity_ids[:, -1].unsqueeze(1).detach(),
-            'prev_mention_lengths': mention_lengths[:, -1].unsqueeze(1).detach(),
-            'prev_contexts': contexts.detach()
+                'prev_tokens': {field: tokens[field][:, -1].unsqueeze(1).detach() for field in tokens},
+                'prev_entity_types': entity_types[:, -1].unsqueeze(1).detach(),
+                'prev_entity_ids': entity_ids[:, -1].unsqueeze(1).detach(),
+                'prev_mention_lengths': mention_lengths[:, -1].unsqueeze(1).detach(),
+                'prev_contexts': contexts.detach()
         }
 
         return output_dict
 
     def reset_states(self, batch_size: int) -> None:
-        # Reset stateful modules
+        """Resets the model's internals. Should be called at the start of a new batch."""
         self._encoder.reset_states()
         self._dynamic_embeddings.reset_states(batch_size)
         self._state = None
 
     def detach_states(self):
+        """Detaches the model's state to enforce truncated backpropagation."""
         self._dynamic_embeddings.detach_states()

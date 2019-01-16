@@ -1,13 +1,9 @@
-import logging
 from typing import Dict, Optional
 
-from allennlp.nn import InitializerApplicator
 from overrides import overrides
 import torch
 from torch.nn import Module, Parameter
 import torch.nn.functional as F
-
-logger = logging.getLogger(__name__)
 
 
 class DynamicEmbedding(Module):
@@ -26,8 +22,6 @@ class DynamicEmbedding(Module):
         Dimension of the entity embeddings.
     max_embeddings : ``int``
         Maximum number of allowed embeddings.
-    initializer : ``InitializerApplicator``, optional (default=``InitializerApplicator()``)
-        Initializes the initial embedding vector.
     """
     def __init__(self,
                  embedding_dim: int,
@@ -52,7 +46,7 @@ class DynamicEmbedding(Module):
 
     def reset_states(self, batch_size: int) -> None:
         """
-        Resets the DynamicEmbedding module for use on a new sequence.
+        Resets the DynamicEmbedding module for use on a new batch of sequences.
 
         Parameters
         ----------
@@ -96,7 +90,7 @@ class DynamicEmbedding(Module):
         # Embeddings are initialized by adding a small amount of random noise to the initial
         # embedding tensor then normalizing.
         initial = self._initial_embedding.repeat((mask.sum(), 1, 1))
-        noise = 1e-4 * torch.randn_like(initial)
+        noise = 1e-4 * torch.randn_like(initial)  # 1e-4 is a magic number from the original implementation
         unnormalized = initial + noise
         normalized = F.normalize(unnormalized, dim=-1)
 
@@ -137,6 +131,7 @@ class DynamicEmbedding(Module):
         embeddings = self.embeddings[mask, update_indices[mask]]
         hidden = hidden.clone()[mask]
 
+        # Equation 8 in the paper.
         projected = self._delta_projection(embeddings)
         score = torch.bmm(hidden.view(batch_size, 1, -1),
                           projected.view(batch_size, -1, 1))
@@ -146,7 +141,10 @@ class DynamicEmbedding(Module):
         unnormalized = delta * embeddings + (1 - delta) * hidden
         normalized = F.normalize(unnormalized, dim=-1)
 
-        self.embeddings[mask, update_indices[mask]] = normalized.squeeze()  # Squeeze in case batch_size is 1
+        # If the batch size is one, our approach of indexing with masks will drop the batch
+        # dimension when accessing self.embeddings. Accordingly, the batch dimension of
+        # normalized needs to be dropped in this case in order for assignment to work.
+        self.embeddings[mask, update_indices[mask]] = normalized.squeeze(0)
         self.last_seen[mask, update_indices[mask]] = timestep
 
     @overrides
@@ -155,16 +153,19 @@ class DynamicEmbedding(Module):
                 target: Optional[torch.Tensor] = None,
                 mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """
-        Computes logits over the existing embeddings given the current hidden state. If target ids are provided then a loss is returned as well.
+        Computes logits over the existing embeddings given the current hidden state. If target
+        ids are provided then a loss is returned as well.
 
         Parameters
         ----------
         hidden : ``torch.Tensor``
-            A tensor with shape ``(batch_size, embedding_dim)`` containing the current hidden states.
+            A tensor with shape ``(batch_size, embedding_dim)`` containing the current hidden
+            states.
         target : ``Optional[torch.Tensor]``
             An optional tensor with shape ``(batch_size,)`` containing the target ids.
         mask : ``Optional[torch.Tensor]``
-            An optional tensor with shape ``(batch_size,)`` indicating which terms to include in the final loss.
+            An optional tensor with shape ``(batch_size,)`` indicating which terms to include in
+            the final loss.
 
         Returns
         -------
@@ -184,14 +185,20 @@ class DynamicEmbedding(Module):
         else:
             batch_size = mask.sum()
 
+        # First half of equation 4.
         embeddings = self.embeddings[mask]
         projected_embeddings = self._embedding_projection(embeddings)
         hidden = hidden[mask].unsqueeze(1)
         bilinear = torch.bmm(hidden, projected_embeddings.transpose(1, 2))
         bilinear = bilinear.view(batch_size, -1)
+
+        # Second half of equation 4.
         distance_score = torch.exp(self._distance_scalar * self.last_seen[mask].float())
         logits = bilinear + distance_score
 
+        # Since we pre-allocate the embedding array, logits includes scores for all of the
+        # embeddings which have not yet been initialized. We create a mask to indicate which scores
+        # should be used for prediction / loss calculation.
         num_embeddings = self.num_embeddings[mask].unsqueeze(1)
         arange = torch.arange(self._max_embeddings).repeat(mask.sum(), 1)
         logit_mask = arange.lt(num_embeddings)
@@ -207,8 +214,6 @@ class DynamicEmbedding(Module):
             target = target[mask]
             loss = F.cross_entropy(logits, target, reduction='none')
             loss = loss.sum()
-            if loss == float('inf'):
-                import pdb; pdb.set_trace()
             out['loss'] = loss
 
         return out
