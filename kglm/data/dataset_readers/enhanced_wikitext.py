@@ -60,7 +60,7 @@ class EnhancedWikitextReader(DatasetReader):
             entity_types = np.zeros(shape=(len(tokens),))
             if self._enumerate_entities:
                 entity_ids = np.zeros(shape=(len(tokens),))
-                mention_lengths = np.zeros(shape=(len(tokens),))
+                mention_lengths = np.ones(shape=(len(tokens),))
 
             # Fill in annotations
             for annotation in data['annotations']:
