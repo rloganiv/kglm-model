@@ -1,4 +1,8 @@
 {
+    "vocabulary": {
+        "type": "extended",
+        "max_vocab_size": {"tokens": 50000},
+    },
     "dataset_reader": {
         "type": "enhanced-wikitext",
         "enumerate_entities": true,
@@ -11,33 +15,30 @@
             "token_embedders": {
                 "tokens": {
                     "type": "embedding",
-                    "embedding_dim": 10,
+                    "embedding_dim": 100,
                     "trainable": true
                 },
             },
         },
         "encoder": {
             "type": "lstm",
-            "input_size": 10,
-            "hidden_size": 10,
+            "input_size": 100,
+            "hidden_size": 100,
             "stateful": true
         },
-        "embedding_dim": 10,
+        "embedding_dim": 100,
         "max_mention_length": 100,
         "max_embeddings": 1000,
-        "initializer": [
-            ["_dummy_entity_embedding", {"type":  "xavier_uniform"}],
-            ["_dummy_context_embedding", {"type": "xavier_uniform"}],
-        ],
+        "tie_weights": true,
     },
     "iterator": {
         "type": "split",
-        "batch_size": 2,
+        "batch_size": 8,
         "splitter": {
             "type": "random",
-            "mean_split_size": 10,
-            "min_split_size": 12,
-            "max_split_size": 8,
+            "mean_split_size": 60,
+            "min_split_size": 30,
+            "max_split_size": 70,
             "splitting_keys": [
                 "tokens",
                 "entity_types",
@@ -51,7 +52,7 @@
         "num_epochs": 40,
         "optimizer": {
             "type": "adam",
-            "lr": 3e-8
+            "lr": 3e-4
         }
     }
 }

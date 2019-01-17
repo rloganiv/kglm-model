@@ -43,6 +43,8 @@ class EntityNLM(Model):
         Maximum entity mention length.
     max_embeddings : ``int``
         Maximum number of embeddings.
+    use_weight_tying : ``bool``
+        Whether to tie embedding and output weights.
     initializer : ``InitializerApplicator``, optional
         Used to initialize model parameters.
     """
@@ -53,6 +55,7 @@ class EntityNLM(Model):
                  embedding_dim: int,
                  max_mention_length: int,
                  max_embeddings: int,
+                 tie_weights: bool,
                  initializer: InitializerApplicator = InitializerApplicator()) -> None:
         super(EntityNLM, self).__init__(vocab)
 
@@ -61,6 +64,7 @@ class EntityNLM(Model):
         self._embedding_dim = embedding_dim
         self._max_mention_length = max_mention_length
         self._max_embeddings = max_embeddings
+        self._tie_weights = tie_weights
 
         self._state: Optional[StateDict] = None
 
@@ -85,6 +89,8 @@ class EntityNLM(Model):
                                                           bias=False)
         self._vocab_projection = torch.nn.Linear(in_features=embedding_dim,
                                                  out_features=vocab.get_vocab_size('tokens'))
+        if tie_weights:
+            self._vocab_projection.weight = self._text_field_embedder._token_embedders['tokens'].weight
 
         initializer(self)
 
