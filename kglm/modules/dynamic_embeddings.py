@@ -200,7 +200,7 @@ class DynamicEmbedding(Module):
         # embeddings which have not yet been initialized. We create a mask to indicate which scores
         # should be used for prediction / loss calculation.
         num_embeddings = self.num_embeddings[mask].unsqueeze(1)
-        arange = torch.arange(self._max_embeddings).repeat(mask.sum(), 1)
+        arange = torch.arange(self._max_embeddings, device=num_embeddings.device).repeat(mask.sum(), 1)
         logit_mask = arange.lt(num_embeddings)
 
         out = {
