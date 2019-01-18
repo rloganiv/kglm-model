@@ -1,6 +1,7 @@
 {
     "dataset_reader": {
         "type": "enhanced-wikitext",
+        "alias_db_path": "data/alias.pkl",
         "enumerate_entities": true,
     },
     "train_data_path": "kglm/tests/fixtures/mini.train.jsonl",
@@ -25,10 +26,6 @@
         "embedding_dim": 10,
         "max_mention_length": 100,
         "max_embeddings": 1000,
-        "initializer": [
-            ["_dummy_entity_embedding", {"type":  "xavier_uniform"}],
-            ["_dummy_context_embedding", {"type": "xavier_uniform"}],
-        ],
     },
     "iterator": {
         "type": "split",
