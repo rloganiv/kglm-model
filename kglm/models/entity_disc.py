@@ -342,7 +342,7 @@ class EntityNLMDiscriminator(Model):
                                                                             mask=predict_em)
                     entity_id_loss += entity_id_prediction_outputs['loss']
                     self._entity_id_accuracy(predictions=entity_id_prediction_outputs['logits'],
-                                             gold_labels=current_entity_ids[predict_em])
+                                             gold_labels=modified_entity_ids[predict_em])
 
                     # Equation 5 in the paper.
                     predicted_entity_embeddings = self._dynamic_embeddings.embeddings[predict_em, modified_entity_ids[predict_em]]
