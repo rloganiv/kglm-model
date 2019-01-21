@@ -107,8 +107,8 @@ class ExtendedVocabulary(Vocabulary):
             except KeyError:
                 max_vocab = -1
             if max_vocab:
-                token_counts = token_counts[:max_vocab]
                 unk_counts = token_counts[max_vocab:]  # Add these to *unk namespace
+                token_counts = token_counts[:max_vocab]
             else:
                 unk_counts = []
             for token, count in token_counts:
