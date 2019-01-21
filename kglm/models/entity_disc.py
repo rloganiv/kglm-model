@@ -125,9 +125,6 @@ class EntityNLMDiscriminator(Model):
         else:
             self.detach_states()
 
-        # TODO: Remove
-        self.sample(tokens=tokens)
-
         if entity_types is not None:
             output_dict = self._forward_loop(tokens=tokens,
                                              entity_types=entity_types,
