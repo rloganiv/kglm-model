@@ -1,7 +1,8 @@
 import logging
 import pickle
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
+from allennlp.data import Vocabulary
 from allennlp.data.tokenizers import Token, Tokenizer, WordTokenizer
 from allennlp.data.token_indexers import SingleIdTokenIndexer
 import torch
@@ -17,12 +18,8 @@ class AliasDatabase:
     """A Database of Aliases"""
     def __init__(self,
                  path: str,
-                 token_indexer: SingleIdTokenIndexer,
-                 entity_indexer: SingleIdTokenIndexer,
                  alias_tokenizer: Tokenizer = None) -> None:
         self._path = path
-        self._token_indexer = token_indexer
-        self._entity_indexer = entity_indexer
         self._alias_tokenizer = alias_tokenizer or WordTokenizer()
 
         self._alias_lookup: Optional[Dict[Token, AliasList]] = None
@@ -41,7 +38,7 @@ class AliasDatabase:
 
         self._alias_lookup = alias_lookup
 
-    def tensorize(self):
+    def tensorize(self, vocab: Vocabulary):
         """
         Creates a list of tensors from the alias lookup.
 
@@ -51,4 +48,27 @@ class AliasDatabase:
         forward pass of the model (since the operation is rather expensive we'll make sure that
         it doesn't anything after the first time it is called).
         """
-        raise NotImplementedError
+
+        assert self._alias_lookup is not None, 'Alias lookup must be built before it is tensorized'
+
+        if self._tensorized_lookup is not None:
+            return
+
+        entity_idx_to_token = vocab.get_index_to_token_vocabulary('entities')
+        self._tensorized_lookup = []
+        for i in range(len(entity_idx_to_token)):  # pylint: disable=C0200
+            entity = entity_idx_to_token[i]
+            aliases = self._alias_lookup[entity]
+            sequence_length = max(len(alias) for alias in aliases)
+            alias_tensor = torch.zeros(len(aliases), sequence_length)
+            for j, alias in enumerate(aliases):
+                for k, token in enumerate(alias):
+                    alias_tensor[j, k] = vocab.get_token_index(token, 'tokens')
+            self._tensorized_lookup.append(alias_tensor)
+
+    def __getitem__(self, idx: Union[torch.tensor, int]) -> torch.Tensor:
+        assert self._tensorized_lookup is not None, 'Need to tensorize alias database first'
+        if isinstance(idx, torch.Tensor):
+            # TODO: Do we want to catch when idx has more than one elt?
+            idx = idx.item()
+        return self._tensorized_lookup[idx]
