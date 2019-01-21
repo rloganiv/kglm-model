@@ -7,6 +7,7 @@ from typing import Dict, Optional, Union
 from allennlp.nn.util import get_text_field_mask
 from allennlp.data.vocabulary import Vocabulary
 from allennlp.models import Model
+from allennlp.modules.input_variational_dropout import InputVariationalDropout
 from allennlp.modules.text_field_embedders import TextFieldEmbedder
 from allennlp.modules.seq2seq_encoders import Seq2SeqEncoder
 from allennlp.nn import InitializerApplicator
@@ -45,6 +46,10 @@ class EntityNLMDiscriminator(Model):
         Maximum entity mention length.
     max_embeddings : ``int``
         Maximum number of embeddings.
+    variational_dropout_rate : ``float``, optional
+        Dropout rate of variational dropout applied to input embeddings. Default: 0.0
+    dropout_rate : ``float``, optional
+        Dropout rate applied to hidden states. Default: 0.0
     initializer : ``InitializerApplicator``, optional
         Used to initialize model parameters.
     """
@@ -55,6 +60,8 @@ class EntityNLMDiscriminator(Model):
                  embedding_dim: int,
                  max_mention_length: int,
                  max_embeddings: int,
+                 variational_dropout_rate: float = 0.0,
+                 dropout_rate: float = 0.0,
                  initializer: InitializerApplicator = InitializerApplicator()) -> None:
         super(EntityNLMDiscriminator, self).__init__(vocab)
 
@@ -65,6 +72,10 @@ class EntityNLMDiscriminator(Model):
         self._max_embeddings = max_embeddings
 
         self._state: Optional[StateDict] = None
+
+        # Input variational dropout
+        self._variational_dropout = InputVariationalDropout(variational_dropout_rate)
+        self._dropout = torch.nn.Dropout(dropout_rate)
 
         # For entity type prediction
         self._entity_type_projection = torch.nn.Linear(in_features=embedding_dim,
@@ -299,6 +310,7 @@ class EntityNLMDiscriminator(Model):
         # Embed tokens and get RNN hidden state.
         mask = get_text_field_mask(tokens)
         embeddings = self._text_field_embedder(tokens)
+        embeddings = self._variational_dropout(embeddings)
         hidden = self._encoder(embeddings, mask)
 
         # Initialize losses
@@ -312,6 +324,7 @@ class EntityNLMDiscriminator(Model):
             current_entity_ids = entity_ids[:, timestep]
             current_mention_lengths = mention_lengths[:, timestep]
             current_hidden = hidden[:, timestep]
+            current_hidden = self._dropout(hidden[:, timestep])
 
             # We only predict types / ids / lengths if we are not currently in the process of
             # generating a mention (e.g. if the previous remaining mention length is 1). Indexing /
@@ -346,6 +359,7 @@ class EntityNLMDiscriminator(Model):
 
                     # Equation 5 in the paper.
                     predicted_entity_embeddings = self._dynamic_embeddings.embeddings[predict_em, modified_entity_ids[predict_em]]
+                    predicted_entity_embeddings = self._dropout(predicted_entity_embeddings)
                     concatenated = torch.cat((current_hidden[predict_em], predicted_entity_embeddings), dim=-1)
                     mention_length_logits = self._mention_length_projection(concatenated)
                     mention_length_loss += F.cross_entropy(mention_length_logits, current_mention_lengths[predict_em])

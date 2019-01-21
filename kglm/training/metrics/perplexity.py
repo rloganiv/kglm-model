@@ -78,7 +78,10 @@ class UnknownPenalizedPerplexity(Metric):
         # Compute the penalty weight applied to p(<unk>).
         vocab_size = vocabulary.get_vocab_size(namespace)
         unk_vocab_size = vocabulary.get_vocab_size(namespace + '_unk')
-        self._unk_penalty = math.log(unk_vocab_size)  # pylint: disable=no-member
+        if unk_vocab_size > 0:
+            self._unk_penalty = math.log(unk_vocab_size)  # pylint: disable=no-member
+        else:
+            self._unk_penalty = 0.0
 
         # Identify the index of the <unk> token.
         self._unk_idx = vocabulary.get_token_index(oov_token, namespace=namespace)

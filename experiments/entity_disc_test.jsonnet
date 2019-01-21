@@ -24,20 +24,23 @@
             "type": "lstm",
             "input_size": 256,
             "hidden_size": 256,
+            "dropout": 0.5,
             "stateful": true
         },
         "embedding_dim": 256,
         "max_mention_length": 180,
-        "max_embeddings": 1000
+        "max_embeddings": 1000,
+        "dropout_rate": 0.4,
+        "variational_dropout_rate": 0.1
     },
     "iterator": {
         "type": "split",
-        "batch_size": 40,
+        "batch_size": 16,
         "splitter": {
             "type": "random",
-            "mean_split_size": 70,
-            "min_split_size": 30,
-            "max_split_size": 100,
+            "mean_split_size": 30,
+            "min_split_size": 20,
+            "max_split_size": 40,
             "splitting_keys": [
                 "tokens",
                 "entity_types",
