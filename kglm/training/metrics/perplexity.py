@@ -1,6 +1,7 @@
 """
 Implementation of perplexity and unknown penalized perplexity metrics.
 """
+import math
 from typing import Optional
 
 from allennlp.data.vocabulary import DEFAULT_OOV_TOKEN
@@ -48,7 +49,7 @@ class Perplexity(Metric):
         ppl = self._sum_log_p / self._total_count
         if reset:
             self.reset()
-        return ppl
+        return math.exp(ppl)
 
     @overrides
     def reset(self):
@@ -72,12 +73,12 @@ class UnknownPenalizedPerplexity(Metric):
     """
     def __init__(self,
                  vocabulary: ExtendedVocabulary,
-                 namespace: str,
+                 namespace: str = 'tokens',
                  oov_token: str = DEFAULT_OOV_TOKEN) -> None:
         # Compute the penalty weight applied to p(<unk>).
         vocab_size = vocabulary.get_vocab_size(namespace)
         unk_vocab_size = vocabulary.get_vocab_size(namespace + '_unk')
-        self._unk_penalty = -torch.log(1.0 + unk_vocab_size / vocab_size)  # pylint: disable=no-member
+        self._unk_penalty = math.log(unk_vocab_size)  # pylint: disable=no-member
 
         # Identify the index of the <unk> token.
         self._unk_idx = vocabulary.get_token_index(oov_token, namespace=namespace)
@@ -101,7 +102,6 @@ class UnknownPenalizedPerplexity(Metric):
             A binary mask tensor of shape (batch_size, sequence_length).
         """
         logits, labels, mask = self.unwrap_to_tensors(logits, labels, mask)
-
         log_p = F.cross_entropy(logits, labels, reduction='none')
 
         # Apply penalty to unks
@@ -120,7 +120,7 @@ class UnknownPenalizedPerplexity(Metric):
         ppl = self._sum_log_p / self._total_count
         if reset:
             self.reset()
-        return ppl
+        return math.exp(ppl)
 
     @overrides
     def reset(self):

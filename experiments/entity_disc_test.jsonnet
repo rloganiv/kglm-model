@@ -10,7 +10,7 @@
     "train_data_path": "kglm/tests/fixtures/mini.train.jsonl",
     "validation_data_path": "kglm/tests/fixtures/mini.train.jsonl",
     "model": {
-        "type": "entitynlm",
+        "type": "entitydisc",
         "text_field_embedder": {
             "token_embedders": {
                 "tokens": {
@@ -28,8 +28,7 @@
         },
         "embedding_dim": 256,
         "max_mention_length": 180,
-        "max_embeddings": 1000,
-        "tie_weights": true,
+        "max_embeddings": 1000
     },
     "iterator": {
         "type": "split",

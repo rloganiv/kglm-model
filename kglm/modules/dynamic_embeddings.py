@@ -202,6 +202,7 @@ class DynamicEmbedding(Module):
         num_embeddings = self.num_embeddings[mask].unsqueeze(1)
         arange = torch.arange(self._max_embeddings, device=num_embeddings.device).repeat(mask.sum(), 1)
         logit_mask = arange.lt(num_embeddings)
+        logits[logit_mask != 1] = -float('inf')
 
         out = {
             'logits': logits,
@@ -210,7 +211,6 @@ class DynamicEmbedding(Module):
 
         if target is not None:
             # Is there a better way to do this?
-            logits[logit_mask != 1] = -float('inf')
             target = target[mask]
             loss = F.cross_entropy(logits, target, reduction='none')
             loss = loss.sum()
