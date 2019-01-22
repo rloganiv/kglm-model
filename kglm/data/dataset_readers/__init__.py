@@ -1,1 +1,1 @@
-from .enhanced_wikitext import EnhancedWikitextReader
+from .enhanced_wikitext import EnhancedWikitextKglmReader, EnhancedWikitextEntityNlmReader
