@@ -2,7 +2,7 @@
 Implementation of perplexity and unknown penalized perplexity metrics.
 """
 import math
-from typing import Optional
+from typing import Optional, Tuple
 
 from allennlp.data.vocabulary import DEFAULT_OOV_TOKEN
 from allennlp.training.metrics import Metric
@@ -36,7 +36,7 @@ class Perplexity(Metric):
         """
         logits, labels, mask = self.unwrap_to_tensors(logits, labels, mask)
 
-        log_p = F.cross_entropy(logits, labels, reduction='none')
+        log_p = -F.cross_entropy(logits, labels, reduction='none')
         if mask is not None:
             self._sum_log_p += (mask * log_p).sum()
             self._total_count += mask.sum()
@@ -46,10 +46,11 @@ class Perplexity(Metric):
 
     @overrides
     def get_metric(self, reset: bool) -> float:
-        ppl = self._sum_log_p / self._total_count
+        cross_entropy = -self._sum_log_p / self._total_count
+        perplexity = math.exp(cross_entropy)
         if reset:
             self.reset()
-        return math.exp(ppl)
+        return perplexity
 
     @overrides
     def reset(self):
@@ -105,11 +106,11 @@ class UnknownPenalizedPerplexity(Metric):
             A binary mask tensor of shape (batch_size, sequence_length).
         """
         logits, labels, mask = self.unwrap_to_tensors(logits, labels, mask)
-        log_p = F.cross_entropy(logits, labels, reduction='none')
+        log_p = -F.cross_entropy(logits, labels, reduction='none')
 
         # Apply penalty to unks
         unk_ids = labels.eq(self._unk_idx)
-        log_p[unk_ids] += self._unk_penalty
+        log_p[unk_ids] -= self._unk_penalty
 
         if mask is not None:
             self._sum_log_p += (mask * log_p).sum()
@@ -120,10 +121,11 @@ class UnknownPenalizedPerplexity(Metric):
 
     @overrides
     def get_metric(self, reset: bool) -> float:
-        ppl = self._sum_log_p / self._total_count
+        cross_entropy = -self._sum_log_p / self._total_count
+        perplexity = math.exp(cross_entropy)
         if reset:
             self.reset()
-        return math.exp(ppl)
+        return perplexity
 
     @overrides
     def reset(self):

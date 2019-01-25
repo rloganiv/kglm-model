@@ -164,7 +164,7 @@ class EntityNLMDiscriminator(Model):
         -------
         An output dictionary consisting of:
         logp : ``torch.Tensor``
-            A tensor containing the log-probability of the sample.
+            A tensor containing the log-probability of the sample (averaged over time)
         entity_types : ``torch.Tensor``
             A tensor of shape ``(batch_size, sequence_length)`` indicating whether or not the
             corresponding token belongs to a mention.
@@ -176,6 +176,11 @@ class EntityNLMDiscriminator(Model):
             tokens (including the current one) there are in the mention.
         """
         batch_size, sequence_length = tokens['tokens'].shape
+
+        # We will use a standard iterator during evaluation instead of a split iterator. Otherwise
+        # it will be a pain to handle generating multiple samples for a sequence since there's no
+        # way to get back to the first split.
+        self.reset_states(batch_size)
 
         # Embed tokens and get RNN hidden state.
         mask = get_text_field_mask(tokens)
@@ -259,9 +264,11 @@ class EntityNLMDiscriminator(Model):
 
         return {
                 'logp': logp,
-                'entity_types': entity_types,
-                'entity_ids': entity_ids,
-                'mention_lengths': mention_lengths
+                'sample': {
+                        'entity_types': entity_types,
+                        'entity_ids': entity_ids,
+                        'mention_lengths': mention_lengths
+                }
         }
 
     def _forward_loop(self,

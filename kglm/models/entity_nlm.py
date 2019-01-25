@@ -292,7 +292,6 @@ class EntityNLM(Model):
 
                 # Only proceed to predict entity and mention length if there is in fact an entity.
                 predict_em = next_entity_types * predict_all
-
                 if predict_em.sum() > 0:
                     # Equation 4 in the paper.
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
@@ -353,7 +352,7 @@ class EntityNLM(Model):
                 'entity_id_loss': entity_id_loss,
                 'mention_length_loss': mention_length_loss,
                 'vocab_loss': vocab_loss,
-                'loss': total_loss
+                'loss': total_loss,
         }
 
         # Update the model state
@@ -383,7 +382,6 @@ class EntityNLM(Model):
                 'ppl': self._perplexity.get_metric(reset),
                 'upp': self._unknown_penalized_perplexity.get_metric(reset),
                 'et_acc': self._entity_type_accuracy.get_metric(reset),
-                # 'entity_type_f1': self._entity_type_f1.get_metric(reset),
                 'eid_acc': self._entity_id_accuracy.get_metric(reset),
                 'ml_acc': self._mention_length_accuracy.get_metric(reset)
         }

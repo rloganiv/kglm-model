@@ -1,1 +1,1 @@
-from .evaluate import Evaluate
+from .evaluate_perplexity import EvaluatePerplexity
