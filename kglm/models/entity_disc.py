@@ -189,7 +189,7 @@ class EntityNLMDiscriminator(Model):
         prev_mention_lengths = tokens['tokens'].new_ones(batch_size)
 
         # Initialize outputs
-        logp = 0.0
+        logp = hidden.new_zeros(batch_size) # Track total logp for **each** generated sample
         entity_types = torch.zeros_like(tokens['tokens'], dtype=torch.uint8)
         entity_ids = torch.zeros_like(tokens['tokens'])
         mention_lengths = torch.ones_like(tokens['tokens'])
@@ -210,7 +210,7 @@ class EntityNLMDiscriminator(Model):
                 entity_type_prediction_logp, entity_type_predictions = sample_from_logp(entity_type_logp)
                 entity_type_predictions = entity_type_predictions.byte()
                 entity_types[predict_mask, timestep] = entity_type_predictions
-                logp += entity_type_prediction_logp.sum()
+                logp[predict_mask] += entity_type_prediction_logp
 
                 # Only predict entity and mention lengths if we predicted that there was a mention
                 predict_em = entity_types[:, timestep] * predict_mask
@@ -222,7 +222,9 @@ class EntityNLMDiscriminator(Model):
                     entity_id_logp = F.log_softmax(entity_id_logits, dim=-1)
                     entity_id_prediction_logp, entity_id_predictions = sample_from_logp(entity_id_logp)
 
-                    # Predict mention lengths - we do this before writing the entity id predictions since we'll need to reindex the new entities, but need the null embeddings here.
+                    # Predict mention lengths - we do this before writing the
+                    # entity id predictions since we'll need to reindex the new
+                    # entities, but need the null embeddings here.
                     predicted_entity_embeddings = self._dynamic_embeddings.embeddings[predict_em, entity_id_predictions]
                     concatenated = torch.cat((current_hidden[predict_em], predicted_entity_embeddings), dim=-1)
                     mention_length_logits = self._mention_length_projection(concatenated)
@@ -234,10 +236,10 @@ class EntityNLMDiscriminator(Model):
                     new_entity_labels = self._dynamic_embeddings.num_embeddings[predict_em]
                     entity_id_predictions[new_entity_mask] = new_entity_labels[new_entity_mask]
                     entity_ids[predict_em, timestep] = entity_id_predictions
-                    logp += entity_id_prediction_logp.sum()
+                    logp[predict_em] += entity_id_prediction_logp
 
                     mention_lengths[predict_em, timestep] = mention_length_predictions
-                    logp += mention_length_prediction_logp.sum()
+                    logp[predict_em] += mention_length_prediction_logp
 
                 # Add / update entity embeddings
                 new_entities = entity_ids[:, timestep] == self._dynamic_embeddings.num_embeddings
@@ -360,7 +362,7 @@ class EntityNLMDiscriminator(Model):
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
                                                                             target=modified_entity_ids,
                                                                             mask=predict_em)
-                    entity_id_loss += entity_id_prediction_outputs['loss']
+                    entity_id_loss += entity_id_prediction_outputs['loss'].sum()
                     self._entity_id_accuracy(predictions=entity_id_prediction_outputs['logits'],
                                              gold_labels=modified_entity_ids[predict_em])
 

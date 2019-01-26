@@ -67,6 +67,8 @@ def evaluate_perplexity(model: Model,
     _warned_tqdm_ignores_underscores = False
     check_for_gpu(cuda_device)
 
+    num_samples = 100 # TODO: Make this something you can specify
+
     with torch.no_grad():
         model.eval()
         sampler.eval()
@@ -80,36 +82,32 @@ def evaluate_perplexity(model: Model,
 
         for batch in generator_tqdm:
             batch_count += 1
+            tokens = batch['tokens']
+            tokens['tokens'] = tokens['tokens'].repeat(num_samples, 1)
             batch = util.move_to_device(batch, cuda_device)
             sequence_length = batch['tokens']['tokens'].shape[1]
 
-            num_samples = 5 # TODO: Make this something you can specify
-            log_summands = torch.zeros(num_samples)
-            for i in range(num_samples):
+            # Draw a sample
+            sampler_output = sampler.sample(batch['tokens'])
+            sample_logp = sampler_output['logp']
+            sample = sampler_output['sample']
+            sample['reset'] = True
+            sample['tokens'] = batch['tokens']  # Add tokens to batch
 
-                # Draw a sample
-                sampler_output = sampler.sample(batch['tokens'])
-                sample_logp = sampler_output['logp']
-                sample = sampler_output['sample']
-                sample['reset'] = True
-                sample.update(batch)  # Add tokens to batch
-
-                # To avoid accumulating probabilities we reset each time we sample.
-                model_loss = model(**sample).get('loss')
-                model_logp = -model_loss * sequence_length
-
-                log_summands[i] = model_logp - sample_logp
+            # logp of the model is the loss; we multiply by sequence length to go from token-level to sequence-level probabilities.
+            model_logp = model(**sample).get('logp')
+            log_summands = model_logp - sample_logp
 
             # This is the log probability of the entire sentence
             logp = torch.logsumexp(log_summands, dim=0) - math.log(num_samples)
 
             # We care about per-token cross entropy
             per_word_cross_entropy = -logp / sequence_length
-            print(per_word_cross_entropy)
+            print(math.exp(per_word_cross_entropy))
             total_cross_entropy += per_word_cross_entropy
 
         # Aggregate metrics
-        avg_per_word_cross_entropy = per_word_cross_entropy / batch_count
+        avg_per_word_cross_entropy = total_cross_entropy / batch_count
         perplexity = torch.exp(avg_per_word_cross_entropy)
 
     metrics = {'perplexity': perplexity}

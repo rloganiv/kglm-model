@@ -210,10 +210,8 @@ class DynamicEmbedding(Module):
         }
 
         if target is not None:
-            # Is there a better way to do this?
             target = target[mask]
             loss = F.cross_entropy(logits, target, reduction='none')
-            loss = loss.sum()
             out['loss'] = loss
 
         return out
