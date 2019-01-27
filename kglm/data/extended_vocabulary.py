@@ -10,7 +10,7 @@ from collections import defaultdict
 from allennlp.common import Params
 from allennlp.common.checks import ConfigurationError
 from allennlp.common.tqdm import Tqdm
-from allennlp.data.vocabulary import _read_pretrained_tokens, namespace_match, pop_max_vocab_size
+from allennlp.data.vocabulary import _read_pretrained_tokens, namespace_match, pop_max_vocab_size, DEFAULT_PADDING_TOKEN
 from allennlp.data.vocabulary import Vocabulary
 
 logger = logging.getLogger(__name__)
