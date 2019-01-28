@@ -4,6 +4,7 @@ Readers for the enhanced Wikitext dataset.
 from typing import Any, Dict, Iterable, Set
 import json
 
+from allennlp.common.file_utils import cached_path
 from allennlp.data.dataset_readers import DatasetReader
 from allennlp.data.fields import TextField
 from allennlp.data.instance import Instance
@@ -34,6 +35,9 @@ class EnhancedWikitextReader(DatasetReader):
 
     @overrides
     def _read(self, file_path: str) -> Iterable[Instance]:
+        # if `file_path` is a URL, redirect to the cache
+        file_path = cached_path(file_path)
+
         with open(file_path, 'r') as f:
             for line in f:
                 data = json.loads(line)
