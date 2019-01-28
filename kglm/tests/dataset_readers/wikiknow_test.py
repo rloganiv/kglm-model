@@ -9,7 +9,7 @@ from kglm.data.dataset_readers import EnhancedWikitextReader
 @pytest.mark.parametrize('enumerate_entities', (True, False))
 def test_read_from_file(lazy, enumerate_entities):
     reader = EnhancedWikitextReader(lazy=lazy, enumerate_entities=enumerate_entities)
-    fixture_path = 'kglm/tests/fixtures/mini.train.jsonl'
+    fixture_path = 'kglm/tests/fixtures/wikiknow.train.mini.jsonl'
     instances = ensure_list(reader.read(fixture_path))
 
     first_instance_tokens = [x.text for x in instances[0]["tokens"].tokens]
