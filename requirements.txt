@@ -1,1 +1,5 @@
 allennlp==0.8.1
+
+# Coverage reports
+pytest-cov
+codecov
