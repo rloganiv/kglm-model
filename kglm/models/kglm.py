@@ -1,9 +1,10 @@
 from typing import Any, Dict, List, Union
 
-from allennlp.data import  Vocabulary
+from allennlp.data.vocabulary import Vocabulary, DEFAULT_OOV_TOKEN
 from allennlp.modules import Seq2SeqEncoder, TextFieldEmbedder
 from allennlp.models import Model
-from allennlp.nn.util import get_text_field_mask, sequence_cross_entropy_with_logits
+from allennlp.nn.util import get_text_field_mask, sequence_cross_entropy_with_logits, \
+    masked_log_softmax
 from overrides import overrides
 import torch
 import torch.nn.functional as F
@@ -12,6 +13,7 @@ from kglm.data import AliasDatabase
 
 
 StateDict = Dict[str, Union[torch.Tensor]]  # pylint: disable=invalid-name
+LOG0 = torch.tensor(1e-34).log()
 
 
 @Model.register('kglm')
@@ -42,6 +44,7 @@ class Kglm(Model):
         self._token_embedder = token_embedder
         self._entity_embedder = entity_embedder
         self._encoder = encoder
+        self._unk_index = vocab.get_token_index(DEFAULT_OOV_TOKEN)
 
         self._mention_type_projection = torch.nn.Linear(in_features=embedding_dim,
                                                         out_features=2)
@@ -51,7 +54,7 @@ class Kglm(Model):
                                             hidden_size=embedding_dim,
                                             batch_first=True)
 
-        self._generate_mode_projection = torch.nn.Linear(in_features=embedding_dim,
+        self._generate_mode_projection = torch.nn.Linear(in_features=2 * embedding_dim,
                                                          out_features=vocab.get_vocab_size('tokens'))
         self._copy_mode_projection = torch.nn.Linear(in_features=embedding_dim,
                                                      out_features=embedding_dim)
@@ -88,10 +91,6 @@ class Kglm(Model):
         else:
             output_dict = {}
 
-        if not self.training:
-            # TODO Some evaluation stuff
-            pass
-
         return output_dict
 
     def _mention_loss(self,
@@ -103,12 +102,13 @@ class Kglm(Model):
         an entity mention.
         """
         logits = self._mention_type_projection(hidden)
-        mention_loss = sequence_cross_entropy_with_logits(logits, targets, mask)
+        mention_loss = sequence_cross_entropy_with_logits(logits, targets, mask, average="token")
         return mention_loss
 
     def _entity_prediction_loss(self,
                                 hidden: torch.Tensor,
                                 targets: torch.Tensor,
+                                mask: torch.Tensor,
                                 shortlist_embeddings: torch.Tensor,
                                 shortlist_mask: torch.Tensor) -> torch.Tensor:
         # Logits are computed using a bilinear form that measures the similarity between the
@@ -124,11 +124,92 @@ class Kglm(Model):
         batch_size = hidden.shape[0]
         loss = 0.0
         for i in range(batch_size):
-            token_losses = F.cross_entropy(logits[i], targets[i], shortlist_mask[i].float(), reduction='none')
-            loss += token_losses.sum()
-        loss /= batch_size
+            loss += F.cross_entropy(logits[i], targets[i], shortlist_mask[i].float(), reduction='sum')
+        loss /= (mask.sum().float() + 1e-13)
 
         return loss
+
+    def _get_copy_scores(self,
+                         hidden: torch.Tensor,
+                         alias_tokens: torch.Tensor) -> torch.Tensor:
+        # Begin by flattening the tokens so that they fit the expected shape of a
+        # ``Seq2SeqEncoder``.
+        batch_size, sequence_length, num_aliases, alias_length = alias_tokens.shape
+        flattened = alias_tokens.view(-1, alias_length)
+        mask = flattened == 0
+
+        # Next we run through standard pipeline
+        embedded = self._token_embedder({'tokens': flattened})  # UGLY
+        encoded = self._encoder(embedded, mask)
+
+        # Equation 8 in the CopyNet paper recommends applying the additional step.
+        projected = torch.tanh(self._copy_mode_projection(encoded))
+
+        # This part gets a little funky - we need to make sure that the first dimension in
+        # `projected` and `hidden` is batch_size x sequence_length.
+        hidden = hidden.view(batch_size * sequence_length, 1, -1)
+        projected = projected.view(batch_size * sequence_length, -1, num_aliases * alias_length)
+        copy_scores = torch.bmm(hidden, projected).squeeze()
+        copy_scores = copy_scores.view(batch_size, sequence_length, -1).contiguous()
+
+        return copy_scores
+
+    def _get_vocab_loss(self,
+                        generate_scores: torch.Tensor,
+                        copy_scores: torch.Tensor,
+                        target_tokens: torch.Tensor,
+                        target_copy_indices: torch.Tensor,
+                        mask: torch.Tensor,
+                        alias_indices: torch.Tensor):
+
+        batch_size, sequence_length, vocab_size = generate_scores.shape
+        copy_vocab_size = copy_scores.shape[-1]
+
+        # We create a mask to ensure that padding alias tokens are omitted from the softmax.
+        alias_mask = alias_indices.view(batch_size, sequence_length, -1).gt(0)
+        score_mask = mask.new_ones(batch_size, sequence_length, vocab_size + copy_vocab_size)
+        score_mask[:, :, vocab_size:] = alias_mask
+
+        # Next we concatenate the score tensors together in order to compute the log probabilities.
+        concatenated_scores = torch.cat((generate_scores, copy_scores), dim=-1)
+        log_probs = masked_log_softmax(concatenated_scores, score_mask)
+
+        # The generated token loss is a simple cross-entropy calculation, we can just gather
+        # the log probabilties...
+        flattened_log_probs = log_probs.view(batch_size * sequence_length, -1)
+        flattened_targets = target_tokens.view(batch_size * sequence_length, 1)
+        generate_log_probs = flattened_log_probs.gather(1, flattened_targets).squeeze()
+        # ...except we need to omit any <UNK> terms that correspond to copy tokens.
+        unk_targets = target_tokens.eq(self._unk_index)
+        copied_targets = target_copy_indices.gt(0)
+        ignored_targets = unk_targets * copied_targets
+        generate_mask = (1 - mask.byte()) * ignored_targets
+        generate_loss = -generate_log_probs
+        generate_loss[generate_mask.view(-1)] = -LOG0  # log(0)
+
+        # The copied token loss requires adding up all of the relevant token log probabilities.
+        # We'll use a for loop to keep things simple for now.
+        copy_log_probs = flattened_log_probs[:, vocab_size:]
+        flattened_copy_mask = copied_targets.view(-1)
+        if flattened_copy_mask.sum() > 0:
+            import pdb; pdb.set_trace()
+        flattened_alias_indices = alias_indices.view(batch_size * sequence_length, -1)
+        flattened_target_copy_indices = target_copy_indices.view(-1)
+        copy_loss = torch.zeros_like(generate_loss)
+        for i in range(batch_size * sequence_length):
+            selection_mask = flattened_alias_indices[i].eq(flattened_target_copy_indices[i])
+            if selection_mask.sum() > 0 and flattened_copy_mask[i] != 0:
+                selected_log_probs = copy_log_probs[i].masked_select(selection_mask)
+                total_log_prob = torch.logsumexp(selected_log_probs, dim=0)
+                copy_loss[i] = -total_log_prob
+            else:
+                copy_loss[i] = -LOG0
+
+        combined_loss = torch.cat((generate_loss, copy_loss), dim=-1)
+        combined_loss = torch.logsumexp(combined_loss, dim=-1)
+        combined_loss = combined_loss.sum() / (mask.sum().float() + 1e-13)
+
+        return combined_loss
 
     def _forward_loop(self,
                       tokens: Dict[str, torch.Tensor],
@@ -150,6 +231,7 @@ class Kglm(Model):
         token_mask = get_text_field_mask(tokens)
         target_mask = token_mask[:, 1:].contiguous()
         target_tokens = tokens['tokens'][:, 1:].contiguous()
+        target_copy_indices = alias_copy_indices[:,1:].contiguous()
 
         # Embed and encode the source tokens
         source_mask = token_mask[:, :-1].contiguous()
@@ -164,18 +246,40 @@ class Kglm(Model):
         shortlist_mask = get_text_field_mask(shortlist)
         shortlist_embeddings = self._entity_embedder(shortlist)
 
-        # First we predict whether or not the next token will be an entity mention.
+        # Predict whether or not the next token will be an entity mention.
         target_mentions = entity_mask[:, 1:].contiguous()
         mention_loss = self._mention_loss(hidden, target_mentions, target_mask)
 
-        # Next we predict which entity (among those in the supplied shortlist) is going to be
+        # Predict which entity (among those in the supplied shortlist) is going to be
         # mentioned.
         target_shortlist_indices = shortlist_indices[:, 1:].contiguous()
         entity_prediction_loss = self._entity_prediction_loss(hidden,
                                                               target_shortlist_indices,
+                                                              target_mask,
                                                               shortlist_embeddings,
                                                               shortlist_mask)
-        loss = mention_loss + entity_prediction_loss
+
+        # Predict generation-mode scores. Start by concatenating predicted entity embeddings with
+        # the encoder output - then feed through a linear layer.
+        target_embeddings = entity_embeddings[:, 1:].contiguous()
+        concatenated = torch.cat((hidden, target_embeddings), dim=-1)
+        generate_scores = self._generate_mode_projection(concatenated)
+
+        # Predict copy-mode scores.
+        target_entity_identifiers = entity_identifiers['entity_ids'][:, 1:].contiguous()
+        alias_tokens, alias_indices = alias_database.lookup(target_entity_identifiers)
+        copy_scores = self._get_copy_scores(hidden, alias_tokens)
+
+        # Combine scores to get vocab loss
+        vocab_loss = self._get_vocab_loss(generate_scores,
+                                          copy_scores,
+                                          target_tokens,
+                                          target_copy_indices,
+                                          target_mask,
+                                          alias_indices)
+
+        loss = (mention_loss + entity_prediction_loss + vocab_loss) / 3
+
 
         # for timestep in range(sequence_length - 1):
 

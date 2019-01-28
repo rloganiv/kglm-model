@@ -121,5 +121,33 @@ class AliasDatabase:
             local_id_tensor = torch.tensor(self._id_array_lookup[entity], dtype=torch.int64, device=device)  # pylint: disable=E1102
             self._local_id_lookup.append(local_id_tensor)
 
-    def lookup(self, entity_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self._global_id_lookup[entity_id], self._local_id_lookup[entity_id]
+    def lookup(self, entity_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # The goal is to form a tensor of shape (batch_size, sequence_length, num_aliases,
+        # alias_length). To do this we need to first obtain the last two dimensions.
+        batch_size, sequence_length = entity_ids.shape
+        num_aliases = 1
+        alias_length = 1
+        for i in range(batch_size):
+            for j in range(sequence_length):
+                entity_id = entity_ids[i, j]
+                local_indices = self._local_id_lookup[entity_id]
+                if local_indices is not None:
+                    num_aliases = max(num_aliases, local_indices.shape[0])
+                    alias_length = max(alias_length, local_indices.shape[1])
+
+        # Initialize empty tensors...
+        global_tensor = entity_ids.new_zeros(batch_size, sequence_length, num_aliases, alias_length)
+        local_tensor = entity_ids.new_zeros(batch_size, sequence_length, num_aliases, alias_length)
+
+        # ...and fill them using the lookup
+        for i in range(batch_size):
+            for j in range(sequence_length):
+                entity_id = entity_ids[i, j]
+                local_indices = self._local_id_lookup[entity_id]
+                global_indices = self._local_id_lookup[entity_id]
+                if local_indices is not None:
+                    num_aliases, alias_length = local_indices.shape
+                    local_tensor[i, j, :num_aliases, :alias_length] = local_indices
+                    global_tensor[i, j, :num_aliases, :alias_length] = global_indices
+
+        return global_tensor, local_tensor

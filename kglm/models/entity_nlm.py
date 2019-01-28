@@ -98,9 +98,6 @@ class EntityNLM(Model):
         """
         Computes the loss during training / validation.
 
-        TODO: Compute perplexity for evaluation. Not sure if sample generation should also go
-        here.
-
         Parameters
         ----------
         tokens : ``Dict[str, torch.Tensor]``
