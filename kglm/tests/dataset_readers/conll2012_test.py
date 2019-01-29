@@ -16,7 +16,7 @@ class TestConll2012DatasetReader:
 
         first_instance_tokens = [x.text for x in instances[0]["tokens"].tokens]
         assert first_instance_tokens == [
-            '@@START@@', 'In', 'the', 'summer', 'of', '2005', ',', 'a', 'picture', 'that',
+            '@@START@@', 'In', 'the', 'summer', 'of', '@@NUM@@', ',', 'a', 'picture', 'that',
             'people', 'have', 'long', 'been', 'looking', 'forward', 'to',
             'started', 'emerging', 'with', 'frequency', 'in', 'various', 'major',
             'Hong', 'Kong', 'media', '.', 'With', 'their', 'unique', 'charm', ',',

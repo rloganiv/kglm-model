@@ -67,6 +67,8 @@ class Conll2012DatasetReader(DatasetReader):
     enumerate_entities: ``bool``, optional
         Whether to include information about entity types, ID, and mention lengths
         in generated instances.
+    replace_numbers: ``bool``, optional
+        Whether to replace numbers with a @@NUM@@ token.
     token_indexers : ``Dict[str, TokenIndexer]``, optional
         This is used to index the words in the document.  See :class:`TokenIndexer`.
         Default is ``{"tokens": SingleIdTokenIndexer()}``.
@@ -74,9 +76,11 @@ class Conll2012DatasetReader(DatasetReader):
     def __init__(self,
                  enumerate_entities: bool = False,
                  token_indexers: Dict[str, TokenIndexer] = None,
+                 replace_numbers: bool = True,
                  lazy: bool = False) -> None:
         super().__init__(lazy)
         self._enumerate_entities = enumerate_entities
+        self._replace_numbers = replace_numbers
         self._token_indexers = token_indexers or {"tokens": SingleIdTokenIndexer()}
 
     @overrides
@@ -137,7 +141,7 @@ class Conll2012DatasetReader(DatasetReader):
         """
         # Sort the gold clusters, so the earlier clusters are in earlier
         gold_clusters = sorted(gold_clusters, key=lambda x: sorted(x)[0][0])
-        flattened_sentences = [self._normalize_word(word)
+        flattened_sentences = [self._normalize_word(word, self._replace_numbers)
                                for sentence in sentences
                                for word in sentence]
         tokens = ['@@START@@', *flattened_sentences, '@@END@@']
@@ -183,8 +187,9 @@ class Conll2012DatasetReader(DatasetReader):
         return Instance(fields)
 
     @staticmethod
-    def _normalize_word(word):
+    def _normalize_word(word, replace_numbers):
         if word == "/." or word == "/?":
             return word[1:]
-        else:
-            return word
+        if word.replace('.','',1).isdigit():
+            return "@@NUM@@"
+        return word
