@@ -122,6 +122,18 @@ class Conll2012DatasetReader(DatasetReader):
         An ``Instance`` containing the following ``Fields``:
             tokens : ``TextField``
                 The text of the full document.
+            entity_types : ``SequentialArrayField``
+                An array with 1's in positions corresponding to words in entities,
+                and 0's in positions corresponding to words not in entities.
+            entity_ids : ``SequentialArrayField``
+                An array with an entity index in positions corresponding to words in
+                entities, and 0's in positions corresponding to words not in entities.
+                Words in coreferring entities share the same entity ID.
+            mention_lengths : ``SequentialArrayField``
+                An array with the remaining words in each entity. For words that aren't
+                in an entity, the corresponding index is "1". Else, the corresponding
+                index has the number of words remaining in the entity. If the entity
+                is of length "1", it is assigned "1".
         """
         # Sort the gold clusters, so the earlier clusters are in earlier
         gold_clusters = sorted(gold_clusters, key=lambda x: sorted(x)[0][0])
