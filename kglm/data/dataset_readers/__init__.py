@@ -1,1 +1,2 @@
 from .enhanced_wikitext import EnhancedWikitextReader
+from .conll2012 import Conll2012DatasetReader
