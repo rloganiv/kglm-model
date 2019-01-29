@@ -64,9 +64,6 @@ class Conll2012DatasetReader(DatasetReader):
 
     Parameters
     ----------
-    enumerate_entities: ``bool``, optional
-        Whether to include information about entity types, ID, and mention lengths
-        in generated instances.
     replace_numbers: ``bool``, optional
         Whether to replace numbers with a @@NUM@@ token.
     token_indexers : ``Dict[str, TokenIndexer]``, optional
@@ -74,12 +71,10 @@ class Conll2012DatasetReader(DatasetReader):
         Default is ``{"tokens": SingleIdTokenIndexer()}``.
     """
     def __init__(self,
-                 enumerate_entities: bool = False,
                  token_indexers: Dict[str, TokenIndexer] = None,
                  replace_numbers: bool = True,
                  lazy: bool = False) -> None:
         super().__init__(lazy)
-        self._enumerate_entities = enumerate_entities
         self._replace_numbers = replace_numbers
         self._token_indexers = token_indexers or {"tokens": SingleIdTokenIndexer()}
 
@@ -149,41 +144,35 @@ class Conll2012DatasetReader(DatasetReader):
                                self._token_indexers)
         fields: Dict[str, Field] = {"tokens": text_field}
 
-        # If annotations provided (e.g. during training)
-        # TODO: Something smart regarding parents and knowledge graphs...
-        if self._enumerate_entities:
-            seen_entities: Set[str] = set()
-
         cluster_dict = {}
         if gold_clusters is not None:
             for cluster_id, cluster in enumerate(gold_clusters, 1):
                 for mention in cluster:
                     cluster_dict[tuple(mention)] = cluster_id
 
-        # Fill in annotations
-        if cluster_dict:
-            # Initialize fields.
-            entity_types = np.zeros(shape=(len(tokens),))
-            if self._enumerate_entities:
-                entity_ids = np.zeros(shape=(len(tokens),))
-                mention_lengths = np.ones(shape=(len(tokens),))
+        # Initialize fields.
+        entity_types = np.zeros(shape=(len(tokens),))
+        entity_ids = np.zeros(shape=(len(tokens),))
+        mention_lengths = np.ones(shape=(len(tokens),))
 
-                for cluster, entity_id in cluster_dict.items():
-                    # Fill in "1" for positions corresponding to words in entities
-                    # Need offset by 1 to account for @@START@@ token.
-                    entity_types[cluster[0] + 1:cluster[1] + 1 + 1] = 1
-                    # Fill in entity ID
-                    entity_ids[cluster[0] + 1:cluster[1] + 1 + 1] = entity_id
-                    entity_length = (cluster[1] + 1) - cluster[0]
-                    # Fill in mention length
-                    mention_lengths[cluster[0] + 1:cluster[1] + 1 + 1] = np.arange(
-                        entity_length, 0, step=-1)
-                fields['entity_ids'] = SequentialArrayField(
-                    entity_ids, dtype=np.int64)
-                fields['mention_lengths'] = SequentialArrayField(
-                    mention_lengths, dtype=np.int64)
-            fields['entity_types'] = SequentialArrayField(
-                entity_types, dtype=np.uint8)
+        if cluster_dict:
+            for cluster, entity_id in cluster_dict.items():
+                # Fill in "1" for positions corresponding to words in entities
+                # Need offset by 1 to account for @@START@@ token.
+                entity_types[cluster[0] + 1:cluster[1] + 1 + 1] = 1
+                # Fill in entity ID
+                entity_ids[cluster[0] + 1:cluster[1] + 1 + 1] = entity_id
+                entity_length = (cluster[1] + 1) - cluster[0]
+                # Fill in mention length
+                mention_lengths[cluster[0] + 1:cluster[1] + 1 + 1] = np.arange(
+                    entity_length, 0, step=-1)
+
+        fields['entity_ids'] = SequentialArrayField(
+            entity_ids, dtype=np.int64)
+        fields['mention_lengths'] = SequentialArrayField(
+            mention_lengths, dtype=np.int64)
+        fields['entity_types'] = SequentialArrayField(
+            entity_types, dtype=np.uint8)
         return Instance(fields)
 
     @staticmethod
