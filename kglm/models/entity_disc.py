@@ -344,9 +344,10 @@ class EntityNLMDiscriminator(Model):
 
                 # Equation 3 in the paper.
                 entity_type_logits = self._entity_type_projection(current_hidden[predict_all])
-                entity_type_loss += F.cross_entropy(entity_type_logits,
-                                                    current_entity_types[predict_all].long(),
-                                                    reduction='sum')
+                entity_type_loss = entity_type_loss + F.cross_entropy(
+                        entity_type_logits,
+                        current_entity_types[predict_all].long(),
+                        reduction='sum')
                 self._entity_type_accuracy(predictions=entity_type_logits,
                                            gold_labels=current_entity_types[predict_all].long())
 
@@ -362,7 +363,7 @@ class EntityNLMDiscriminator(Model):
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
                                                                             target=modified_entity_ids,
                                                                             mask=predict_em)
-                    entity_id_loss += entity_id_prediction_outputs['loss'].sum()
+                    entity_id_loss = entity_id_loss + entity_id_prediction_outputs['loss'].sum()
                     self._entity_id_accuracy(predictions=entity_id_prediction_outputs['logits'],
                                              gold_labels=modified_entity_ids[predict_em])
 
@@ -371,7 +372,9 @@ class EntityNLMDiscriminator(Model):
                     predicted_entity_embeddings = self._dropout(predicted_entity_embeddings)
                     concatenated = torch.cat((current_hidden[predict_em], predicted_entity_embeddings), dim=-1)
                     mention_length_logits = self._mention_length_projection(concatenated)
-                    mention_length_loss += F.cross_entropy(mention_length_logits, current_mention_lengths[predict_em])
+                    mention_length_loss = mention_length_loss + F.cross_entropy(
+                            mention_length_logits,
+                            current_mention_lengths[predict_em])
                     self._mention_length_accuracy(predictions=mention_length_logits,
                                                   gold_labels=current_mention_lengths[predict_em])
 
@@ -390,9 +393,9 @@ class EntityNLMDiscriminator(Model):
             prev_mention_lengths = current_mention_lengths
 
         # Normalize the losses
-        entity_type_loss /= mask.sum()
-        entity_id_loss /= mask.sum()
-        mention_length_loss /= mask.sum()
+        entity_type_loss = entity_type_loss / mask.sum()
+        entity_id_loss = entity_id_loss / mask.sum()
+        mention_length_loss = mention_length_loss / mask.sum()
         total_loss = entity_type_loss + entity_id_loss + mention_length_loss
 
         output_dict = {
