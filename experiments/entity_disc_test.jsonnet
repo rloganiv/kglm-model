@@ -1,7 +1,8 @@
 {
     "vocabulary": {
         "type": "extended",
-        "max_vocab_size": {"tokens": 33278},
+        "extend": false,
+        "directory_path": "./results/entity-nlm-wt2.fixed-vocab.dropout.2/vocabulary"
     },
     "dataset_reader": {
         "type": "enhanced-wikitext",

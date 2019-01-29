@@ -3,6 +3,7 @@
         "type": "extended",
         "max_vocab_size": {"tokens": 33278},
     },
+    "datasets_for_vocab_creation": ["train"],
     "dataset_reader": {
         "type": "enhanced-wikitext",
         "enumerate_entities": true,
