@@ -1,5 +1,5 @@
 """
-Readers for the enhanced Wikitext dataset.
+Readers for the CoNLL 2012 dataset.
 """
 import collections
 import json
