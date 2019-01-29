@@ -422,8 +422,8 @@ class EntityNLMDiscriminator(Model):
     @overrides
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         return {
-                'entity_type_acc': self._entity_type_accuracy.get_metric(reset),
+                'et_acc': self._entity_type_accuracy.get_metric(reset),
                 # 'entity_type_f1': self._entity_type_f1.get_metric(reset),
-                'entity_id_acc': self._entity_id_accuracy.get_metric(reset),
-                'mention_length_acc': self._mention_length_accuracy.get_metric(reset)
+                'eid_acc': self._entity_id_accuracy.get_metric(reset),
+                'ml_acc': self._mention_length_accuracy.get_metric(reset)
         }
