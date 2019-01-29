@@ -134,8 +134,30 @@ class Conll2012DatasetReader(DatasetReader):
                 index has the number of words remaining in the entity. If the entity
                 is of length "1", it is assigned "1".
         """
-        # Sort the gold clusters, so the earlier clusters are in earlier
-        gold_clusters = sorted(gold_clusters, key=lambda x: sorted(x)[0][0])
+        # Filter gold_clusters: for embedded mentions, only the
+        # enclosing (outer) entity mention is kept.
+        filtered_gold_clusters = []
+        all_entity_spans = [span for gold_cluster in gold_clusters for span in gold_cluster]
+        for cluster in gold_clusters:
+            filtered_cluster = []
+            for span in cluster:
+                is_embedded_span = False
+                for other_span in all_entity_spans:
+                    # Skip if span is equal to other_span
+                    if span == other_span:
+                        continue
+                    if span[0] >= other_span[0] and span[1] <= other_span[1]:
+                        # span is embedded within other_span, so don't use it
+                        is_embedded_span = True
+                        break
+                if not is_embedded_span:
+                    filtered_cluster.append(span)
+            if filtered_cluster:
+                filtered_gold_clusters.append(filtered_cluster)
+
+        # Sort the gold clusters, so the earlier-occurring clusters are earlier in the list
+        filtered_gold_clusters = sorted(filtered_gold_clusters, key=lambda x: sorted(x)[0][0])
+
         flattened_sentences = [self._normalize_word(word, self._replace_numbers)
                                for sentence in sentences
                                for word in sentence]
@@ -145,8 +167,8 @@ class Conll2012DatasetReader(DatasetReader):
         fields: Dict[str, Field] = {"tokens": text_field}
 
         cluster_dict = {}
-        if gold_clusters is not None:
-            for cluster_id, cluster in enumerate(gold_clusters, 1):
+        if filtered_gold_clusters is not None:
+            for cluster_id, cluster in enumerate(filtered_gold_clusters, 1):
                 for mention in cluster:
                     cluster_dict[tuple(mention)] = cluster_id
 
