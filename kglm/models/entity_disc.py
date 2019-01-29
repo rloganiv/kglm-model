@@ -323,9 +323,9 @@ class EntityNLMDiscriminator(Model):
         hidden = self._encoder(embeddings, mask)
 
         # Initialize losses
-        entity_type_loss = 0.0
-        entity_id_loss = 0.0
-        mention_length_loss = 0.0
+        entity_type_loss = torch.tensor(0.0, requires_grad=True)
+        entity_id_loss = torch.tensor(0.0, requires_grad=True)
+        mention_length_loss = torch.tensor(0.0, requires_grad=True)
 
         for timestep in range(sequence_length):
 
