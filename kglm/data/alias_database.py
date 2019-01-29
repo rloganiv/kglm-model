@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 AliasList = List[List[Token]]
 
 
+def tokenize_to_string(text: str, tokenizer: Tokenizer) -> List[str]:
+    """Sigh"""
+    return [token.text for token in tokenizer.tokenize(text)]
+
+
 # TODO: Maybe someday we'll want a general ``Database`` of which this would be a specific type.
 class AliasDatabase:
     """A Database of Aliases"""
@@ -48,7 +53,7 @@ class AliasDatabase:
 
         for entity, aliases in Tqdm.tqdm(alias_lookup.items()):
             # Start by tokenizing the aliases
-            tokenized_aliases: AliasList = [tokenizer.tokenize(alias) for alias in aliases]
+            tokenized_aliases: AliasList = [tokenize_to_string(alias, tokenizer) for alias in aliases]
             token_lookup[entity] = tokenized_aliases
 
             # Next obtain the set of unqiue tokens appearing in aliases for this entity. Use this
@@ -79,9 +84,7 @@ class AliasDatabase:
                 return id_map[token]
         return 0
 
-    # TODO: If storing everything on GPU is too expensive, then experiment with moving data from
-    # CPU to GPU.
-    def tensorize(self, vocab: Vocabulary, device: torch.device):
+    def tensorize(self, vocab: Vocabulary):
         """
         Creates a list of tensors from the alias lookup.
 
@@ -110,7 +113,7 @@ class AliasDatabase:
             # Construct tensor of alias token indices from the global vocabulary.
             num_aliases = len(tokenized_aliases)
             max_alias_length = max(len(tokenized_alias) for tokenized_alias in tokenized_aliases)
-            global_id_tensor = torch.zeros(num_aliases, max_alias_length, dtype=torch.int64, device=device)
+            global_id_tensor = torch.zeros(num_aliases, max_alias_length, dtype=torch.int64)
             for j, tokenized_alias in enumerate(tokenized_aliases):
                 for k, token in enumerate(tokenized_alias):
                     # WARNING: Extremely janky cast to string
@@ -118,7 +121,7 @@ class AliasDatabase:
             self._global_id_lookup.append(global_id_tensor)
 
             # Convert array of local alias token indices into a tensor
-            local_id_tensor = torch.tensor(self._id_array_lookup[entity], dtype=torch.int64, device=device)  # pylint: disable=E1102
+            local_id_tensor = torch.tensor(self._id_array_lookup[entity], dtype=torch.int64)  # pylint: disable=E1102
             self._local_id_lookup.append(local_id_tensor)
 
     def lookup(self, entity_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

@@ -73,7 +73,7 @@ class Kglm(Model):
 
         # Tensorize the alias_database - this will only perform the operation once.
         alias_database = metadata[0]['alias_database']
-        alias_database.tensorize(vocab=self.vocab, device=tokens['tokens'].device)
+        alias_database.tensorize(vocab=self.vocab)
 
         # Reset the model if needed
         batch_size = tokens['tokens'].shape[0]
@@ -191,8 +191,6 @@ class Kglm(Model):
         # We'll use a for loop to keep things simple for now.
         copy_log_probs = flattened_log_probs[:, vocab_size:]
         flattened_copy_mask = copied_targets.view(-1)
-        if flattened_copy_mask.sum() > 0:
-            import pdb; pdb.set_trace()
         flattened_alias_indices = alias_indices.view(batch_size * sequence_length, -1)
         flattened_target_copy_indices = target_copy_indices.view(-1)
         copy_loss = torch.zeros_like(generate_loss)

@@ -8,7 +8,8 @@
     "model": {
         "type": "kglm",
         "token_embedder": {
-            "token_embedders": { "tokens": {
+            "token_embedders": {
+                "tokens": {
                     "type": "embedding",
                     "embedding_dim": 10,
                     "trainable": true
