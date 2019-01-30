@@ -61,8 +61,15 @@ class EntityNLM(Model):
         self._embedding_dim = embedding_dim
         self._max_mention_length = max_mention_length
         self._max_embeddings = max_embeddings
+        self._tie_weights = tie_weights
+        self._variational_dropout_rate = variational_dropout_rate
+        self._dropout_rate = dropout_rate
 
         self._state: Optional[StateDict] = None
+
+        # Input variational dropout
+        self._variational_dropout = InputVariationalDropout(variational_dropout_rate)
+        self._dropout = torch.nn.Dropout(dropout_rate)
 
         # For entity type prediction
         self._entity_type_projection = torch.nn.Linear(in_features=embedding_dim,
@@ -85,6 +92,12 @@ class EntityNLM(Model):
                                                           bias=False)
         self._vocab_projection = torch.nn.Linear(in_features=embedding_dim,
                                                  out_features=vocab.get_vocab_size('tokens'))
+
+        if tie_weights:
+            self._vocab_projection.weight = self._text_field_embedder._token_embedders['tokens'].weight  # pylint: disable=W0212
+
+        self._perplexity = Perplexity()
+        self._unknown_penalized_perplexity = UnknownPenalizedPerplexity(self.vocab)
 
         initializer(self)
 

@@ -51,9 +51,12 @@ class AliasDatabase:
         with open(path, 'rb') as f:
             alias_lookup = pickle.load(f)
 
+        max_aliases = 20
         for entity, aliases in Tqdm.tqdm(alias_lookup.items()):
             # Start by tokenizing the aliases
             tokenized_aliases: AliasList = [tokenize_to_string(alias, tokenizer) for alias in aliases]
+            if max_aliases is not None:
+                tokenized_aliases = tokenized_aliases[:max_aliases]
             token_lookup[entity] = tokenized_aliases
 
             # Next obtain the set of unqiue tokens appearing in aliases for this entity. Use this
@@ -65,7 +68,7 @@ class AliasDatabase:
             id_map_lookup[entity] = id_map
 
             # Lastly create an array associating the tokens in the alias to their corresponding ids.
-            num_aliases = len(aliases)
+            num_aliases = len(tokenized_aliases)
             max_alias_length = max(len(tokenized_alias) for tokenized_alias in tokenized_aliases)
             id_array = np.zeros((num_aliases, max_alias_length), dtype=int)
             for i, tokenized_alias in enumerate(tokenized_aliases):
@@ -113,7 +116,8 @@ class AliasDatabase:
             # Construct tensor of alias token indices from the global vocabulary.
             num_aliases = len(tokenized_aliases)
             max_alias_length = max(len(tokenized_alias) for tokenized_alias in tokenized_aliases)
-            global_id_tensor = torch.zeros(num_aliases, max_alias_length, dtype=torch.int64)
+            global_id_tensor = torch.zeros(num_aliases, max_alias_length, dtype=torch.int64,
+                                           requires_grad=False)
             for j, tokenized_alias in enumerate(tokenized_aliases):
                 for k, token in enumerate(tokenized_alias):
                     # WARNING: Extremely janky cast to string
@@ -121,8 +125,11 @@ class AliasDatabase:
             self._global_id_lookup.append(global_id_tensor)
 
             # Convert array of local alias token indices into a tensor
-            local_id_tensor = torch.tensor(self._id_array_lookup[entity], dtype=torch.int64)  # pylint: disable=E1102
+            local_id_tensor = torch.tensor(self._id_array_lookup[entity], dtype=torch.int64,
+                                           requires_grad=False)
             self._local_id_lookup.append(local_id_tensor)
+
+        self.is_tensorized = True
 
     def lookup(self, entity_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # The goal is to form a tensor of shape (batch_size, sequence_length, num_aliases,
@@ -139,8 +146,10 @@ class AliasDatabase:
                     alias_length = max(alias_length, local_indices.shape[1])
 
         # Initialize empty tensors...
-        global_tensor = entity_ids.new_zeros(batch_size, sequence_length, num_aliases, alias_length)
-        local_tensor = entity_ids.new_zeros(batch_size, sequence_length, num_aliases, alias_length)
+        global_tensor = entity_ids.new_zeros(batch_size, sequence_length, num_aliases, alias_length,
+                                             requires_grad=False)
+        local_tensor = entity_ids.new_zeros(batch_size, sequence_length, num_aliases, alias_length,
+                                            requires_grad=False)
 
         # ...and fill them using the lookup
         for i in range(batch_size):

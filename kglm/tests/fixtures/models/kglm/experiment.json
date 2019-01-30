@@ -31,16 +31,17 @@
             "hidden_size": 10,
             "stateful": true
         },
-        "embedding_dim": 10
+        "embedding_dim": 10,
+        "dropout_rate": 0.0,
+        "variational_dropout_rate": 0.0,
+        "tie_weights": true
     },
     "iterator": {
         "type": "split",
         "batch_size": 2,
         "splitter": {
-            "type": "random",
-            "mean_split_size": 10,
-            "min_split_size": 8,
-            "max_split_size": 12,
+            "type": "fixed",
+            "split_size": 20,
             "splitting_keys": [
                 "tokens",
                 "entity_identifiers",

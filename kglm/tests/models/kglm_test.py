@@ -16,4 +16,7 @@ class KglmTest(ModelTestCase):
                           "kglm/tests/fixtures/data/enhanced-wikitext.jsonl")
 
     def test_model_can_train_save_and_load(self):
-        self.ensure_model_can_train_save_and_load(self.param_file)
+        # We ignore the copy mode projection weights since not every sequence will involve a copy
+        # operation.
+        self.ensure_model_can_train_save_and_load(self.param_file,
+                                                  gradients_to_ignore=['_copy_mode_projection'])

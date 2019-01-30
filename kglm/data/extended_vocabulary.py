@@ -104,8 +104,8 @@ class ExtendedVocabulary(Vocabulary):
             token_counts.sort(key=lambda x: x[1], reverse=True)
             try:
                 max_vocab = max_vocab_size[namespace]
-                unk_counts = token_counts[max_vocab + 1:]  # Add these to *unk namespace
-                token_counts = token_counts[:max_vocab + 1]
+                unk_counts = token_counts[max_vocab:]  # Add these to *unk namespace
+                token_counts = token_counts[:max_vocab]
             except KeyError:
                 unk_counts = []
             for token, count in token_counts:
