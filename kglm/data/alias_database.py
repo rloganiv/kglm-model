@@ -11,7 +11,7 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-AliasList = List[List[Token]]
+AliasList = List[List[str]]
 
 
 def tokenize_to_string(text: str, tokenizer: Tokenizer) -> List[str]:
@@ -154,7 +154,7 @@ class AliasDatabase:
             for j in range(sequence_length):
                 entity_id = entity_ids[i, j]
                 local_indices = self._local_id_lookup[entity_id]
-                global_indices = self._local_id_lookup[entity_id]
+                global_indices = self._global_id_lookup[entity_id]
                 if local_indices is not None:
                     num_aliases, alias_length = local_indices.shape
                     local_tensor[i, j, :num_aliases, :alias_length] = local_indices
