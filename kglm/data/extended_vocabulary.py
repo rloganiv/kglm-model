@@ -4,14 +4,16 @@ instead of eliminating tokens that would be mapped to <UNK>, we keep them and mo
 functions to return <UNK>.
 """
 import logging
-from typing import Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Union
 from collections import defaultdict
 
 from allennlp.common import Params
 from allennlp.common.checks import ConfigurationError
 from allennlp.common.tqdm import Tqdm
-from allennlp.data.vocabulary import _read_pretrained_tokens, namespace_match, pop_max_vocab_size, DEFAULT_PADDING_TOKEN
+from allennlp.data import instance as adi  # pylint: disable=unused-import
+from allennlp.data.vocabulary import _read_pretrained_tokens, namespace_match, pop_max_vocab_size
 from allennlp.data.vocabulary import Vocabulary
+from overrides import overrides
 
 logger = logging.getLogger(__name__)
 
@@ -104,8 +106,11 @@ class ExtendedVocabulary(Vocabulary):
             token_counts.sort(key=lambda x: x[1], reverse=True)
             try:
                 max_vocab = max_vocab_size[namespace]
-                unk_counts = token_counts[max_vocab:]  # Add these to *unk namespace
-                token_counts = token_counts[:max_vocab]
+                if max_vocab is not None:
+                    unk_counts = token_counts[max_vocab:]  # Add these to *unk namespace
+                    token_counts = token_counts[:max_vocab]
+                else:
+                    unk_counts = []
             except KeyError:
                 unk_counts = []
             for token, count in token_counts:
@@ -131,6 +136,7 @@ class ExtendedVocabulary(Vocabulary):
             for token in tokens:
                 self.add_token_to_namespace(token, namespace)
 
+    @overrides
     @classmethod
     def from_instances(cls,
                        instances: Iterable['adi.Instance'],
@@ -148,7 +154,7 @@ class ExtendedVocabulary(Vocabulary):
         of what the other parameters do.
         """
         logger.info("Fitting token dictionary from dataset.")
-        namespace_token_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        namespace_token_counts: Dict[Set[Any], Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         for instance in Tqdm.tqdm(instances):
             instance.count_vocab_items(namespace_token_counts)
 
@@ -230,11 +236,10 @@ class ExtendedVocabulary(Vocabulary):
         tokens_to_add = params.pop("tokens_to_add", None)
         params.assert_empty("Vocabulary - from dataset")
         return ExtendedVocabulary.from_instances(instances=instances,
-                                         min_count=min_count,
-                                         max_vocab_size=max_vocab_size,
-                                         non_padded_namespaces=non_padded_namespaces,
-                                         pretrained_files=pretrained_files,
-                                         only_include_pretrained_words=only_include_pretrained_words,
-                                         tokens_to_add=tokens_to_add,
-                                         min_pretrained_embeddings=min_pretrained_embeddings)
-
+                                                 min_count=min_count,
+                                                 max_vocab_size=max_vocab_size,
+                                                 non_padded_namespaces=non_padded_namespaces,
+                                                 pretrained_files=pretrained_files,
+                                                 only_include_pretrained_words=only_include_pretrained_words,
+                                                 tokens_to_add=tokens_to_add,
+                                                 min_pretrained_embeddings=min_pretrained_embeddings)

@@ -6,6 +6,7 @@ import json
 import logging
 
 from allennlp.common.checks import ConfigurationError
+from allennlp.common.file_utils import cached_path
 from allennlp.data.dataset_readers import DatasetReader
 from allennlp.data.fields import TextField, MetadataField
 from allennlp.data.instance import Instance
@@ -29,13 +30,16 @@ def _flatten(nested: Iterable[str]):
 class EnhancedWikitextEntityNlmReader(DatasetReader):
 
     def __init__(self,
-                 token_indexers: Dict[str, TokenIndexer],
+                 token_indexers: Dict[str, TokenIndexer] = None,
                  lazy: bool = False) -> None:
         self._token_indexers = token_indexers or {'tokens': SingleIdTokenIndexer()}
         super().__init__(lazy)
 
     @overrides
     def _read(self, file_path: str) -> Iterable[Instance]:
+        # if `file_path` is a URL, redirect to the cache
+        file_path = cached_path(file_path)
+
         with open(file_path, 'r') as f:
             for line in f:
                 data = json.loads(line)
@@ -55,9 +59,8 @@ class EnhancedWikitextEntityNlmReader(DatasetReader):
             # Initialize arrays and book keeping data structures.
             seen_entities: Set[str] = set()
             entity_types = np.zeros(shape=(len(tokens),))
-            if self._enumerate_entities:
-                entity_ids = np.zeros(shape=(len(tokens),))
-                mention_lengths = np.ones(shape=(len(tokens),))
+            entity_ids = np.zeros(shape=(len(tokens),))
+            mention_lengths = np.ones(shape=(len(tokens),))
 
             # Process annotations
             for annotation in data['annotations']:
@@ -162,7 +165,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
 
             # Convert to fields
             fields['entity_identifiers'] = TextField([Token(x) for x in entity_identifiers],
-                                             token_indexers=self._entity_indexers)
+                                                     token_indexers=self._entity_indexers)
             fields['alias_copy_indices'] = SequentialArrayField(alias_copy_indices, dtype=np.int64)
             fields['shortlist'] = TextField([Token(x) for x in shortlist], token_indexers=self._entity_indexers)
             fields['shortlist_indices'] = SequentialArrayField(shortlist_indices, dtype=np.int64)

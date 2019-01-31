@@ -53,9 +53,10 @@ class DynamicEmbedding(Module):
         batch_size : ``int``
             The batch_size of the new sequence.
         """
-        self.embeddings = self._initial_embedding.new_zeros((batch_size, self._max_embeddings, self._embedding_dim))
+        self.embeddings = self._initial_embedding.new_zeros(batch_size, self._max_embeddings,
+                                                            self._embedding_dim)
         self.num_embeddings = self._initial_embedding.new_zeros(batch_size, dtype=torch.int64)
-        self.last_seen = self._initial_embedding.new_zeros((batch_size, self._max_embeddings),
+        self.last_seen = self._initial_embedding.new_zeros(batch_size, self._max_embeddings,
                                                            dtype=torch.int64)
         self.add_embeddings(0)
 
@@ -200,20 +201,18 @@ class DynamicEmbedding(Module):
         # embeddings which have not yet been initialized. We create a mask to indicate which scores
         # should be used for prediction / loss calculation.
         num_embeddings = self.num_embeddings[mask].unsqueeze(1)
-        arange = torch.arange(self._max_embeddings).repeat(mask.sum(), 1)
+        arange = torch.arange(self._max_embeddings, device=num_embeddings.device).repeat(mask.sum(), 1)
         logit_mask = arange.lt(num_embeddings)
+        logits[logit_mask != 1] = -float('inf')
 
         out = {
-            'logits': logits,
-            'logit_mask': logit_mask
+                'logits': logits,
+                'logit_mask': logit_mask
         }
 
         if target is not None:
-            # Is there a better way to do this?
-            logits[logit_mask != 1] = -float('inf')
             target = target[mask]
             loss = F.cross_entropy(logits, target, reduction='none')
-            loss = loss.sum()
             out['loss'] = loss
 
         return out

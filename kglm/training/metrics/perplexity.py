@@ -1,6 +1,7 @@
 """
 Implementation of perplexity and unknown penalized perplexity metrics.
 """
+import math
 from typing import Optional
 
 from allennlp.data.vocabulary import DEFAULT_OOV_TOKEN
@@ -35,7 +36,7 @@ class Perplexity(Metric):
         """
         logits, labels, mask = self.unwrap_to_tensors(logits, labels, mask)
 
-        log_p = F.cross_entropy(logits, labels, reduction='none')
+        log_p = -F.cross_entropy(logits, labels, reduction='none')
         if mask is not None:
             self._sum_log_p += (mask * log_p).sum()
             self._total_count += mask.sum()
@@ -45,10 +46,11 @@ class Perplexity(Metric):
 
     @overrides
     def get_metric(self, reset: bool) -> float:
-        ppl = self._sum_log_p / self._total_count
+        cross_entropy = -self._sum_log_p / self._total_count
+        perplexity = math.exp(cross_entropy)
         if reset:
             self.reset()
-        return ppl
+        return perplexity
 
     @overrides
     def reset(self):
@@ -72,12 +74,14 @@ class UnknownPenalizedPerplexity(Metric):
     """
     def __init__(self,
                  vocabulary: ExtendedVocabulary,
-                 namespace: str,
+                 namespace: str = 'tokens',
                  oov_token: str = DEFAULT_OOV_TOKEN) -> None:
         # Compute the penalty weight applied to p(<unk>).
-        vocab_size = vocabulary.get_vocab_size(namespace)
         unk_vocab_size = vocabulary.get_vocab_size(namespace + '_unk')
-        self._unk_penalty = -torch.log(1.0 + unk_vocab_size / vocab_size)  # pylint: disable=no-member
+        if unk_vocab_size > 0:
+            self._unk_penalty = math.log(unk_vocab_size)  # pylint: disable=no-member
+        else:
+            self._unk_penalty = 0.0
 
         # Identify the index of the <unk> token.
         self._unk_idx = vocabulary.get_token_index(oov_token, namespace=namespace)
@@ -101,12 +105,11 @@ class UnknownPenalizedPerplexity(Metric):
             A binary mask tensor of shape (batch_size, sequence_length).
         """
         logits, labels, mask = self.unwrap_to_tensors(logits, labels, mask)
-
-        log_p = F.cross_entropy(logits, labels, reduction='none')
+        log_p = -F.cross_entropy(logits, labels, reduction='none')
 
         # Apply penalty to unks
         unk_ids = labels.eq(self._unk_idx)
-        log_p[unk_ids] += self._unk_penalty
+        log_p[unk_ids] -= self._unk_penalty
 
         if mask is not None:
             self._sum_log_p += (mask * log_p).sum()
@@ -117,10 +120,11 @@ class UnknownPenalizedPerplexity(Metric):
 
     @overrides
     def get_metric(self, reset: bool) -> float:
-        ppl = self._sum_log_p / self._total_count
+        cross_entropy = -self._sum_log_p / self._total_count
+        perplexity = math.exp(cross_entropy)
         if reset:
             self.reset()
-        return ppl
+        return perplexity
 
     @overrides
     def reset(self):

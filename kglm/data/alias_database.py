@@ -1,11 +1,10 @@
 import logging
 import pickle
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Tuple
 
 from allennlp.common.tqdm import Tqdm
 from allennlp.data import Vocabulary
 from allennlp.data.tokenizers import Token, Tokenizer, WordTokenizer
-from allennlp.data.token_indexers import SingleIdTokenIndexer
 import numpy as np
 import torch
 
@@ -125,8 +124,7 @@ class AliasDatabase:
             self._global_id_lookup.append(global_id_tensor)
 
             # Convert array of local alias token indices into a tensor
-            local_id_tensor = torch.tensor(self._id_array_lookup[entity], dtype=torch.int64,
-                                           requires_grad=False)
+            local_id_tensor = torch.LongTensor(self._id_array_lookup[entity], requires_grad=False)
             self._local_id_lookup.append(local_id_tensor)
 
         self.is_tensorized = True

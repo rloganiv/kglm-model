@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from allennlp.data.vocabulary import Vocabulary, DEFAULT_OOV_TOKEN
 from allennlp.modules import Seq2SeqEncoder, TextFieldEmbedder
@@ -11,12 +11,13 @@ from overrides import overrides
 import torch
 import torch.nn.functional as F
 
+from kglm.common.typing import StateDict
 from kglm.data import AliasDatabase
 
 logger = logging.getLogger(__name__)
 
-StateDict = Dict[str, Union[torch.Tensor]]  # pylint: disable=invalid-name
-LOG0 = torch.tensor(1e-34).log()
+
+LOG0 = torch.Tensor(1e-34).log()
 
 
 @Model.register('kglm')
@@ -74,7 +75,7 @@ class Kglm(Model):
         if tie_weights:
             self._generate_mode_projection.weight = self._token_embedder._token_embedders['tokens'].weight  # pylint: disable=W0212
 
-        self._state = None
+        self._state: StateDict = None
 
         # Metrics
         self._avg_mention_loss = Average()
@@ -86,24 +87,18 @@ class Kglm(Model):
                 tokens: Dict[str, torch.Tensor],
                 reset: bool,
                 metadata: List[Dict[str, Any]],
-                entity_identifiers: Optional[torch.Tensor] = None,
-                shortlist: Optional[Dict[str, torch.Tensor]] = None,
-                shortlist_indices: Optional[torch.Tensor] = None,
-                alias_copy_indices: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+                entity_identifiers: torch.Tensor = None,
+                shortlist: Dict[str, torch.Tensor] = None,
+                shortlist_indices: torch.Tensor = None,
+                alias_copy_indices: torch.Tensor = None) -> Dict[str, torch.Tensor]:
 
         # Tensorize the alias_database - this will only perform the operation once.
         alias_database = metadata[0]['alias_database']
         alias_database.tensorize(vocab=self.vocab)
 
         # Reset the model if needed
-        batch_size = tokens['tokens'].shape[0]
         if reset:
-            # log_torch_garbage()
-            # logger.debug('Max sequence length in last batch %i', self._max_split)
-            # logger.debug('Allocated: %i', torch.cuda.memory_allocated())
-            # torch.cuda.empty_cache()
-            # logger.debug('Cached: %i', torch.cuda.memory_cached())
-            self.reset_states(batch_size)
+            self.reset_states()
 
         if entity_identifiers is not None:
             output_dict = self._forward_loop(tokens=tokens,
@@ -246,12 +241,12 @@ class Kglm(Model):
                       shortlist_indices: torch.Tensor,
                       alias_copy_indices: torch.Tensor) -> Dict[str, torch.Tensor]:
 
-        batch_size, sequence_length = tokens['tokens'].shape
-
         if self._state is not None:
-            tokens = {field: torch.cat((self._state['prev_tokens'][field], tokens[field]), dim=1) for field in tokens}
+            tokens = {field: torch.cat((self._state['prev_tokens'][field], tokens[field]), dim=1)
+                      for field in tokens}
             entity_identifiers = {field: torch.cat((self._state['prev_entity_identifiers'][field],
-                                                    entity_identifiers[field]), dim=1) for field in entity_identifiers}
+                                                    entity_identifiers[field]), dim=1)
+                                  for field in entity_identifiers}
             shortlist_indices = torch.cat((self._state['prev_shortlist_indices'], shortlist_indices), dim=1)
             alias_copy_indices = torch.cat((self._state['prev_alias_copy_indices'], alias_copy_indices), dim=1)
 
@@ -315,22 +310,23 @@ class Kglm(Model):
 
         # Update state
         self._state = {
-            'prev_tokens': {field: tokens[field][:, -1].unsqueeze(1).detach() for field in tokens},
-            'prev_entity_identifiers': {field: entity_identifiers[field][:, -1].unsqueeze(1).detach() for field in entity_identifiers},
-            'prev_shortlist_indices': shortlist_indices[:, -1].unsqueeze(1).detach(),
-            'prev_alias_copy_indices': alias_copy_indices[:, -1].unsqueeze(1).detach()
+                'prev_tokens': {field: tokens[field][:, -1].unsqueeze(1).detach() for field in tokens},
+                'prev_entity_identifiers': {field: entity_identifiers[field][:, -1].unsqueeze(1).detach()
+                                            for field in entity_identifiers},
+                'prev_shortlist_indices': shortlist_indices[:, -1].unsqueeze(1).detach(),
+                'prev_alias_copy_indices': alias_copy_indices[:, -1].unsqueeze(1).detach()
         }
 
         return {'loss': loss}
 
-    def reset_states(self, batch_size: int) -> None:
+    def reset_states(self) -> None:
         """Resets the model's internals. Should be called at the start of a new batch."""
         self._encoder.reset_states()
         self._state = None
 
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         return {
-            'mention_loss': self._avg_mention_loss.get_metric(reset).item(),
-            'entity_loss': self._avg_entity_loss.get_metric(reset).item(),
-            'vocab_loss': self._avg_vocab_loss.get_metric(reset).item(),
+                'mention_loss': self._avg_mention_loss.get_metric(reset).item(),
+                'entity_loss': self._avg_entity_loss.get_metric(reset).item(),
+                'vocab_loss': self._avg_vocab_loss.get_metric(reset).item(),
         }

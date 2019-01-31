@@ -1,18 +1,17 @@
 {
     "vocabulary": {
         "type": "extended",
-        "max_vocab_size": {"tokens": 33278},
+        "extend": false,
+        "directory_path": "./results/entity-nlm-wt2.fixed-vocab.dropout.2/vocabulary"
     },
-    "datasets_for_vocab_creation": ["train"],
     "dataset_reader": {
         "type": "enhanced-wikitext",
-        "alias_db_path": "data/alias.pkl",
         "enumerate_entities": true,
     },
     "train_data_path": "kglm/tests/fixtures/mini.train.jsonl",
     "validation_data_path": "kglm/tests/fixtures/mini.train.jsonl",
     "model": {
-        "type": "entitynlm",
+        "type": "entitydisc",
         "text_field_embedder": {
             "token_embedders": {
                 "tokens": {
@@ -32,7 +31,6 @@
         "embedding_dim": 256,
         "max_mention_length": 180,
         "max_embeddings": 1000,
-        "tie_weights": true,
         "dropout_rate": 0.4,
         "variational_dropout_rate": 0.1
     },
