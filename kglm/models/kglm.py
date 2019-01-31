@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from allennlp.data.vocabulary import Vocabulary, DEFAULT_OOV_TOKEN
 from allennlp.modules import Seq2SeqEncoder, TextFieldEmbedder
@@ -17,7 +17,7 @@ from kglm.data import AliasDatabase
 logger = logging.getLogger(__name__)
 
 
-LOG0 = torch.Tensor(1e-34).log()
+LOG0 = torch.tensor(1e-45).log()  # pylint: disable=not-callable
 
 
 @Model.register('kglm')

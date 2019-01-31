@@ -124,7 +124,7 @@ class AliasDatabase:
             self._global_id_lookup.append(global_id_tensor)
 
             # Convert array of local alias token indices into a tensor
-            local_id_tensor = torch.LongTensor(self._id_array_lookup[entity], requires_grad=False)
+            local_id_tensor = torch.tensor(self._id_array_lookup[entity], requires_grad=False)  # pylint: disable=not-callable
             self._local_id_lookup.append(local_id_tensor)
 
         self.is_tensorized = True

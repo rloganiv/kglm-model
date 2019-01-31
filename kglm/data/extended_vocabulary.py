@@ -136,8 +136,8 @@ class ExtendedVocabulary(Vocabulary):
             for token in tokens:
                 self.add_token_to_namespace(token, namespace)
 
-    @overrides
     @classmethod
+    @overrides
     def from_instances(cls,
                        instances: Iterable['adi.Instance'],
                        min_count: Dict[str, int] = None,
