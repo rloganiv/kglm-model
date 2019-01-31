@@ -11,7 +11,7 @@ from allennlp.modules.input_variational_dropout import InputVariationalDropout
 from allennlp.modules.text_field_embedders import TextFieldEmbedder
 from allennlp.modules.seq2seq_encoders import Seq2SeqEncoder
 from allennlp.nn import InitializerApplicator
-from allennlp.training.metrics import CategoricalAccuracy, F1Measure
+from allennlp.training.metrics import CategoricalAccuracy
 from overrides import overrides
 import torch
 import torch.nn.functional as F
@@ -53,6 +53,7 @@ class EntityNLMDiscriminator(Model):
     initializer : ``InitializerApplicator``, optional
         Used to initialize model parameters.
     """
+    # pylint: disable=line-too-long
     def __init__(self,
                  vocab: Vocabulary,
                  text_field_embedder: TextFieldEmbedder,
@@ -89,7 +90,6 @@ class EntityNLMDiscriminator(Model):
                                                           out_features=max_mention_length)
 
         self._entity_type_accuracy = CategoricalAccuracy()
-        # self._entity_type_f1 = F1Measure(positive_label=1)
         self._entity_id_accuracy = CategoricalAccuracy()
         self._mention_length_accuracy = CategoricalAccuracy()
 
@@ -217,7 +217,7 @@ class EntityNLMDiscriminator(Model):
                 if predict_em.sum() > 0:
                     # Predict entity ids
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
-                                             mask=predict_em)
+                                                                            mask=predict_em)
                     entity_id_logits = entity_id_prediction_outputs['logits']
                     entity_id_logp = F.log_softmax(entity_id_logits, dim=-1)
                     entity_id_prediction_logp, entity_id_predictions = sample_from_logp(entity_id_logp)
@@ -423,7 +423,6 @@ class EntityNLMDiscriminator(Model):
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         return {
                 'et_acc': self._entity_type_accuracy.get_metric(reset),
-                # 'entity_type_f1': self._entity_type_f1.get_metric(reset),
                 'eid_acc': self._entity_id_accuracy.get_metric(reset),
                 'ml_acc': self._mention_length_accuracy.get_metric(reset)
         }

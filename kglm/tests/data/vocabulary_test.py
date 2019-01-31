@@ -1,19 +1,8 @@
-import codecs
-import gzip
-import zipfile
-from copy import deepcopy
-import copy
-import shutil
-import pytest
 from allennlp.common.testing import AllenNlpTestCase
 from allennlp.data import Instance, Token
 from allennlp.data.dataset import Batch
 from allennlp.data.fields import TextField
-from allennlp.data.token_indexers import SingleIdTokenIndexer, TokenCharactersIndexer
-from allennlp.data.tokenizers import CharacterTokenizer
-from allennlp.common.params import Params
-from allennlp.common.checks import ConfigurationError
-from allennlp.modules.token_embedders.embedding import format_embeddings_file_uri
+from allennlp.data.token_indexers import SingleIdTokenIndexer
 
 from kglm.data.extended_vocabulary import ExtendedVocabulary
 
@@ -28,6 +17,11 @@ class TestVocabulary(AllenNlpTestCase):
         self.instance = Instance({"text": text_field})
         self.dataset = Batch([self.instance])
         super(TestVocabulary, self).setUp()
+
+    def test_unk_namespace_is_empty_if_vocab_unconstrained(self):
+        vocab = ExtendedVocabulary.from_instances(self.dataset)
+        words = vocab.get_index_to_token_vocabulary('tokens_unk')
+        assert not words  # This checks that there's nothing in ``words`` w/out pylint complaining
 
     def test_from_dataset_respects_max_vocab_size_single_int(self):
         max_vocab_size = 1
@@ -92,5 +86,3 @@ class TestVocabulary(AllenNlpTestCase):
         # Check the dictionaries containing the reverse mapping are identical.
         assert vocab.get_index_to_token_vocabulary("a") == vocab2.get_index_to_token_vocabulary("a")
         assert vocab.get_index_to_token_vocabulary("b") == vocab2.get_index_to_token_vocabulary("b")
-
-

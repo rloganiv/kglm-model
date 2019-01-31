@@ -16,8 +16,8 @@ run_tests() {
 
 if [[ "$RUN_LINT" == "true" ]]; then
     echo "Running linter and mypy"
-    pylint kglm
-    mypy kglm
+    pylint --disable-warnings kglm
+    mypy --ignore-missing-imports --no-strict-optional kglm
 fi
 
 if [[ "$SKIP_TESTS" != "true" ]]; then

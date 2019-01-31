@@ -1,0 +1,62 @@
+{
+    "dataset_reader": {
+        "type": "enhanced-wikitext-kglm",
+        "alias_database_path": "kglm/tests/fixtures/mini.alias.pkl"
+    },
+    "train_data_path": "kglm/tests/fixtures/enhanced-wikitext.jsonl",
+    "validation_data_path": "kglm/tests/fixtures/enhanced-wikitext.jsonl",
+    "model": {
+        "type": "kglm",
+        "token_embedder": {
+            "token_embedders": {
+                "tokens": {
+                    "type": "embedding",
+                    "embedding_dim": 10,
+                    "trainable": true
+                }
+            }
+        },
+        "entity_embedder": {
+            "token_embedders": {
+                "entity_ids": {
+                    "type": "embedding",
+                    "embedding_dim": 10,
+                    "trainable": true
+                }
+            }
+        },
+        "encoder": {
+            "type": "lstm",
+            "input_size": 10,
+            "hidden_size": 10,
+            "stateful": true
+        },
+        "embedding_dim": 10,
+        "dropout_rate": 0.0,
+        "variational_dropout_rate": 0.0,
+        "tie_weights": true
+    },
+    "iterator": {
+        "type": "split",
+        "batch_size": 2,
+        "splitter": {
+            "type": "fixed",
+            "split_size": 20,
+            "splitting_keys": [
+                "tokens",
+                "entity_identifiers",
+                "shortlist_indices",
+                "alias_copy_indices"
+            ]
+        },
+        "sorting_keys": [["tokens", "num_tokens"]]
+    },
+    "trainer": {
+        "num_epochs": 2,
+        "cuda_device": -1,
+        "optimizer": {
+            "type": "adam",
+            "lr": 3e-4
+        }
+    }
+}

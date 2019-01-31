@@ -2,7 +2,7 @@
 Implementation of perplexity and unknown penalized perplexity metrics.
 """
 import math
-from typing import Optional, Tuple
+from typing import Optional
 
 from allennlp.data.vocabulary import DEFAULT_OOV_TOKEN
 from allennlp.training.metrics import Metric
@@ -77,7 +77,6 @@ class UnknownPenalizedPerplexity(Metric):
                  namespace: str = 'tokens',
                  oov_token: str = DEFAULT_OOV_TOKEN) -> None:
         # Compute the penalty weight applied to p(<unk>).
-        vocab_size = vocabulary.get_vocab_size(namespace)
         unk_vocab_size = vocabulary.get_vocab_size(namespace + '_unk')
         if unk_vocab_size > 0:
             self._unk_penalty = math.log(unk_vocab_size)  # pylint: disable=no-member

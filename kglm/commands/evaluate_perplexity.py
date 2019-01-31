@@ -64,7 +64,6 @@ def evaluate_perplexity(model: Model,
                         instances: Iterator[Instance],
                         data_iterator: DataIterator,
                         cuda_device: int) -> Dict[str, Any]:
-    _warned_tqdm_ignores_underscores = False
     check_for_gpu(cuda_device)
 
     num_samples = 100 # TODO: Make this something you can specify
@@ -94,7 +93,8 @@ def evaluate_perplexity(model: Model,
             sample['reset'] = True
             sample['tokens'] = batch['tokens']  # Add tokens to batch
 
-            # logp of the model is the loss; we multiply by sequence length to go from token-level to sequence-level probabilities.
+            # logp of the model is the loss; we multiply by sequence length to go from token-level
+            # to sequence-level probabilities.
             model_logp = model(**sample).get('logp')
             log_summands = model_logp - sample_logp
 
