@@ -1,4 +1,4 @@
-allennlp==0.8.1
+git+git://github.com/rloganiv/allennlp.git@7b72c71a3a18eaf4f181b2d4a3f4a2552baa2e86
 
 # Coverage reports
 pytest-cov
