@@ -41,13 +41,13 @@ class Kglm(Model):
                  encoder: Seq2SeqEncoder,
                  token_embedder: TextFieldEmbedder,
                  entity_embedder: TextFieldEmbedder,
-                 embedding_dim: int,
                  tie_weights: bool,
                  dropout_rate: float,
                  variational_dropout_rate: float) -> None:
         super(Kglm, self).__init__(vocab)
 
-        self._embedding_dim = embedding_dim
+        assert entity_embedder.get_output_dim() == token_embedder.get_output_dim()
+
         self._token_embedder = token_embedder
         self._entity_embedder = entity_embedder
         self._encoder = encoder
@@ -56,7 +56,16 @@ class Kglm(Model):
         self._dropout_rate = dropout_rate
         self._unk_index = vocab.get_token_index(DEFAULT_OOV_TOKEN)
 
-        # Input variational dropout
+        embedding_dim = self._token_embedder.get_output_dim()
+        hidden_dim = self._encoder.get_output_dim()
+
+        # Merity et al 2017, section 4.5 suggests that the LSTM hidden layer be larger than the
+        # embeddings. We'll use these `Linear` layers to project them.
+        self._embedding_to_hidden = torch.nn.Linear(in_features=embedding_dim,
+                                                    out_features=hidden_dim)
+        self._hidden_to_embedding = torch.nn.Linear(in_features=hidden_dim,
+                                                    out_features=embedding_dim)
+
         self._variational_dropout = InputVariationalDropout(variational_dropout_rate)
         self._dropout = torch.nn.Dropout(dropout_rate)
 
@@ -165,10 +174,12 @@ class Kglm(Model):
 
         # Next we run through standard pipeline
         embedded = self._token_embedder({'tokens': flattened})  # UGLY
-        encoded = self._encoder(embedded, copy_mask)
+        expanded = self._embedding_to_hidden(embedded)
+        encoded = self._encoder(expanded, copy_mask)
+        contracted = self._hidden_to_embedding(encoded)
 
         # Equation 8 in the CopyNet paper recommends applying the additional step.
-        projected = torch.tanh(self._copy_mode_projection(encoded))
+        projected = torch.tanh(self._copy_mode_projection(contracted))
 
         # This part gets a little funky - we need to make sure that the first dimension in
         # `projected` and `hidden` is batch_size x sequence_length.
@@ -260,7 +271,9 @@ class Kglm(Model):
         source_mask = token_mask[:, :-1].contiguous()
         source_embeddings = self._token_embedder(tokens)[:, :-1].contiguous()
         source_embeddings = self._variational_dropout(source_embeddings)
-        hidden = self._encoder(source_embeddings, source_mask)
+        expanded = self._embedding_to_hidden(source_embeddings)
+        hidden = self._encoder(expanded, source_mask)
+        hidden = self._hidden_to_embedding(hidden)
 
         # Embed entities
         entity_mask = get_text_field_mask(entity_identifiers)

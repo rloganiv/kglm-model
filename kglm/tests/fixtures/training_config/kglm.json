@@ -27,11 +27,10 @@
         },
         "encoder": {
             "type": "lstm",
-            "input_size": 10,
-            "hidden_size": 10,
+            "input_size": 11,
+            "hidden_size": 11,
             "stateful": true
         },
-        "embedding_dim": 10,
         "dropout_rate": 0.0,
         "variational_dropout_rate": 0.0,
         "tie_weights": true
