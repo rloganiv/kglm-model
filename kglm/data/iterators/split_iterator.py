@@ -268,4 +268,4 @@ class SplitIterator(BucketIterator):
             self._epochs[key] = epoch + 1
 
     def get_num_batches(self, instances: Iterable[Instance]) -> float:
-        return float("inf")
+        return 1
