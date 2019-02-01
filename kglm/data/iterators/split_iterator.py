@@ -50,6 +50,11 @@ class Splitter(Registrable):
         sequence_length = self._get_sequence_length(tensor_dict)
 
         split_indices = self._create_split_indices(sequence_length)
+        # If the last split is too small, then merge with the second to last
+        # split.
+        if (split_indices[-1] - split_indices[-2]) <= 1:
+            split_indices[-2] = split_indices[-1]
+            del split_indices[-1]
         for i, (start, stop) in enumerate(zip(split_indices[:-1], split_indices[1:])):
             sliced_tensor_dict = self._slice_tensor_dict(tensor_dict, start, stop)
             if i == 0:
@@ -263,4 +268,4 @@ class SplitIterator(BucketIterator):
             self._epochs[key] = epoch + 1
 
     def get_num_batches(self, instances: Iterable[Instance]) -> float:
-        return float("inf")
+        return 1

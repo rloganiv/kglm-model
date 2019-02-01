@@ -2,13 +2,12 @@
 Readers for the CoNLL 2012 dataset.
 """
 import collections
-import json
-from typing import Any, DefaultDict, Dict, Iterable, List, Optional, Set, Tuple
+from typing import DefaultDict, Dict, Iterable, List, Optional, Set, Tuple
 
 from allennlp.common.file_utils import cached_path
 from allennlp.data.dataset_readers import DatasetReader
-from allennlp.data.dataset_readers.dataset_utils import Ontonotes, enumerate_spans
-from allennlp.data.fields import TextField
+from allennlp.data.dataset_readers.dataset_utils import Ontonotes
+from allennlp.data.fields import Field, TextField
 from allennlp.data.instance import Instance
 from allennlp.data.token_indexers import TokenIndexer, SingleIdTokenIndexer
 from allennlp.data.tokenizers import Token
@@ -20,6 +19,7 @@ from kglm.data.fields import SequentialArrayField
 
 def _flatten(nested: Iterable[str]):
     return [x for seq in nested for x in seq]
+
 
 def canonicalize_clusters(clusters: DefaultDict[int, List[Tuple[int, int]]]) -> List[List[Tuple[int, int]]]:
     """
@@ -186,21 +186,18 @@ class Conll2012DatasetReader(DatasetReader):
                 entity_ids[cluster[0] + 1:cluster[1] + 1 + 1] = entity_id
                 entity_length = (cluster[1] + 1) - cluster[0]
                 # Fill in mention length
-                mention_lengths[cluster[0] + 1:cluster[1] + 1 + 1] = np.arange(
-                    entity_length, 0, step=-1)
+                mention_lengths[cluster[0] + 1:cluster[1] + 1 + 1] = np.arange(entity_length, 0, step=-1)
 
-        fields['entity_ids'] = SequentialArrayField(
-            entity_ids, dtype=np.int64)
-        fields['mention_lengths'] = SequentialArrayField(
-            mention_lengths, dtype=np.int64)
-        fields['entity_types'] = SequentialArrayField(
-            entity_types, dtype=np.uint8)
+        fields['entity_ids'] = SequentialArrayField(entity_ids, dtype=np.int64)
+        fields['mention_lengths'] = SequentialArrayField(mention_lengths, dtype=np.int64)
+        fields['entity_types'] = SequentialArrayField(entity_types, dtype=np.uint8)
         return Instance(fields)
 
     @staticmethod
-    def _normalize_word(word, replace_numbers):
-        if word == "/." or word == "/?":
+    def _normalize_word(word, replace_numbers: bool) -> str:
+        if word in ["/.", "/?"]:
             return word[1:]
-        if word.replace('.','',1).isdigit():
-            return "@@NUM@@"
+        if replace_numbers:
+            if word.replace('.', '', 1).isdigit():
+                return "@@NUM@@"
         return word

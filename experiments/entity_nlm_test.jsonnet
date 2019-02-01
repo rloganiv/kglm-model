@@ -6,6 +6,7 @@
     "datasets_for_vocab_creation": ["train"],
     "dataset_reader": {
         "type": "enhanced-wikitext",
+        "alias_db_path": "data/alias.pkl",
         "enumerate_entities": true,
     },
     "train_data_path": "kglm/tests/fixtures/mini.train.jsonl",

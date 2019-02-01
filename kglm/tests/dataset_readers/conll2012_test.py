@@ -6,6 +6,8 @@ from kglm.data.dataset_readers import Conll2012DatasetReader
 
 
 class TestConll2012DatasetReader:
+    # pylint: disable=no-self-use
+
     @pytest.mark.parametrize('lazy', (True, False))
     def test_read_from_file(self, lazy):
         reader = Conll2012DatasetReader(lazy=lazy)
@@ -15,20 +17,25 @@ class TestConll2012DatasetReader:
 
         first_instance_tokens = [x.text for x in instances[0]["tokens"].tokens]
         assert first_instance_tokens == [
-            '@@START@@', 'In', 'the', 'summer', 'of', '@@NUM@@', ',', 'a', 'picture', 'that',
-            'people', 'have', 'long', 'been', 'looking', 'forward', 'to',
-            'started', 'emerging', 'with', 'frequency', 'in', 'various', 'major',
-            'Hong', 'Kong', 'media', '.', 'With', 'their', 'unique', 'charm', ',',
-            'these', 'well', '-', 'known', 'cartoon', 'images', 'once', 'again',
-            'caused', 'Hong', 'Kong', 'to', 'be', 'a', 'focus', 'of', 'worldwide',
-            'attention', '.', 'The', 'world', "'s", 'fifth', 'Disney', 'park',
-            'will', 'soon', 'open', 'to', 'the', 'public', 'here', '.', '@@END@@']
+                '@@START@@', 'In', 'the', 'summer', 'of', '@@NUM@@', ',', 'a', 'picture', 'that',
+                'people', 'have', 'long', 'been', 'looking', 'forward', 'to',
+                'started', 'emerging', 'with', 'frequency', 'in', 'various', 'major',
+                'Hong', 'Kong', 'media', '.', 'With', 'their', 'unique', 'charm', ',',
+                'these', 'well', '-', 'known', 'cartoon', 'images', 'once', 'again',
+                'caused', 'Hong', 'Kong', 'to', 'be', 'a', 'focus', 'of', 'worldwide',
+                'attention', '.', 'The', 'world', "'s", 'fifth', 'Disney', 'park',
+                'will', 'soon', 'open', 'to', 'the', 'public', 'here', '.', '@@END@@'
+        ]
         # {(41, 42): 1, (23, 24): 1, (28, 28): 2, (32, 37): 2}
         first_instance_entity_types = instances[0]["entity_types"].array
         # Add 1 to both indices to account for @@START@@
         # Add 1 more to the end to work with slicing
-        entity_indices = {(41+1, 42+1+1), (23+1, 24+1+1),
-                          (28+1, 28+1+1), (32+1, 37+1+1)}
+        # entity_indices = {
+        #         (41+1, 42+1+1),
+        #         (23+1, 24+1+1),
+        #         (28+1, 28+1+1),
+        #         (32+1, 37+1+1)
+        # }
         assert first_instance_tokens[23+1:24+1+1] == ['Hong', 'Kong']
         assert first_instance_tokens[28+1:28+1+1] == ['their']
         assert first_instance_tokens[32+1:37+1+1] == ['these', 'well', '-',

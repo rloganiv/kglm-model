@@ -53,9 +53,10 @@ class DynamicEmbedding(Module):
         batch_size : ``int``
             The batch_size of the new sequence.
         """
-        self.embeddings = self._initial_embedding.new_zeros((batch_size, self._max_embeddings, self._embedding_dim))
+        self.embeddings = self._initial_embedding.new_zeros(batch_size, self._max_embeddings,
+                                                            self._embedding_dim)
         self.num_embeddings = self._initial_embedding.new_zeros(batch_size, dtype=torch.int64)
-        self.last_seen = self._initial_embedding.new_zeros((batch_size, self._max_embeddings),
+        self.last_seen = self._initial_embedding.new_zeros(batch_size, self._max_embeddings,
                                                            dtype=torch.int64)
         self.add_embeddings(0)
 
@@ -205,8 +206,8 @@ class DynamicEmbedding(Module):
         logits[logit_mask != 1] = -float('inf')
 
         out = {
-            'logits': logits,
-            'logit_mask': logit_mask
+                'logits': logits,
+                'logit_mask': logit_mask
         }
 
         if target is not None:

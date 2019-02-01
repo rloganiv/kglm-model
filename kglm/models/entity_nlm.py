@@ -11,7 +11,7 @@ from allennlp.modules.input_variational_dropout import InputVariationalDropout
 from allennlp.modules.text_field_embedders import TextFieldEmbedder
 from allennlp.modules.seq2seq_encoders import Seq2SeqEncoder
 from allennlp.nn import InitializerApplicator
-from allennlp.training.metrics import CategoricalAccuracy, F1Measure
+from allennlp.training.metrics import CategoricalAccuracy
 from overrides import overrides
 import torch
 from torch.nn import Parameter
@@ -55,6 +55,8 @@ class EntityNLM(Model):
     initializer : ``InitializerApplicator``, optional
         Used to initialize model parameters.
     """
+    # pylint: disable=line-too-long
+
     def __init__(self,
                  vocab: Vocabulary,
                  text_field_embedder: TextFieldEmbedder,
@@ -110,9 +112,14 @@ class EntityNLM(Model):
         self._perplexity = Perplexity()
         self._unknown_penalized_perplexity = UnknownPenalizedPerplexity(self.vocab)
         self._entity_type_accuracy = CategoricalAccuracy()
-        # self._entity_type_f1 = F1Measure(positive_label=1)
         self._entity_id_accuracy = CategoricalAccuracy()
         self._mention_length_accuracy = CategoricalAccuracy()
+
+        if tie_weights:
+            self._vocab_projection.weight = self._text_field_embedder._token_embedders['tokens'].weight  # pylint: disable=W0212
+
+        self._perplexity = Perplexity()
+        self._unknown_penalized_perplexity = UnknownPenalizedPerplexity(self.vocab)
 
         initializer(self)
 
@@ -125,9 +132,6 @@ class EntityNLM(Model):
                 reset: bool = False)-> Dict[str, torch.Tensor]:
         """
         Computes the loss during training / validation.
-
-        TODO: Compute perplexity for evaluation. Not sure if sample generation should also go
-        here.
 
         Parameters
         ----------
@@ -218,7 +222,8 @@ class EntityNLM(Model):
         # The model state allows us to recover the last timestep from the previous chunk in the
         # split. If it does not exist, then we are processing a new batch.
         if self._state is not None:
-            tokens = {field: torch.cat((self._state['prev_tokens'][field], tokens[field]), dim=1) for field in tokens}
+            tokens = {field: torch.cat((self._state['prev_tokens'][field], tokens[field]), dim=1)
+                      for field in tokens}
             entity_types = torch.cat((self._state['prev_entity_types'], entity_types), dim=1)
             entity_ids = torch.cat((self._state['prev_entity_ids'], entity_ids), dim=1)
             mention_lengths = torch.cat((self._state['prev_mention_lengths'], mention_lengths), dim=1)
