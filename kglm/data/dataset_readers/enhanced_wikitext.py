@@ -26,6 +26,35 @@ def _flatten(nested: Iterable[str]):
     return [x for seq in nested for x in seq]
 
 
+@DatasetReader.register('enhanced-wikitext')
+class EnhancedWikitextReader(DatasetReader):
+    def __init__(self,
+                 token_indexers: Dict[str, TokenIndexer] = None,
+                 lazy: bool = False) -> None:
+        self._token_indexers = token_indexers or {'tokens': SingleIdTokenIndexer()}
+        super().__init__(lazy)
+
+    @overrides
+    def _read(self, file_path: str) -> Iterable[Instance]:
+        # if `file_path` is a URL, redirect to the cache
+        file_path = cached_path(file_path)
+
+        with open(file_path, 'r') as f:
+            for line in f:
+                data = json.loads(line)
+                yield self.text_to_instance(data)
+
+    @overrides
+    def text_to_instance(self, data: Dict[str, Any]) -> Instance:  # pylint: disable=arguments-differ
+        # Flatten and pad tokens
+        tokens = _flatten(data['tokens'])
+        tokens = ['@@START@@', *tokens, '@@END@@']
+        tokens = [Token(x) for x in tokens]
+        fields = {'tokens': TextField(tokens, self._token_indexers)}
+
+        return Instance(fields)
+
+
 @DatasetReader.register('enhanced-wikitext-entity-nlm')
 class EnhancedWikitextEntityNlmReader(DatasetReader):
 
