@@ -11,14 +11,10 @@
         "num_layers": 3
     },
     "iterator": {
-        "type": "split",
-        "batch_size": 1,
-        "splitter": {
-            "type": "fixed",
-            "split_size": 50,
-            "splitting_keys": ["tokens"]
-        },
-        "sorting_keys": [["tokens", "num_tokens"]]
+        "type": "fancy",
+        "batch_size": 2,
+        "split_size": 10,
+        "splitting_keys": ["tokens"]
     },
     "trainer": {
         "num_epochs": 2,

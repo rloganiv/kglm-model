@@ -277,4 +277,3 @@ class SplitIterator(BucketIterator):
 
     def get_num_batches(self, instances: Iterable[Instance]) -> float:
         return 1
-

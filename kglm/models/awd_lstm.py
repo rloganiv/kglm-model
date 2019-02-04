@@ -121,11 +121,14 @@ class AwdLstmLanguageModel(Model):
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
                 tokens: Dict[str, torch.Tensor],
-                reset: bool) -> Dict[str, torch.Tensor]:
+                reset: torch.Tensor) -> Dict[str, torch.Tensor]:
 
+
+        # TODO: Update for array reset
         # Reset the model if needed
-        if reset:
-            self._state = None
+        # if reset:
+        #     self._state = None
+        import pdb; pdb.set_trace()
 
         token_tensor = tokens['tokens']
         if self._state is not None:
