@@ -12,21 +12,19 @@
     },
     "iterator": {
         "type": "split",
-        "batch_size": 2,
+        "batch_size": 1,
         "splitter": {
             "type": "fixed",
-            "split_size": 10,
+            "split_size": 50,
             "splitting_keys": ["tokens"]
         },
         "sorting_keys": [["tokens", "num_tokens"]]
     },
     "trainer": {
         "num_epochs": 2,
-        "grad_clipping": 0.25,
         "optimizer": {
-            "type": "sgd",
-            "lr": 30.0,
-            "weight_decay": 1.2e-6
+            "type": "adam",
+            "lr": 1e-4
         }
     }
 }

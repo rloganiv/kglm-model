@@ -24,6 +24,7 @@ class SplitCrossEntropyLoss(nn.Module):
             self.tail_bias = nn.Parameter(torch.zeros(self.nsplits - 1))
 
     def logprob(self, weight, bias, hiddens, splits=None, softmaxed_head_res=None, verbose=False):
+        import pdb; pdb.set_trace()
         # First we perform the first softmax on the head vocabulary and the tombstones
         if softmaxed_head_res is None:
             start, end = self.splits[0], self.splits[1]
@@ -141,10 +142,7 @@ class SplitCrossEntropyLoss(nn.Module):
             # For those targets in the head (idx == 0) we only need to return their loss
             if idx == 0:
                 softmaxed_head_res = softmaxed_all_head_res[running_offset:running_offset + len(split_hiddens[idx])]
-                try:
-                    entropy = -torch.gather(softmaxed_head_res, dim=1, index=split_targets[idx].view(-1, 1))
-                except RuntimeError:
-                    import pdb; pdb.set_trace()
+                entropy = -torch.gather(softmaxed_head_res, dim=1, index=split_targets[idx].view(-1, 1))
                 entropy[split_targets[idx]==0] = 0
             # If the target is in one of the splits, the probability is the p(tombstone) * p(word within tombstone)
             else:

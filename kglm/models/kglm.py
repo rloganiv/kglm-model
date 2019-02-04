@@ -90,6 +90,8 @@ class Kglm(Model):
         self._avg_mention_loss = Average()
         self._avg_entity_loss = Average()
         self._avg_vocab_loss = Average()
+        self._avg_mention_vocab_loss = Average()
+        self._avg_non_mention_vocab_loss = Average()
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
@@ -242,6 +244,11 @@ class Kglm(Model):
         vocab_loss = -combined_log_probs.sum() / (mask.float().sum() + 1e-13)
         self._avg_vocab_loss(vocab_loss)
 
+        mention_vocab_loss = -combined_log_probs[flattened_copy_mask].sum() / (flattened_copy_mask.float().sum() + 1e-13)
+        non_mention_vocab_loss = -combined_log_probs[1 - flattened_copy_mask].sum() / (mask.float().sum() - flattened_copy_mask.float().sum() + 1e-13)
+        self._avg_mention_vocab_loss(mention_vocab_loss)
+        self._avg_non_mention_vocab_loss(non_mention_vocab_loss)
+
         return vocab_loss
 
     def _forward_loop(self,
@@ -342,4 +349,6 @@ class Kglm(Model):
                 'mention_loss': self._avg_mention_loss.get_metric(reset).item(),
                 'entity_loss': self._avg_entity_loss.get_metric(reset).item(),
                 'vocab_loss': self._avg_vocab_loss.get_metric(reset).item(),
+                'mention_vocab_loss': self._avg_mention_vocab_loss.get_metric(reset).item(),
+                'non_mention_vocab_loss': self._avg_non_mention_vocab_loss.get_metric(reset).item()
         }

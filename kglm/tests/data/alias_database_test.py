@@ -10,7 +10,7 @@ from kglm.data import AliasDatabase
 
 
 class AliasDatabaseTest(AllenNlpTestCase):
-    # pylint: disable=protected-access
+    # pylint: disable=protected-access,no-self-use
 
     def setUp(self):
         self.token_lookup = {

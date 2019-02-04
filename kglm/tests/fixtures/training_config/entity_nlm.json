@@ -1,0 +1,72 @@
+{
+    "dataset_reader": {
+        "type": "enhanced-wikitext-entity-nlm"
+    },
+    "iterator": {
+        "type": "split",
+        "batch_size": 2,
+        "sorting_keys": [
+            [
+                "tokens",
+                "num_tokens"
+            ]
+        ],
+        "splitter": {
+            "type": "fixed",
+            "split_size": 8,
+            "splitting_keys": [
+                "tokens",
+                "entity_types",
+                "entity_ids",
+                "mention_lengths"
+            ]
+        }
+    },
+    "model": {
+        "type": "entitynlm",
+        "dropout_rate": 0.4,
+        "embedding_dim": 10,
+        "encoder": {
+            "type": "lstm",
+            "dropout": 0.5,
+            "hidden_size": 10,
+            "input_size": 10,
+            "stateful": true
+        },
+        "max_embeddings": 20,
+        "max_mention_length": 20,
+        "text_field_embedder": {
+            "token_embedders": {
+                "tokens": {
+                    "type": "embedding",
+                    "embedding_dim": 10,
+                    "trainable": true
+                }
+            }
+        },
+        "tie_weights": true,
+        "variational_dropout_rate": 0.1
+    },
+    "train_data_path": "kglm/tests/fixtures/enhanced-wikitext.jsonl",
+    "validation_data_path": "kglm/tests/fixtures/enhanced-wikitext.jsonl",
+    "trainer": {
+        "cuda_device": -1,
+        "num_epochs": 2,
+        "optimizer": {
+            "type": "adam",
+            "lr": 0.0003
+        }
+    },
+    "vocabulary": {
+        "type": "extended",
+        "max_vocab_size": {
+            "tokens": 33278
+        },
+        "min_count": {
+            "tokens": 3
+        }
+    },
+    "datasets_for_vocab_creation": [
+        "train"
+    ]
+}
