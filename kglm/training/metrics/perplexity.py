@@ -1,6 +1,7 @@
 """
 Implementation of perplexity and unknown penalized perplexity metrics.
 """
+import logging
 import math
 from typing import Optional
 
@@ -11,6 +12,8 @@ import torch
 import torch.nn.functional as F
 
 from kglm.data.extended_vocabulary import ExtendedVocabulary
+
+logger = logging.getLogger(__name__)
 
 
 @Metric.register('ppl-old')
@@ -153,6 +156,7 @@ class Ppl(Metric):
 
     @overrides
     def reset(self) -> None:
+        logger.debug('Resetting Ppl')
         self.numerator = 0.0
         self.denominator = 0.0
 

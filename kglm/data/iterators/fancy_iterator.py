@@ -142,3 +142,7 @@ class FancyIterator(DataIterator):
                 break
             batch = Batch(instances)
             yield batch
+
+    def get_num_batches(self, instances: Iterable[Instance]) -> float:
+        return 1
+

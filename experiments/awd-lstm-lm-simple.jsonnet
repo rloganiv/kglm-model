@@ -1,14 +1,14 @@
 {
-    "vocabulary": {
-        "type": "extended",
-        "min_count": {"tokens": 3}
-    },
     "dataset_reader": {
-        "type": "enhanced-wikitext"
+        "type": "language_modeling",
+        "tokens_per_instance": 80,
+        "tokenizer": {
+            "type": "word",
+            "word_splitter": {"type": "just_spaces"},
+        },
     },
-    "train_data_path": "./data/mini.train.jsonl",
-    "validation_data_path": "./data/final.valid.jsonl",
-    "datasets_for_vocab_creation": ["train"],
+    "train_data_path": "../awd-lstm-lm/data/enhanced-wikitext/train.txt",
+    "validation_data_path": "../awd-lstm-lm/data/enhanced-wikitext/valid.txt",
     "model": {
         "type": "awd-lstm-lm",
         "embedding_size": 400,
@@ -21,17 +21,16 @@
         ]
     },
     "iterator": {
-        "type": "fancy",
-        "batch_size": 80,
-        "split_size": 70,
+        "type": "basic",
+        "batch_size": 60,
     },
     "trainer": {
         "num_epochs": 500,
-        "cuda_device": 0,
+        "cuda_device": 1,
         "grad_clipping": 0.25,
         "optimizer": {
             "type": "sgd",
-            "lr": 30.0,
+            "lr": 30,
             "weight_decay": 1.2e-6
         },
         "patience": 10,

@@ -8,6 +8,7 @@
     },
     "train_data_path": "./data/mini.train.jsonl",
     "validation_data_path": "./data/final.valid.jsonl",
+    "datasets_for_vocab_creation": ["train"],
     "model": {
         "type": "awd-lstm-lm",
         "embedding_size": 400,
@@ -20,13 +21,17 @@
         ]
     },
     "iterator": {
-        "type": "split",
+        "type": "fancy",
         "batch_size": 80,
+        "split_size": 70,
+        "splitting_keys": ["tokens"]
+    },
+    "validation_iterator": {
+        "type": "split",
+        "batch_size": 10,
         "splitter": {
-            "type": "random",
-            "mean_split_size": 70,
-            "max_split_size": 80,
-            "min_split_size": 60,
+            "type": "fixed",
+            "split_size": 70,
             "splitting_keys": ["tokens"]
         },
         "sorting_keys": [["tokens", "num_tokens"]]
@@ -34,9 +39,11 @@
     "trainer": {
         "num_epochs": 500,
         "cuda_device": 0,
+        "grad_clipping": 0.25,
         "optimizer": {
-            "type": "adam",
-            "lr": 3e-4,
+            "type": "sgd",
+            "lr": 30.0,
+            "weight_decay": 1.2e-6
         },
         "patience": 10,
         "validation_metric": "-ppl"
