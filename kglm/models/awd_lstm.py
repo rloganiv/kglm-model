@@ -120,15 +120,14 @@ class AwdLstmLanguageModel(Model):
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
-                tokens: Dict[str, torch.Tensor],
-                reset: torch.Tensor) -> Dict[str, torch.Tensor]:
+                tokens: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:  # ,
+                # reset: torch.Tensor) -> Dict[str, torch.Tensor]:
 
 
         # TODO: Update for array reset
         # Reset the model if needed
         # if reset:
         #     self._state = None
-        import pdb; pdb.set_trace()
 
         token_tensor = tokens['tokens']
         if self._state is not None:
@@ -181,7 +180,7 @@ class AwdLstmLanguageModel(Model):
 
         # Update previous hidden state
         self._state = {
-                'tokens': token_tensor[:, -1].unsqueeze(1)
+                # 'tokens': token_tensor[:, -1].unsqueeze(1)
         }
         for layer, hidden in enumerate(current_hidden):
             self._state['layer_%i' % layer] = hidden
