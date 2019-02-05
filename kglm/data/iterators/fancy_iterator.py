@@ -88,7 +88,7 @@ class FancyIterator(DataIterator):
 
     def _split(self, instance: Instance) -> Tuple[List[Instance], int]:
         # Determine the size of the sequence inside the instance.
-        true_length = len(instance['tokens'])
+        true_length = len(instance['source'])
         padded_length = self._split_size * (true_length // self._split_size)
 
         # Determine the split indices.
@@ -109,9 +109,9 @@ class FancyIterator(DataIterator):
 
             # Determine whether or not to signal model to reset.
             if i == 0:
-                reset = SequentialArrayField(np.array(1, dtype=np.uint8), dtype=np.uint8)
+                reset = SequentialArrayField(np.array(1), dtype=np.uint8)
             else:
-                reset = SequentialArrayField(np.array(0, dtype=np.uint8), dtype=np.uint8)
+                reset = SequentialArrayField(np.array(0), dtype=np.uint8)
             chunk_fields['reset'] = reset
 
             # Obtain splits derived from sequence fields.
@@ -145,4 +145,3 @@ class FancyIterator(DataIterator):
 
     def get_num_batches(self, instances: Iterable[Instance]) -> float:
         return 1
-

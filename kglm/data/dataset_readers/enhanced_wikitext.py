@@ -50,8 +50,12 @@ class EnhancedWikitextReader(DatasetReader):
         tokens = _flatten(data['tokens'])
         tokens = ['@@START@@', *tokens, '@@END@@']
         tokens = [Token(x) for x in tokens]
-        fields = {'tokens': TextField(tokens, self._token_indexers)}
-
+        source = tokens[:-1]
+        target = tokens[1:]
+        fields = {
+                'source': TextField(source, self._token_indexers),
+                'target': TextField(target, self._token_indexers)
+        }
         return Instance(fields)
 
 

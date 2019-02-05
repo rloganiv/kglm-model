@@ -1,13 +1,12 @@
 """AWD-LSTM Baseline"""
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from allennlp.data.vocabulary import Vocabulary #, DEFAULT_OOV_TOKEN
 # from allennlp.modules import TextFieldEmbedder
 from allennlp.models import Model
 from allennlp.nn import InitializerApplicator
-# from allennlp.nn.util import get_text_field_mask, masked_log_softmax
-from allennlp.nn.util import sequence_cross_entropy_with_logits
+from allennlp.nn.util import get_text_field_mask, sequence_cross_entropy_with_logits
 # from allennlp.training.metrics import Average
 from overrides import overrides
 import torch
@@ -81,7 +80,7 @@ class AwdLstmLanguageModel(Model):
         self.dropout = dropout
 
         # Initialize empty state dict
-        self._state: StateDict = None
+        self._state: Optional[Dict[str, Any]] = None
 
         # Tokens are manually embedded instead of using a TokenEmbedder to make using
         # embedding_dropout easier.
@@ -102,7 +101,7 @@ class AwdLstmLanguageModel(Model):
                 output_size = hidden_size
             rnns.append(torch.nn.LSTM(input_size, output_size, batch_first=True))
         # TODO: Make weight dropping work...
-        rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in rnns]
+        # rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in rnns]
         self.rnns = torch.nn.ModuleList(rnns)
 
         self.decoder = torch.nn.Linear(output_size, vocab.get_vocab_size(namespace='tokens'))
@@ -120,37 +119,23 @@ class AwdLstmLanguageModel(Model):
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
-                tokens: Dict[str, torch.Tensor],
+                source: Dict[str, torch.Tensor],
+                target: Dict[str, torch.Tensor],
                 reset: torch.Tensor) -> Dict[str, torch.Tensor]:
 
-        token_tensor = tokens['tokens']
-        batch_size = token_tensor.shape[0]
-        # token_tensor = tokens
-        if self._state is not None:
-            prev_token = self._state['tokens']
-            token_tensor = torch.cat((prev_token, token_tensor), dim=1)
-        inputs = token_tensor[:, :-1].contiguous()
-        targets = token_tensor[:, 1:].contiguous()
-        target_masks = targets.gt(0)
+        # Reset hidden states
+        if reset.any() and (self._state is not None):
+            for layer in range(self.num_layers):
+                h, c = self._state['layer_%i' % layer]
+                h[:, reset, :] = torch.zeros_like(h[:, reset, :])
+                c[:, reset, :] = torch.zeros_like(c[:, reset, :])
+                self._state['layer_%i' % layer] = (h, c)
 
-        if isinstance(reset, bool):
-            if reset:
-                reset = torch.ones(batch_size)
-            else:
-                reset = torch.zeros(batch_size)
+        target_mask = get_text_field_mask(target)
+        source = source['tokens']
+        target = target['tokens']
 
-
-        if self._state is not None:
-            if reset.sum() > 0:
-                reset=reset.byte()
-                for layer in range(self.num_layers):
-                    h, c = self._state['layer_%i' % layer]
-                    h[:, reset, :] = torch.zeros_like(h[:, reset, :])
-                    c[:, reset, :] = torch.zeros_like(c[:, reset, :])
-                    self._state['layer_%i' % layer] = (h, c)
-
-
-        embeddings = embedded_dropout(self.embedder, inputs,
+        embeddings = embedded_dropout(self.embedder, source,
                                       dropout=self.dropoute if self.training else 0)
         embeddings = self.locked_dropout(embeddings, self.dropouti)
 
@@ -164,7 +149,7 @@ class AwdLstmLanguageModel(Model):
             else:
                 prev_hidden = None
             output, hidden = rnn(current_input, prev_hidden)
-            output = output.contiguous()  # TODO: Inspect why this is failing...
+            output = output.contiguous()
             outputs.append(output)
 
             hidden = tuple(h.detach() for h in hidden)
@@ -179,12 +164,10 @@ class AwdLstmLanguageModel(Model):
                 dropped_outputs.append(current_input)
 
         logits = self.decoder(current_input)
-        loss = sequence_cross_entropy_with_logits(logits, targets,
-                                                  target_masks.float(),
+        loss = sequence_cross_entropy_with_logits(logits, target,
+                                                  target_mask,
                                                   average="token")
-        # loss = self.criterion(self.decoder.weight, self.decoder.bias,
-        #                       output, targets)
-        num_tokens = target_masks.float().sum() + 1e-13
+        num_tokens = target_mask.sum() + 1e-13
         self.ppl(loss * num_tokens, num_tokens)
 
         if self.alpha:
@@ -193,12 +176,8 @@ class AwdLstmLanguageModel(Model):
         if self.beta:
             loss = loss + sum(self.beta * (rnn_h[1:] - rnn_h[:-1]).pow(2).mean() for rnn_h in outputs[-1:])
 
-        # Update previous hidden state
-        self._state = {
-                'tokens': token_tensor[:, -1].unsqueeze(1)
-        }
-        for layer, hidden in enumerate(current_hidden):
-            self._state['layer_%i' % layer] = hidden
+        # Update state
+        self._state = {'layer_%i' % l: h for l, h in enumerate(current_hidden)}
 
         return {'loss': loss}
 
@@ -211,4 +190,3 @@ class AwdLstmLanguageModel(Model):
         return {
             'ppl': self.ppl.get_metric(reset)
         }
-

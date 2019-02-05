@@ -14,7 +14,7 @@
         "type": "fancy",
         "batch_size": 2,
         "split_size": 10,
-        "splitting_keys": ["tokens"]
+        "splitting_keys": ["source", "target"]
     },
     "trainer": {
         "num_epochs": 2,
