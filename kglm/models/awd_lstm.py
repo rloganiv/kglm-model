@@ -1,30 +1,20 @@
-"""AWD-LSTM Baseline"""
-import logging
 from typing import Any, Dict, List, Optional
 
-from allennlp.data.vocabulary import Vocabulary #, DEFAULT_OOV_TOKEN
-# from allennlp.modules import TextFieldEmbedder
+from allennlp.data.vocabulary import Vocabulary
 from allennlp.models import Model
 from allennlp.nn import InitializerApplicator
 from allennlp.nn.util import get_text_field_mask, sequence_cross_entropy_with_logits
-# from allennlp.training.metrics import Average
 from overrides import overrides
 import torch
-# import torch.nn.functional as F
 
-from kglm.common.typing import StateDict
-# from kglm.data import AliasDatabase
-from kglm.modules import embedded_dropout, LockedDropout, SplitCrossEntropyLoss, WeightDrop
+from kglm.modules import embedded_dropout, LockedDropout, WeightDrop
 from kglm.training.metrics import Ppl
-
-logger = logging.getLogger(__name__)
-
 
 
 @Model.register('awd-lstm-lm')
 class AwdLstmLanguageModel(Model):
     """
-    Attempt to recreate model from:
+    Port of the awd-lstm-lm model from:
         https://github.com/salesforce/awd-lstm-lm/
 
     Parameters
@@ -39,6 +29,7 @@ class AwdLstmLanguageModel(Model):
         Number of LSTM layers to use in encoder.
     splits : ``List[int]``, optional (default=``[]``)
         Splits to use in adaptive softmax.
+
     A bunch of optional dropout parameters...
 
     tie_weights : ``bool``, optional (default=``False``)
@@ -87,8 +78,6 @@ class AwdLstmLanguageModel(Model):
         self.embedder = torch.nn.Embedding(vocab.get_vocab_size(namespace='tokens'),
                                            embedding_size)
 
-        # We also will manually define the LSTMs instead of using a Seq2SeqEncoder to keep the
-        # layer input / output sizes consistent with awd-lstm-lm.
         rnns: List[torch.nn.Module] = []
         for i in range(num_layers):
             if i == 0:
@@ -105,8 +94,6 @@ class AwdLstmLanguageModel(Model):
 
         self.decoder = torch.nn.Linear(output_size, vocab.get_vocab_size(namespace='tokens'))
 
-        # self.criterion = SplitCrossEntropyLoss(embedding_size, splits=splits, verbose=False)
-
         # Optionally tie weights
         if tie_weights:
             # pylint: disable=protected-access
@@ -115,7 +102,6 @@ class AwdLstmLanguageModel(Model):
         initializer(self)
 
         self.ppl = Ppl()
-
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
@@ -139,23 +125,29 @@ class AwdLstmLanguageModel(Model):
                                       dropout=self.dropoute if self.training else 0)
         embeddings = self.locked_dropout(embeddings, self.dropouti)
 
+        # Iterate through RNN layers
         current_input = embeddings
         current_hidden = []
         outputs = []
         dropped_outputs = []
         for layer, rnn in enumerate(self.rnns):
+
+            # Bookkeeping
             if self._state is not None:
                 prev_hidden = self._state['layer_%i' % layer]
             else:
                 prev_hidden = None
+
+            # Forward-pass
             output, hidden = rnn(current_input, prev_hidden)
+
+            # More bookkeeping
             output = output.contiguous()
             outputs.append(output)
-
             hidden = tuple(h.detach() for h in hidden)
             current_hidden.append(hidden)
 
-            # Apply dropout to hidden layer outputs / final output
+            # Apply dropout
             if layer == self.num_layers - 1:
                 current_input = self.locked_dropout(output, self.dropout)
                 dropped_outputs.append(output)
@@ -163,31 +155,38 @@ class AwdLstmLanguageModel(Model):
                 current_input = self.locked_dropout(output, self.dropouth)
                 dropped_outputs.append(current_input)
 
+        # Compute logits and loss
         logits = self.decoder(current_input)
         loss = sequence_cross_entropy_with_logits(logits, target,
                                                   target_mask,
                                                   average="token")
         num_tokens = target_mask.sum() + 1e-13
-        self.ppl(loss * num_tokens, num_tokens)
 
+        # Activation regularization
         if self.alpha:
             loss = loss + sum(self.alpha * dropped_rnn_h.pow(2).mean() for dropped_rnn_h in dropped_outputs[-1:])
-        # Temporal Activation Regularization (slowness)
+        # Temporal activation regularization (slowness)
         if self.beta:
             loss = loss + sum(self.beta * (rnn_h[:, 1:] - rnn_h[:, :-1]).pow(2).mean() for rnn_h in outputs[-1:])
 
-        # Update state
+        # Update metrics and state
+        self.ppl(loss * num_tokens, num_tokens)
         self._state = {'layer_%i' % l: h for l, h in enumerate(current_hidden)}
 
         return {'loss': loss}
 
     @overrides
     def train(self, mode=True):
+        # TODO: This is a temporary hack to ensure that the internal state resets when the model
+        # switches from training to evaluation. The complication arises from potentially differing
+        # batch sizes (e.g. the `reset` tensor will not be the right size). In future
+        # implementations this should be handled more robustly.
         super(AwdLstmLanguageModel, self).train(mode)
         self._state = None
 
     @overrides
     def eval(self):
+        # TODO: See train.
         super(AwdLstmLanguageModel, self).eval()
         self._state = None
 
