@@ -8,7 +8,8 @@
         "type": "awd-lstm-lm",
         "embedding_size": 5,
         "hidden_size": 7,
-        "num_layers": 3
+        "num_layers": 3,
+        "tie_weights": true
     },
     "iterator": {
         "type": "fancy",

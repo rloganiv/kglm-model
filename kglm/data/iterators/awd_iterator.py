@@ -5,6 +5,7 @@ from typing import Dict, Iterable, Iterator, List, Tuple, Union
 
 from allennlp.data.instance import Instance
 from allennlp.data.iterators import DataIterator
+import numpy as np
 import torch
 
 logger = logging.getLogger(__name__)
@@ -52,14 +53,37 @@ class AwdIterator(DataIterator):
             for instance in instance_list:
                 instance.index_fields(self.vocab)
             tensor_dicts = [instance.as_tensor_dict() for instance in instance_list]
-            tokens = [d['tokens']['tokens'] for d in tensor_dicts]
-            omni_tensor = torch.cat(tokens, 0)
-            truncate_to = self._batch_size * (omni_tensor.shape[0] // self._batch_size)
-            omni_tensor = omni_tensor[:truncate_to]
-            omni_tensor = omni_tensor.view(self._batch_size, -1)
-            split_indices = list(range(0, omni_tensor.shape[1], self._split_size))
-            for start, end in zip(split_indices[:-1], split_indices[1:]):
-                yield {'tokens': omni_tensor[:, start:end]}
+
+            source = [d['source']['tokens'] for d in tensor_dicts]
+            omni_source_tensor = torch.cat(source, 0)
+
+            target = [d['target']['tokens'] for d in tensor_dicts]
+            omni_target_tensor = torch.cat(target, 0)
+
+            truncate_to = self._batch_size * (omni_source_tensor.shape[0] // self._batch_size)
+
+            omni_source_tensor = omni_source_tensor[:truncate_to]
+            omni_source_tensor = omni_source_tensor.view(self._batch_size, -1)
+
+            omni_target_tensor = omni_target_tensor[:truncate_to]
+            omni_target_tensor = omni_target_tensor.view(self._batch_size, -1)
+
+            last = 0
+            while last < omni_source_tensor.shape[1]:
+                if random.random() > 0.5:
+                    delta = int(np.random.normal(self._split_size, 5))
+                else:
+                    delta = int(np.random.normal(self._split_size / 2, 5))
+                start = last
+                last += delta
+                if last >= (omni_source_tensor.shape[1] - 1):
+                    break
+                dict = {
+                    'source': {'tokens': omni_source_tensor[:, start:last]},
+                    'target': {'tokens': omni_target_tensor[:, start:last]},
+                    'reset': torch.zeros(self._batch_size, dtype=torch.uint8)
+                }
+                yield dict
 
             self._epochs[key] = epoch + 1
 

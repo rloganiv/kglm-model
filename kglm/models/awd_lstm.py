@@ -100,8 +100,7 @@ class AwdLstmLanguageModel(Model):
             else:
                 output_size = hidden_size
             rnns.append(torch.nn.LSTM(input_size, output_size, batch_first=True))
-        # TODO: Make weight dropping work...
-        # rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in rnns]
+        rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in rnns]
         self.rnns = torch.nn.ModuleList(rnns)
 
         self.decoder = torch.nn.Linear(output_size, vocab.get_vocab_size(namespace='tokens'))
@@ -113,9 +112,10 @@ class AwdLstmLanguageModel(Model):
             # pylint: disable=protected-access
             self.decoder.weight = self.embedder.weight
 
+        initializer(self)
+
         self.ppl = Ppl()
 
-        initializer(self)
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
@@ -174,12 +174,17 @@ class AwdLstmLanguageModel(Model):
             loss = loss + sum(self.alpha * dropped_rnn_h.pow(2).mean() for dropped_rnn_h in dropped_outputs[-1:])
         # Temporal Activation Regularization (slowness)
         if self.beta:
-            loss = loss + sum(self.beta * (rnn_h[1:] - rnn_h[:-1]).pow(2).mean() for rnn_h in outputs[-1:])
+            loss = loss + sum(self.beta * (rnn_h[:, 1:] - rnn_h[:, :-1]).pow(2).mean() for rnn_h in outputs[-1:])
 
         # Update state
         self._state = {'layer_%i' % l: h for l, h in enumerate(current_hidden)}
 
         return {'loss': loss}
+
+    @overrides
+    def train(self, mode=True):
+        super(AwdLstmLanguageModel, self).train(mode)
+        self._state = None
 
     @overrides
     def eval(self):
