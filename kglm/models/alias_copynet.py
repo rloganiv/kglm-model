@@ -20,10 +20,10 @@ logger = logging.getLogger(__name__)
 LOG0 = torch.tensor(1e-45).log()  # pylint: disable=not-callable
 
 
-@Model.register('kglm')
-class Kglm(Model):
+@Model.register('alias-copynet')
+class AliasCopynet(Model):
     """
-    Knowledge graph language model.
+    Oracle alias copynet language model.
 
     Parameters
     ----------
@@ -44,7 +44,7 @@ class Kglm(Model):
                  tie_weights: bool,
                  dropout_rate: float,
                  variational_dropout_rate: float) -> None:
-        super(Kglm, self).__init__(vocab)
+        super(AliasCopynet, self).__init__(vocab)
 
         assert entity_embedder.get_output_dim() == token_embedder.get_output_dim()
 
