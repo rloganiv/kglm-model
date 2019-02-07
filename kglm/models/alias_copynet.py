@@ -1,18 +1,21 @@
 import logging
-from typing import Any, Dict, List
+import math
+from typing import Any, Dict, List, Optional
 
 from allennlp.data.vocabulary import Vocabulary, DEFAULT_OOV_TOKEN
-from allennlp.modules import Seq2SeqEncoder, TextFieldEmbedder
-from allennlp.modules.input_variational_dropout import InputVariationalDropout
+from allennlp.modules import TextFieldEmbedder
 from allennlp.models import Model
-from allennlp.nn.util import get_text_field_mask, masked_log_softmax
+from allennlp.nn import InitializerApplicator
+from allennlp.nn.util import get_text_field_mask, masked_log_softmax, \
+    sequence_cross_entropy_with_logits
 from allennlp.training.metrics import Average
 from overrides import overrides
 import torch
 import torch.nn.functional as F
 
-from kglm.common.typing import StateDict
 from kglm.data import AliasDatabase
+from kglm.modules import embedded_dropout, LockedDropout, WeightDrop
+from kglm.training.metrics import Ppl
 
 logger = logging.getLogger(__name__)
 
@@ -38,116 +41,163 @@ class AliasCopynet(Model):
     """
     def __init__(self,
                  vocab: Vocabulary,
-                 encoder: Seq2SeqEncoder,
                  token_embedder: TextFieldEmbedder,
                  entity_embedder: TextFieldEmbedder,
-                 tie_weights: bool,
-                 dropout_rate: float,
-                 variational_dropout_rate: float) -> None:
+                 hidden_size: int,
+                 num_layers: int,
+                 dropout: float = 0.4,
+                 dropouth: float = 0.3,
+                 dropouti: float = 0.65,
+                 dropoute: float = 0.1,
+                 wdrop: float = 0.5,
+                 alpha: float = 2.0,
+                 beta: float = 1.0,
+                 tie_weights: bool = False,
+                 initializer: InitializerApplicator = InitializerApplicator()) -> None:
         super(AliasCopynet, self).__init__(vocab)
 
-        assert entity_embedder.get_output_dim() == token_embedder.get_output_dim()
-
-        self._token_embedder = token_embedder
-        self._entity_embedder = entity_embedder
-        self._encoder = encoder
+        # Model architecture - Note: we need to extract the `Embedding` layers from the
+        # `TokenEmbedders` to apply dropout later on.
+        # pylint: disable=protected-access
+        self._token_embedder = token_embedder._token_embedders['tokens']
+        self._entity_embedder = entity_embedder._token_embedders['entity_ids']
+        self._hidden_size = hidden_size
+        self._num_layers = num_layers
         self._tie_weights = tie_weights
-        self._variational_dropout_rate = variational_dropout_rate
-        self._dropout_rate = dropout_rate
-        self._unk_index = vocab.get_token_index(DEFAULT_OOV_TOKEN)
 
-        embedding_dim = self._token_embedder.get_output_dim()
-        hidden_dim = self._encoder.get_output_dim()
+        # Dropout
+        self._locked_dropout = LockedDropout()
+        self._dropout = dropout
+        self._dropouth = dropouth
+        self._dropouti = dropouti
+        self._dropoute = dropoute
+        self._wdrop = wdrop
 
-        # Merity et al 2017, section 4.5 suggests that the LSTM hidden layer be larger than the
-        # embeddings. We'll use these `Linear` layers to project them.
-        self._embedding_to_hidden = torch.nn.Linear(in_features=embedding_dim,
-                                                    out_features=hidden_dim)
-        self._hidden_to_embedding = torch.nn.Linear(in_features=hidden_dim,
-                                                    out_features=embedding_dim)
+        # Regularization strength
+        self._alpha = alpha
+        self._beta = beta
 
-        self._variational_dropout = InputVariationalDropout(variational_dropout_rate)
-        self._dropout = torch.nn.Dropout(dropout_rate)
+        # RNN Encoders. TODO: Experiment with seperate encoder for aliases.
+        entity_embedding_dim = entity_embedder.get_output_dim()
+        token_embedding_dim = entity_embedder.get_output_dim()
+        assert entity_embedding_dim == token_embedding_dim
+        embedding_dim = token_embedding_dim
 
-        self._mention_type_projection = torch.nn.Linear(in_features=embedding_dim,
-                                                        out_features=2)
-        self._entity_projection = torch.nn.Linear(in_features=embedding_dim,
-                                                  out_features=embedding_dim)
+        rnns: List[torch.nn.Module] = []
+        for i in range(num_layers):
+            if i == 0:
+                input_size = token_embedding_dim
+            else:
+                input_size = hidden_size
+            if (i == num_layers - 1) and tie_weights:
+                output_size = token_embedding_dim
+            else:
+                output_size = hidden_size
+            rnns.append(torch.nn.LSTM(input_size, output_size, batch_first=True))
+        # rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in rnns]
+        self.rnns = torch.nn.ModuleList(rnns)
 
-        self._condense_projection = torch.nn.Linear(in_features=2 * embedding_dim,
-                                                    out_features=embedding_dim)
-        self._generate_mode_projection = torch.nn.Linear(in_features=embedding_dim,
-                                                         out_features=vocab.get_vocab_size('tokens'))
-        self._copy_mode_projection = torch.nn.Linear(in_features=embedding_dim,
-                                                     out_features=embedding_dim)
+        # Various linear transformations.
+        self._fc_mention = torch.nn.Linear(
+            in_features=embedding_dim,
+            out_features=2)
+
+        self._fc_entity = torch.nn.Linear(
+            in_features=embedding_dim,
+            out_features=embedding_dim)
+
+        self._fc_condense = torch.nn.Linear(
+            in_features=2 * embedding_dim,
+            out_features=embedding_dim)
+
+        self._fc_generate = torch.nn.Linear(
+            in_features=embedding_dim,
+            out_features=vocab.get_vocab_size('tokens'))
+
+        self._fc_copy = torch.nn.Linear(
+            in_features=embedding_dim,
+            out_features=embedding_dim)
 
         if tie_weights:
-            self._generate_mode_projection.weight = self._token_embedder._token_embedders['tokens'].weight  # pylint: disable=W0212
+            self._fc_generate.weight = self._token_embedder.weight
 
-        self._state: StateDict = None
+        self._state: Optional[Dict[str, Any]]= None
 
         # Metrics
-        self._avg_mention_loss = Average()
-        self._avg_entity_loss = Average()
-        self._avg_vocab_loss = Average()
-        self._avg_mention_vocab_loss = Average()
-        self._avg_non_mention_vocab_loss = Average()
+        # self._avg_mention_loss = Average()
+        # self._avg_entity_loss = Average()
+        # self._avg_vocab_loss = Average()
+        self._unk_index = vocab.get_token_index(DEFAULT_OOV_TOKEN)
+        self._unk_penalty = math.log(vocab.get_vocab_size('tokens_unk'))
+        self._ppl = Ppl()
+        self._upp = Ppl()
+        self._kg_ppl = Ppl()  # Knowledge-graph ppl
+        self._bg_ppl = Ppl()  # Background ppl
+
+        initializer(self)
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
-                tokens: Dict[str, torch.Tensor],
-                reset: bool,
+                source: Dict[str, torch.Tensor],
+                target: Dict[str, torch.Tensor],
+                reset: torch.Tensor,
                 metadata: List[Dict[str, Any]],
-                entity_identifiers: torch.Tensor = None,
+                entity_ids: torch.Tensor = None,
                 shortlist: Dict[str, torch.Tensor] = None,
-                shortlist_indices: torch.Tensor = None,
-                alias_copy_indices: torch.Tensor = None) -> Dict[str, torch.Tensor]:
+                shortlist_inds: torch.Tensor = None,
+                alias_copy_inds: torch.Tensor = None) -> Dict[str, torch.Tensor]:
 
         # Tensorize the alias_database - this will only perform the operation once.
         alias_database = metadata[0]['alias_database']
         alias_database.tensorize(vocab=self.vocab)
 
         # Reset the model if needed
-        if reset:
-            self.reset_states()
+        if reset.any() and (self._state is not None):
+            for layer in range(self._num_layers):
+                h, c = self._state['layer_%i' % layer]
+                h[:, reset, :] = torch.zeros_like(h[:, reset, :])
+                c[:, reset, :] = torch.zeros_like(c[:, reset, :])
+                self._state['layer_%i' % layer] = (h, c)
 
-        if entity_identifiers is not None:
-            output_dict = self._forward_loop(tokens=tokens,
-                                             alias_database=alias_database,
-                                             entity_identifiers=entity_identifiers,
-                                             shortlist=shortlist,
-                                             shortlist_indices=shortlist_indices,
-                                             alias_copy_indices=alias_copy_indices)
-
+        if entity_ids is not None:
+            output_dict = self._forward_loop(
+                source=source,
+                target=target,
+                alias_database=alias_database,
+                entity_ids=entity_ids,
+                shortlist=shortlist,
+                shortlist_inds=shortlist_inds,
+                alias_copy_inds=alias_copy_inds)
         else:
+            # TODO: Figure out what we want here - probably to do some king of inference on
+            # entities / mention types.
             output_dict = {}
 
         return output_dict
 
     def _mention_loss(self,
-                      hidden: torch.Tensor,
+                      encoded: torch.Tensor,
                       targets: torch.Tensor,
                       mask: torch.Tensor) -> torch.Tensor:
         """
-        Computes the loss term for predicting whether or not the the next token will be part of
-        an entity mention.
+        Computes the loss for predicting whether or not the the next token will be part of an
+        entity mention.
         """
-        logits = self._mention_type_projection(hidden)
-        mention_loss = F.cross_entropy(logits.view(-1, 2), targets.view(-1), reduction='none')
-        mention_loss *= mask.view(-1).float()
-        mention_loss = mention_loss.sum() / (mask.float().sum() + 1e-13)
-        self._avg_mention_loss(mention_loss)  # Update metric
+        logits = self._fc_mention(encoded)
+        mention_loss = sequence_cross_entropy_with_logits(logits, targets, mask,
+                                                          average='token')
         return mention_loss
 
     def _entity_loss(self,
-                     hidden: torch.Tensor,
+                     encoded: torch.Tensor,
                      targets: torch.Tensor,
                      mask: torch.Tensor,
                      shortlist_embeddings: torch.Tensor,
                      shortlist_mask: torch.Tensor) -> torch.Tensor:
         # Logits are computed using a bilinear form that measures the similarity between the
         # projected hidden state and the embeddings of entities in the shortlist
-        projected = self._entity_projection(hidden)
+        projected = self._fc_entity(encoded)
+        projected = self._locked_dropout(projected, self._dropout)
         logits = torch.bmm(projected, shortlist_embeddings.transpose(1, 2))
 
         # There are technically two masks that need to be accounted for: a class-wise mask which
@@ -155,16 +205,19 @@ class AliasCopynet(Model):
         # `mask`) which avoids measuring loss for predictions on non-mention tokens. In practice,
         # we only need the class-wise mask since the non-mention tokens cannot be associated with a
         # valid target.
-        batch_size = hidden.shape[0]
+        batch_size = encoded.shape[0]
         entity_loss = 0.0
         for i in range(batch_size):
-            entity_loss += F.cross_entropy(logits[i], targets[i], shortlist_mask[i].float(), reduction='sum')
+            entity_loss += F.cross_entropy(
+                input=logits[i],
+                target=targets[i],
+                weight=shortlist_mask[i].float(),
+                reduction='sum')
         entity_loss = entity_loss / (mask.float().sum() + 1e-13)
-        self._avg_entity_loss(entity_loss)
         return entity_loss
 
     def _copy_scores(self,
-                     hidden: torch.Tensor,
+                     encoded: torch.Tensor,
                      alias_tokens: torch.Tensor) -> torch.Tensor:
         # Begin by flattening the tokens so that they fit the expected shape of a
         # ``Seq2SeqEncoder``.
@@ -172,22 +225,32 @@ class AliasCopynet(Model):
         flattened = alias_tokens.view(-1, alias_length)
         copy_mask = flattened != 0
         if copy_mask.sum() == 0:
-            return hidden.new_zeros(batch_size, sequence_length, 1, dtype=torch.float32)
+            return encoded.new_zeros((batch_size, sequence_length, 1),
+                                     dtype=torch.float32)
 
-        # Next we run through standard pipeline
-        embedded = self._token_embedder({'tokens': flattened})  # UGLY
-        expanded = self._embedding_to_hidden(embedded)
-        encoded = self._encoder(expanded, copy_mask)
-        contracted = self._hidden_to_embedding(encoded)
+        # Embed and encode the alias tokens.
+        current_input = self._token_embedder(flattened)
+        for layer, rnn in enumerate(self.rnns):
+            # Forward-pass.
+            output, hidden = rnn(current_input)
+            output = output.contiguous()
+            # Apply dropout.
+            if layer == self._num_layers - 1:
+                dropped_output = self._locked_dropout(output, self._dropout)
+            else:
+                dropped_output = self._locked_dropout(output, self._dropouth)
+            current_input = dropped_output
+        encoded_aliases = current_input
 
         # Equation 8 in the CopyNet paper recommends applying the additional step.
-        projected = torch.tanh(self._copy_mode_projection(contracted))
+        projected = torch.tanh(self._fc_copy(encoded_aliases))
+        projected = self._locked_dropout(projected, self._dropout)
 
         # This part gets a little funky - we need to make sure that the first dimension in
         # `projected` and `hidden` is batch_size x sequence_length.
-        hidden = hidden.view(batch_size * sequence_length, 1, -1)
+        encoded = encoded.view(batch_size * sequence_length, 1, -1)
         projected = projected.view(batch_size * sequence_length, -1, num_aliases * alias_length)
-        copy_scores = torch.bmm(hidden, projected).squeeze()
+        copy_scores = torch.bmm(encoded, projected).squeeze()
         copy_scores = copy_scores.view(batch_size, sequence_length, -1).contiguous()
 
         return copy_scores
@@ -198,7 +261,8 @@ class AliasCopynet(Model):
                     target_tokens: torch.Tensor,
                     target_copy_indices: torch.Tensor,
                     mask: torch.Tensor,
-                    alias_indices: torch.Tensor):
+                    alias_indices: torch.Tensor,
+                    mention_mask: torch.Tensor):
 
         batch_size, sequence_length, vocab_size = generate_scores.shape
         copy_sequence_length = copy_scores.shape[-1]
@@ -220,9 +284,9 @@ class AliasCopynet(Model):
         # ...except we need to omit any <UNK> terms that correspond to copy tokens.
         unk_targets = target_tokens.eq(self._unk_index)
         copied_targets = target_copy_indices.gt(0)
-        ignore_mask = (unk_targets * copied_targets)
-        generate_mask = (1 - mask.byte()) * ignore_mask
-        generate_log_probs[generate_mask.view(-1)] = LOG0
+        false_unk_mask = unk_targets * copied_targets
+        true_unk_mask = unk_targets * (1 - copied_targets)
+        generate_log_probs[false_unk_mask.view(-1)] = LOG0
 
         # The copied token loss requires adding up all of the relevant token log probabilities.
         # We'll use a for loop to keep things simple for now.
@@ -242,113 +306,134 @@ class AliasCopynet(Model):
         combined_log_probs = torch.stack((generate_log_probs, copy_log_probs), dim=1)
         combined_log_probs = torch.logsumexp(combined_log_probs, dim=1)
         vocab_loss = -combined_log_probs.sum() / (mask.float().sum() + 1e-13)
-        self._avg_vocab_loss(vocab_loss)
 
-        mention_vocab_loss = -combined_log_probs[flattened_copy_mask].sum() / (flattened_copy_mask.float().sum() + 1e-13)
-        non_mention_vocab_loss = -combined_log_probs[1 - flattened_copy_mask].sum() / (mask.float().sum() - flattened_copy_mask.float().sum() + 1e-13)
-        self._avg_mention_vocab_loss(mention_vocab_loss)
-        self._avg_non_mention_vocab_loss(non_mention_vocab_loss)
+        penalty = self._unk_penalty * true_unk_mask.float().sum()
+
+        kg_mask = (mention_mask * mask.byte()).view(-1)
+        bg_mask = ((1 - mention_mask) * mask.byte()).view(-1)
+
+        self._ppl(-combined_log_probs.sum(), mask.sum() + 1e-13)
+        self._upp(-combined_log_probs.sum() + penalty, mask.sum() + 1e-13)
+        self._kg_ppl(-combined_log_probs[kg_mask].sum(), kg_mask.float().sum() + 1e-13)
+        self._bg_ppl(-combined_log_probs[bg_mask].sum(), bg_mask.float().sum() + 1e-13)
 
         return vocab_loss
 
     def _forward_loop(self,
-                      tokens: Dict[str, torch.Tensor],
+                      source: Dict[str, torch.Tensor],
+                      target: Dict[str, torch.Tensor],
                       alias_database: AliasDatabase,
-                      entity_identifiers: Dict[str, torch.Tensor],
+                      entity_ids: Dict[str, torch.Tensor],
                       shortlist: Dict[str, torch.Tensor],
-                      shortlist_indices: torch.Tensor,
-                      alias_copy_indices: torch.Tensor) -> Dict[str, torch.Tensor]:
+                      shortlist_inds: torch.Tensor,
+                      alias_copy_inds: torch.Tensor) -> Dict[str, torch.Tensor]:
 
-        if self._state is not None:
-            tokens = {field: torch.cat((self._state['prev_tokens'][field], tokens[field]), dim=1)
-                      for field in tokens}
-            entity_identifiers = {field: torch.cat((self._state['prev_entity_identifiers'][field],
-                                                    entity_identifiers[field]), dim=1)
-                                  for field in entity_identifiers}
-            shortlist_indices = torch.cat((self._state['prev_shortlist_indices'], shortlist_indices), dim=1)
-            alias_copy_indices = torch.cat((self._state['prev_alias_copy_indices'], alias_copy_indices), dim=1)
+        # Get the token mask and unwrap the target tokens.
+        target_mask = get_text_field_mask(target)
+        target = target['tokens']
 
-        # Get the token mask and target tensors
-        token_mask = get_text_field_mask(tokens)
-        target_mask = token_mask[:, 1:].contiguous()
-        target_tokens = tokens['tokens'][:, 1:].contiguous()
-        target_copy_indices = alias_copy_indices[:, 1:].contiguous()
+        # Embed source tokens.
+        source = source['tokens']
+        source_embeddings = embedded_dropout(
+            embed=self._token_embedder,
+            words=source,
+            dropout=self._dropoute if self.training else 0)
+        source_embeddings = self._locked_dropout(source_embeddings, self._dropouti)
 
-        # Embed and encode the source tokens
-        source_mask = token_mask[:, :-1].contiguous()
-        source_embeddings = self._token_embedder(tokens)[:, :-1].contiguous()
-        source_embeddings = self._variational_dropout(source_embeddings)
-        expanded = self._embedding_to_hidden(source_embeddings)
-        hidden = self._encoder(expanded, source_mask)
-        hidden = self._hidden_to_embedding(hidden)
+        # Embed entities.
+        entity_ids = entity_ids['entity_ids']
+        entity_embeddings = embedded_dropout(
+            embed=self._entity_embedder,
+            words=entity_ids,
+            dropout=self._dropoute if self.training else 0)
+        entity_embeddings = self._locked_dropout(entity_embeddings, self._dropouti)
 
-        # Embed entities
-        entity_mask = get_text_field_mask(entity_identifiers)
-        entity_embeddings = self._entity_embedder(entity_identifiers)
-        entity_embeddings = self._variational_dropout(entity_embeddings)
-
-        # Embed entity shortlist
+        # Embed shortlist.
         shortlist_mask = get_text_field_mask(shortlist)
-        shortlist_embeddings = self._entity_embedder(shortlist)
-        shortlist_embeddings = self._variational_dropout(shortlist_embeddings)
+        shortlist = shortlist['entity_ids']
+        shortlist_embeddings = embedded_dropout(
+            embed=self._entity_embedder,
+            words=shortlist,
+            dropout=self._dropoute if self.training else 0)
 
-        # Predict whether or not the next token will be an entity mention.
-        target_mentions = entity_mask[:, 1:].contiguous()
-        mention_loss = self._mention_loss(hidden, target_mentions, target_mask)
+        # Encode source tokens.
+        current_input = source_embeddings
+        hidden_states = []
+        for layer, rnn in enumerate(self.rnns):
+            # Retrieve previous hidden state for layer.
+            if self._state is not None:
+                prev_hidden = self._state['layer_%i' % layer]
+            else:
+                prev_hidden = None
+            # Forward-pass.
+            output, hidden = rnn(current_input, prev_hidden)
+            output = output.contiguous()
+            # Update hidden state for layer.
+            hidden = tuple(h.detach() for h in hidden)
+            hidden_states.append(hidden)
+            # Apply dropout.
+            if layer == self._num_layers - 1:
+                dropped_output = self._locked_dropout(output, self._dropout)
+            else:
+                dropped_output = self._locked_dropout(output, self._dropouth)
+            current_input = dropped_output
+        encoded = current_input
+        self._state = {'layer_%i' % i: h for i, h in enumerate(hidden_states)}
+
+        # Predict whether or not the next token will be an entity mention. This corresponds to the
+        # case that the entity's id is not a padding token.
+        mention_loss = self._mention_loss(encoded, entity_ids.gt(0), target_mask)
 
         # Predict which entity (among those in the supplied shortlist) is going to be
         # mentioned.
-        target_shortlist_indices = shortlist_indices[:, 1:].contiguous()
-        entity_loss = self._entity_loss(hidden,
-                                        target_shortlist_indices,
+        entity_loss = self._entity_loss(encoded,
+                                        shortlist_inds,
                                         target_mask,
                                         shortlist_embeddings,
                                         shortlist_mask)
 
         # Predict generation-mode scores. Start by concatenating predicted entity embeddings with
         # the encoder output - then feed through a linear layer.
-        target_embeddings = entity_embeddings[:, 1:].contiguous()
-        concatenated = torch.cat((hidden, target_embeddings), dim=-1)
-        condensed = self._condense_projection(concatenated)
-        generate_scores = self._generate_mode_projection(condensed)
+        concatenated = torch.cat((encoded, entity_embeddings), dim=-1)
+        condensed = self._fc_condense(concatenated)
+        generate_scores = self._fc_generate(condensed)
 
         # Predict copy-mode scores.
-        target_entity_identifiers = entity_identifiers['entity_ids'][:, 1:].contiguous()
-        alias_tokens, alias_indices = alias_database.lookup(target_entity_identifiers)
-        copy_scores = self._copy_scores(hidden, alias_tokens)
+        alias_tokens, alias_inds = alias_database.lookup(entity_ids)
+        copy_scores = self._copy_scores(encoded, alias_tokens)
 
         # Combine scores to get vocab loss
         vocab_loss = self._vocab_loss(generate_scores,
                                       copy_scores,
-                                      target_tokens,
-                                      target_copy_indices,
+                                      target,
+                                      alias_copy_inds,
                                       target_mask,
-                                      alias_indices)
+                                      alias_inds,
+                                      entity_ids.gt(0))
 
         # Compute total loss
         loss = mention_loss + entity_loss + vocab_loss
-
-        # Update state
-        self._state = {
-                'prev_tokens': {field: tokens[field][:, -1].unsqueeze(1).detach() for field in tokens},
-                'prev_entity_identifiers': {field: entity_identifiers[field][:, -1].unsqueeze(1).detach()
-                                            for field in entity_identifiers},
-                'prev_shortlist_indices': shortlist_indices[:, -1].unsqueeze(1).detach(),
-                'prev_alias_copy_indices': alias_copy_indices[:, -1].unsqueeze(1).detach()
-        }
-
         return {'loss': loss}
 
-    def reset_states(self) -> None:
-        """Resets the model's internals. Should be called at the start of a new batch."""
-        self._encoder.reset_states()
+    @overrides
+    def train(self, mode=True):
+        # TODO: This is a temporary hack to ensure that the internal state resets when the model
+        # switches from training to evaluation. The complication arises from potentially differing
+        # batch sizes (e.g. the `reset` tensor will not be the right size). In future
+        # implementations this should be handled more robustly.
+        super().train(mode)
+        self._state = None
+
+    @overrides
+    def eval(self):
+        # TODO: See train.
+        super().eval()
         self._state = None
 
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         return {
-                'mention_loss': self._avg_mention_loss.get_metric(reset).item(),
-                'entity_loss': self._avg_entity_loss.get_metric(reset).item(),
-                'vocab_loss': self._avg_vocab_loss.get_metric(reset).item(),
-                'mention_vocab_loss': self._avg_mention_vocab_loss.get_metric(reset).item(),
-                'non_mention_vocab_loss': self._avg_non_mention_vocab_loss.get_metric(reset).item()
+            'ppl': self._ppl.get_metric(reset),
+            'upp': self._upp.get_metric(reset),
+            'kg_ppl': self._kg_ppl.get_metric(reset),
+            'bg_ppl': self._bg_ppl.get_metric(reset)
         }

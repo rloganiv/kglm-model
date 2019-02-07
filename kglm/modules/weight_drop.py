@@ -45,22 +45,21 @@ class WeightDrop(torch.nn.Module):
                 mask = raw_w.new_ones((raw_w.size(0), 1))
                 mask = torch.nn.functional.dropout(mask, p=self.dropout, training=True)
                 w = mask.expand_as(raw_w) * raw_w
-                setattr(self, name_w + "_mask", mask)
+                setattr(self, name_w + '_mask', mask)
             else:
                 # We really don't need a mask here, but we add it to keep PyTorch from complaining.
                 mask = raw_w.new_ones((raw_w.size(0), 1))
                 w = mask.expand_as(raw_w) * raw_w
-                setattr(self, name_w + "_mask", mask)
+                setattr(self, name_w + '_mask', mask)
             rnn_w = getattr(self.module, name_w)
             rnn_w.data.copy_(w)
 
     def _backward(self):
         # transfer gradients from embeddedRNN to raw params
-        print(self.training)
         for name_w in self.weights:
             raw_w = getattr(self, name_w + '_raw')
             rnn_w = getattr(self.module, name_w)
-            raw_w.grad = rnn_w.grad * getattr(self, name_w + "_mask")
+            raw_w.grad = rnn_w.grad * getattr(self, name_w + '_mask')
 
     def forward(self, *args):
         self._setweights()

@@ -18,5 +18,4 @@ class  AliasCopynetTest(ModelTestCase):
     def test_model_can_train_save_and_load(self):
         # TODO: Construct a test case where we can ensure that _copy_mode_projection is learning
         # something.
-        self.ensure_model_can_train_save_and_load(self.param_file,
-                                                  gradients_to_ignore=['_copy_mode_projection'])
+        self.ensure_model_can_train_save_and_load(self.param_file) #, gradients_to_ignore=['_copy_mode_projection'])

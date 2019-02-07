@@ -11,7 +11,11 @@ def embedded_dropout(embed, words, dropout=0.1, scale=None):
   if scale:
     masked_embed_weight = scale.expand_as(masked_embed_weight) * masked_embed_weight
 
-  padding_idx = embed.padding_idx
+  try:
+    padding_idx = embed.padding_index
+  except AttributeError:
+    padding_idx = embed.padding_idx
+
   if padding_idx is None:
       padding_idx = -1
 

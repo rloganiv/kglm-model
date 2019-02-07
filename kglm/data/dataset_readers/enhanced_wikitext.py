@@ -155,12 +155,15 @@ class EnhancedWikitextKglmReader(DatasetReader):
         # Flatten and pad tokens
         tokens = _flatten(data['tokens'])
         tokens = ['@@START@@', *tokens, '@@END@@']
+        source = [Token(x) for x in tokens[:-1]]
+        target = [Token(x) for x in tokens[1:]]
         fields = {
-                'tokens': TextField([Token(x) for x in tokens], self._token_indexers),
+            'source': TextField(source, self._token_indexers),
+            'target': TextField(target, self._token_indexers)
         }
         meta_fields = {
-                'tokens': tokens,
-                'alias_database': self._alias_database
+            'tokens': tokens,
+            'alias_database': self._alias_database
         }
 
         # Process annotations
@@ -172,36 +175,43 @@ class EnhancedWikitextKglmReader(DatasetReader):
             shortlist = [DEFAULT_PADDING_TOKEN]
             reverse_shortlist = {DEFAULT_PADDING_TOKEN: 0}
 
-            entity_identifiers = [DEFAULT_PADDING_TOKEN] * len(tokens)
-            shortlist_indices = np.zeros(shape=(len(tokens,)))
-            alias_copy_indices = np.zeros(shape=(len(tokens),))
+            entity_ids = [DEFAULT_PADDING_TOKEN] * len(target)
+            shortlist_inds = np.zeros(shape=(len(target,)))
+            alias_copy_inds = np.zeros(shape=(len(target),))
 
             # Process annotations
             for annotation in data['annotations']:
 
                 # Obtain the entity identifier for the annotated span
-                entity_identifier = annotation['id']
+                entity_id = annotation['id']
 
                 # If neccessary, update the shortlist. Obtain the index of the entity identifier in
                 # the shortlist.
-                if entity_identifier not in reverse_shortlist:
-                    reverse_shortlist[entity_identifier] = len(reverse_shortlist)
-                    shortlist.append(entity_identifier)
-                shortlist_index = reverse_shortlist[entity_identifier]
+                if entity_id not in reverse_shortlist:
+                    reverse_shortlist[entity_id] = len(reverse_shortlist)
+                    shortlist.append(entity_id)
+                shortlist_ind = reverse_shortlist[entity_id]
 
                 # Update the outputs
                 for i in range(*annotation['span']):
                     # Note: +1 offset to account for start token.
-                    entity_identifiers[i+1] = entity_identifier
-                    alias_copy_indices[i+1] = self._alias_database.token_to_uid(entity_identifier, tokens[i+1])
-                    shortlist_indices[i+1] = shortlist_index
+                    entity_ids[i] = entity_id
+                    alias_copy_inds[i] = self._alias_database.token_to_uid(entity_id, tokens[i])
+                    shortlist_inds[i] = shortlist_ind
 
             # Convert to fields
-            fields['entity_identifiers'] = TextField([Token(x) for x in entity_identifiers],
-                                                     token_indexers=self._entity_indexers)
-            fields['alias_copy_indices'] = SequentialArrayField(alias_copy_indices, dtype=np.int64)
-            fields['shortlist'] = TextField([Token(x) for x in shortlist], token_indexers=self._entity_indexers)
-            fields['shortlist_indices'] = SequentialArrayField(shortlist_indices, dtype=np.int64)
+            fields['entity_ids'] = TextField(
+                [Token(x) for x in entity_ids],
+                token_indexers=self._entity_indexers)
+            fields['alias_copy_inds'] = SequentialArrayField(
+                alias_copy_inds,
+                dtype=np.int64)
+            fields['shortlist'] = TextField(
+                [Token(x) for x in shortlist],
+                token_indexers=self._entity_indexers)
+            fields['shortlist_inds'] = SequentialArrayField(
+                shortlist_inds,
+                dtype=np.int64)
             # meta_fields['entity_ids'] = entity_ids
 
         fields['metadata'] = MetadataField(meta_fields)
