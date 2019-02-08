@@ -196,7 +196,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 for i in range(*annotation['span']):
                     # Note: +1 offset to account for start token.
                     entity_ids[i] = entity_id
-                    alias_copy_inds[i] = self._alias_database.token_to_uid(entity_id, tokens[i])
+                    alias_copy_inds[i] = self._alias_database.token_to_uid(entity_id, tokens[i+1])
                     shortlist_inds[i] = shortlist_ind
 
             # Convert to fields

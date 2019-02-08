@@ -3,12 +3,11 @@ import math
 from typing import Any, Dict, List, Optional
 
 from allennlp.data.vocabulary import Vocabulary, DEFAULT_OOV_TOKEN
-from allennlp.modules import TextFieldEmbedder
+from allennlp.modules import TextFieldEmbedder, Seq2SeqEncoder
 from allennlp.models import Model
 from allennlp.nn import InitializerApplicator
 from allennlp.nn.util import get_text_field_mask, masked_log_softmax, \
     sequence_cross_entropy_with_logits
-from allennlp.training.metrics import Average
 from overrides import overrides
 import torch
 import torch.nn.functional as F
@@ -43,6 +42,7 @@ class AliasCopynet(Model):
                  vocab: Vocabulary,
                  token_embedder: TextFieldEmbedder,
                  entity_embedder: TextFieldEmbedder,
+                 alias_encoder: Seq2SeqEncoder,
                  hidden_size: int,
                  num_layers: int,
                  dropout: float = 0.4,
@@ -61,6 +61,7 @@ class AliasCopynet(Model):
         # pylint: disable=protected-access
         self._token_embedder = token_embedder._token_embedders['tokens']
         self._entity_embedder = entity_embedder._token_embedders['entity_ids']
+        self._alias_encoder = alias_encoder
         self._hidden_size = hidden_size
         self._num_layers = num_layers
         self._tie_weights = tie_weights
@@ -225,22 +226,13 @@ class AliasCopynet(Model):
         flattened = alias_tokens.view(-1, alias_length)
         copy_mask = flattened != 0
         if copy_mask.sum() == 0:
-            return encoded.new_zeros((batch_size, sequence_length, 1),
+            return encoded.new_zeros((batch_size, sequence_length, num_aliases * alias_length),
                                      dtype=torch.float32)
 
         # Embed and encode the alias tokens.
-        current_input = self._token_embedder(flattened)
-        for layer, rnn in enumerate(self.rnns):
-            # Forward-pass.
-            output, hidden = rnn(current_input)
-            output = output.contiguous()
-            # Apply dropout.
-            if layer == self._num_layers - 1:
-                dropped_output = self._locked_dropout(output, self._dropout)
-            else:
-                dropped_output = self._locked_dropout(output, self._dropouth)
-            current_input = dropped_output
-        encoded_aliases = current_input
+        embedded = self._token_embedder(flattened)
+        mask = flattened.gt(0)
+        encoded_aliases = self._alias_encoder(embedded, mask)
 
         # Equation 8 in the CopyNet paper recommends applying the additional step.
         projected = torch.tanh(self._fc_copy(encoded_aliases))
@@ -259,63 +251,85 @@ class AliasCopynet(Model):
                     generate_scores: torch.Tensor,
                     copy_scores: torch.Tensor,
                     target_tokens: torch.Tensor,
-                    target_copy_indices: torch.Tensor,
+                    target_alias_indices: torch.Tensor,
                     mask: torch.Tensor,
                     alias_indices: torch.Tensor,
+                    alias_tokens: torch.Tensor,
                     mention_mask: torch.Tensor):
-
         batch_size, sequence_length, vocab_size = generate_scores.shape
         copy_sequence_length = copy_scores.shape[-1]
 
-        # We create a mask to ensure that padding alias tokens are omitted from the softmax.
+        # Flat sequences make life **much** easier.
+        flattened_targets = target_tokens.view(batch_size * sequence_length, 1)
+        flattened_mask = mask.view(-1, 1).byte()
+
+        # In order to obtain proper log probabilities we create a mask to omit padding alias tokens
+        # from the calculation.
         alias_mask = alias_indices.view(batch_size, sequence_length, -1).gt(0)
         score_mask = mask.new_ones(batch_size, sequence_length, vocab_size + copy_sequence_length)
         score_mask[:, :, vocab_size:] = alias_mask
 
-        # Next we concatenate the score tensors together in order to compute the log probabilities.
+        # The log-probability distribution is then given by taking the masked log softmax.
         concatenated_scores = torch.cat((generate_scores, copy_scores), dim=-1)
         log_probs = masked_log_softmax(concatenated_scores, score_mask)
 
+        # GENERATE LOSS ###
         # The generated token loss is a simple cross-entropy calculation, we can just gather
         # the log probabilties...
         flattened_log_probs = log_probs.view(batch_size * sequence_length, -1)
-        flattened_targets = target_tokens.view(batch_size * sequence_length, 1)
-        generate_log_probs = flattened_log_probs.gather(1, flattened_targets).squeeze()
-        # ...except we need to omit any <UNK> terms that correspond to copy tokens.
-        unk_targets = target_tokens.eq(self._unk_index)
-        copied_targets = target_copy_indices.gt(0)
-        false_unk_mask = unk_targets * copied_targets
-        true_unk_mask = unk_targets * (1 - copied_targets)
-        generate_log_probs[false_unk_mask.view(-1)] = LOG0
+        generate_log_probs_source_vocab = flattened_log_probs.gather(1, flattened_targets)
+        # ...except we need to ignore the contribution of UNK tokens that are copied (only when
+        # computing the loss). To do that we create a mask which is 1 only if the token is not a
+        # copied UNK (or padding).
+        unks = target_tokens.eq(self._unk_index).view(-1, 1)
+        copied = target_alias_indices.gt(0).view(-1, 1)
+        generate_mask = ~(unks & copied) & flattened_mask
+        # Since we are in log-space we apply the mask by addition.
+        generate_log_probs_extended_vocab = generate_log_probs_source_vocab + (generate_mask.float() + 1e-45).log()
 
-        # The copied token loss requires adding up all of the relevant token log probabilities.
-        # We'll use a for loop to keep things simple for now.
-        flattened_copy_mask = copied_targets.view(-1)
-        flattened_alias_indices = alias_indices.view(batch_size * sequence_length, -1)
-        flattened_target_copy_indices = target_copy_indices.view(-1)
-        copy_log_probs = torch.zeros_like(generate_log_probs)
-        for i in range(batch_size * sequence_length):
-            selection_mask = flattened_alias_indices[i].eq(flattened_target_copy_indices[i])
-            if selection_mask.sum() > 0 and flattened_copy_mask[i] != 0:
-                selected_log_probs = flattened_log_probs[i, vocab_size:].masked_select(selection_mask)
-                total_log_prob = torch.logsumexp(selected_log_probs, dim=0)
-                copy_log_probs[i] = total_log_prob
-            else:
-                copy_log_probs[i] = LOG0
+        # COPY LOSS ###
+        copy_log_probs = flattened_log_probs[:, vocab_size:]
+        # When computing the loss we need to get the log probability of **only** the copied tokens.
+        alias_indices = alias_indices.view(batch_size * sequence_length, -1)
+        target_alias_indices = target_alias_indices.view(-1, 1)
+        copy_mask = alias_indices.eq(target_alias_indices) & flattened_mask & target_alias_indices.gt(0)
+        copy_log_probs_extended_vocab = copy_log_probs + (copy_mask.float() + 1e-45).log()
+        # When computing perplexity, we do so with respect to the source vocabulary. Evaluating the
+        # contribution of the copy mechanism using the probabilities above is then incorrect for
+        # UNK tokens since we are only adding the likelihood of the copied term - we really want the
+        # sum of likelihoods of all words that would be mapped to <UNK>. We compute this below.
+        alias_tokens = alias_tokens.view(batch_size * sequence_length, -1)
+        copy_mask = alias_tokens.eq(flattened_targets) & flattened_mask
+        copy_log_probs_source_vocab = copy_log_probs + (copy_mask.float() + 1e-45).log()
 
-        combined_log_probs = torch.stack((generate_log_probs, copy_log_probs), dim=1)
-        combined_log_probs = torch.logsumexp(combined_log_probs, dim=1)
-        vocab_loss = -combined_log_probs.sum() / (mask.float().sum() + 1e-13)
+        # COMBINED LOSS ###
+        # The final loss term is computed using our log probs computed w.r.t to the entire
+        # vocabulary.
+        combined_log_probs_extended_vocab = torch.cat((generate_log_probs_extended_vocab,
+                                                       copy_log_probs_extended_vocab),
+                                                      dim=1)
+        combined_log_probs_extended_vocab = torch.logsumexp(combined_log_probs_extended_vocab,
+                                                            dim=1)
+        vocab_loss = -combined_log_probs_extended_vocab.sum() / (mask.sum() + 1e-13)
 
-        penalty = self._unk_penalty * true_unk_mask.float().sum()
+        # PERPLEXITY ###
+        # Our perplexity terms are computed using the log probs computed w.r.t the source
+        # vocabulary.
+        combined_log_probs_source_vocab = torch.cat((generate_log_probs_source_vocab,
+                                                     copy_log_probs_source_vocab),
+                                                    dim=1)
+        combined_log_probs_source_vocab = torch.logsumexp(combined_log_probs_source_vocab,
+                                                          dim=1)
+
+        penalty = self._unk_penalty * unks.float().sum()
 
         kg_mask = (mention_mask * mask.byte()).view(-1)
         bg_mask = ((1 - mention_mask) * mask.byte()).view(-1)
 
-        self._ppl(-combined_log_probs.sum(), mask.sum() + 1e-13)
-        self._upp(-combined_log_probs.sum() + penalty, mask.sum() + 1e-13)
-        self._kg_ppl(-combined_log_probs[kg_mask].sum(), kg_mask.float().sum() + 1e-13)
-        self._bg_ppl(-combined_log_probs[bg_mask].sum(), bg_mask.float().sum() + 1e-13)
+        self._ppl(-combined_log_probs_source_vocab.sum(), mask.sum() + 1e-13)
+        self._upp(-combined_log_probs_source_vocab.sum() + penalty, mask.sum() + 1e-13)
+        self._kg_ppl(-combined_log_probs_source_vocab[kg_mask].sum(), kg_mask.float().sum() + 1e-13)
+        self._bg_ppl(-combined_log_probs_source_vocab[bg_mask].sum(), bg_mask.float().sum() + 1e-13)
 
         return vocab_loss
 
@@ -409,6 +423,7 @@ class AliasCopynet(Model):
                                       alias_copy_inds,
                                       target_mask,
                                       alias_inds,
+                                      alias_tokens,
                                       entity_ids.gt(0))
 
         # Compute total loss

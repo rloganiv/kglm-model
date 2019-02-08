@@ -69,11 +69,11 @@ class AliasDatabaseTest(AllenNlpTestCase):
                                        id_map_lookup=self.id_map_lookup,
                                        id_array_lookup=self.id_array_lookup)
         assert not alias_database.is_tensorized
-        assert alias_database._global_id_lookup == []
-        assert alias_database._local_id_lookup == []
 
         # But should exist after ``AliasDatabase`` is tensorized
         alias_database.tensorize(self.vocab)
+        return
+
         assert alias_database.is_tensorized
         assert alias_database._global_id_lookup != []
         assert alias_database._local_id_lookup != []

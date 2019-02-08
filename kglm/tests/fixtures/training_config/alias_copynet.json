@@ -25,6 +25,11 @@
                 }
             }
         },
+        "alias_encoder": {
+            "type": "lstm",
+            "input_size": 10,
+            "hidden_size": 10
+        },
         "hidden_size": 10,
         "num_layers": 3,
         "tie_weights": true
