@@ -1,6 +1,8 @@
+import logging
+import math
 from typing import Any, Dict, List, Optional
 
-from allennlp.data.vocabulary import Vocabulary
+from allennlp.data.vocabulary import Vocabulary, DEFAULT_OOV_TOKEN
 from allennlp.models import Model
 from allennlp.nn import InitializerApplicator
 from allennlp.nn.util import get_text_field_mask, sequence_cross_entropy_with_logits
@@ -9,6 +11,8 @@ import torch
 
 from kglm.modules import embedded_dropout, LockedDropout, WeightDrop
 from kglm.training.metrics import Ppl
+
+logger = logging.getLogger(__name__)
 
 
 @Model.register('awd-lstm-lm')
@@ -101,16 +105,30 @@ class AwdLstmLanguageModel(Model):
 
         initializer(self)
 
+        self._unk_index = vocab.get_token_index(DEFAULT_OOV_TOKEN)
+        self._unk_penalty = math.log(vocab.get_vocab_size('tokens_unk'))
+
         self.ppl = Ppl()
+        self.upp = Ppl()
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
                 source: Dict[str, torch.Tensor],
                 target: Dict[str, torch.Tensor],
-                reset: torch.Tensor) -> Dict[str, torch.Tensor]:
+                reset: torch.Tensor = None) -> Dict[str, torch.Tensor]:
 
-        # Reset hidden states
-        if reset.any() and (self._state is not None):
+        # THE BELOW ONLY NEEDS TO BE SATISFIED FOR THE FANCY ITERATOR, MERITY
+        # ET AL JUST PROPOGATE THE HIDDEN STATE NO MATTER WHAT
+        # To make life easier when evaluating the model we use a BasicIterator
+        # so that we do not need to worry about the sequence truncation
+        # performed by our splitting iterators. To accomodate this, we assume
+        # that if reset is not given, then everything gets reset.
+        if reset is None:
+            self._state = None
+        elif reset.all() and (self._state is not None):
+            logger.debug('RESET')
+            self._state = None
+        elif reset.any() and (self._state is not None):
             for layer in range(self.num_layers):
                 h, c = self._state['layer_%i' % layer]
                 h[:, reset, :] = torch.zeros_like(h[:, reset, :])
@@ -160,37 +178,27 @@ class AwdLstmLanguageModel(Model):
         loss = sequence_cross_entropy_with_logits(logits, target,
                                                   target_mask,
                                                   average="token")
-        num_tokens = target_mask.sum() + 1e-13
+        num_tokens = target_mask.float().sum() + 1e-13
 
         # Activation regularization
         if self.alpha:
-            loss = loss + sum(self.alpha * dropped_rnn_h.pow(2).mean() for dropped_rnn_h in dropped_outputs[-1:])
+            loss = loss + self.alpha * current_input.pow(2).mean()
         # Temporal activation regularization (slowness)
         if self.beta:
-            loss = loss + sum(self.beta * (rnn_h[:, 1:] - rnn_h[:, :-1]).pow(2).mean() for rnn_h in outputs[-1:])
+            loss = loss + self.beta * (output[:, 1:] - output[:, :-1]).pow(2).mean()
 
         # Update metrics and state
+        unks = target.eq(self._unk_index)
+        unk_penalty = self._unk_penalty * unks.float().sum()
+
         self.ppl(loss * num_tokens, num_tokens)
+        self.upp(loss * num_tokens + unk_penalty, num_tokens)
         self._state = {'layer_%i' % l: h for l, h in enumerate(current_hidden)}
 
         return {'loss': loss}
 
-    @overrides
-    def train(self, mode=True):
-        # TODO: This is a temporary hack to ensure that the internal state resets when the model
-        # switches from training to evaluation. The complication arises from potentially differing
-        # batch sizes (e.g. the `reset` tensor will not be the right size). In future
-        # implementations this should be handled more robustly.
-        super(AwdLstmLanguageModel, self).train(mode)
-        self._state = None
-
-    @overrides
-    def eval(self):
-        # TODO: See train.
-        super(AwdLstmLanguageModel, self).eval()
-        self._state = None
-
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         return {
-            'ppl': self.ppl.get_metric(reset)
+            'ppl': self.ppl.get_metric(reset),
+            'upp': self.upp.get_metric(reset)
         }

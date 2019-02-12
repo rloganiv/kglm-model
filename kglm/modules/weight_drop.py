@@ -1,66 +1,34 @@
 import torch
 from torch.nn import Parameter
-from torch.nn.modules.rnn import RNNBase
-from functools import wraps
-
-
-class BackHook(torch.nn.Module):
-    def __init__(self, hook):
-        super(BackHook, self).__init__()
-        self._hook = hook
-        self.register_backward_hook(self._backward)
-
-    def forward(self, *inp):
-        return inp
-
-    @staticmethod
-    def _backward(self, grad_in, grad_out):
-        self._hook()
-        return None
+import torch.nn.functional as F
 
 
 class WeightDrop(torch.nn.Module):
-    """
-    Implements drop-connect, as per Merity et al https://arxiv.org/abs/1708.02182
-    """
-    def __init__(self, module, weights, dropout=0, variational=False):
-        super(WeightDrop, self).__init__()
+    "A module that warps another layer in which some weights will be replaced by 0 during training."
+
+    def __init__(self, module, weights, dropout=0):
+        super().__init__()
         self.module = module
         self.weights = weights
         self.dropout = dropout
-        self.variational = variational
-        self._setup()
-        self.hooker = BackHook(self._backward)
-
-    def _setup(self):
-        for name_w in self.weights:
-            print('Applying weight drop of {} to {}'.format(self.dropout, name_w))
-            w = getattr(self.module, name_w)
-            self.register_parameter(name_w + '_raw', Parameter(w.data))
+        for weight in self.weights:
+            #Makes a copy of the weights of the selected layers.
+            w = getattr(self.module, weight)
+            self.register_parameter(f'{weight}_raw', Parameter(w.data))
+            self.module._parameters[weight] = F.dropout(w, p=self.dropout, training=False)
 
     def _setweights(self):
-        for name_w in self.weights:
-            raw_w = getattr(self, name_w + '_raw')
-            if self.training:
-                mask = raw_w.new_ones((raw_w.size(0), 1))
-                mask = torch.nn.functional.dropout(mask, p=self.dropout, training=True)
-                w = mask.expand_as(raw_w) * raw_w
-                setattr(self, name_w + '_mask', mask)
-            else:
-                # We really don't need a mask here, but we add it to keep PyTorch from complaining.
-                mask = raw_w.new_ones((raw_w.size(0), 1))
-                w = mask.expand_as(raw_w) * raw_w
-                setattr(self, name_w + '_mask', mask)
-            rnn_w = getattr(self.module, name_w)
-            rnn_w.data.copy_(w)
-
-    def _backward(self):
-        # transfer gradients from embeddedRNN to raw params
-        for name_w in self.weights:
-            raw_w = getattr(self, name_w + '_raw')
-            rnn_w = getattr(self.module, name_w)
-            raw_w.grad = rnn_w.grad * getattr(self, name_w + '_mask')
+        "Apply dropout to the raw weights."
+        for weight in self.weights:
+            raw_w = getattr(self, f'{weight}_raw')
+            self.module._parameters[weight] = F.dropout(raw_w, p=self.dropout, training=self.training)
 
     def forward(self, *args):
         self._setweights()
-        return self.module(*self.hooker(*args))
+        return self.module.forward(*args)
+
+    def reset(self):
+        for weight in self.weights:
+            raw_w = getattr(self, f'{weight}_raw')
+            self.module._parameters[weight] = F.dropout(raw_w, p=self.dropout, training=False)
+        if hasattr(self.module, 'reset'): self.module.reset()

@@ -47,15 +47,16 @@ class EnhancedWikitextReader(DatasetReader):
     @overrides
     def text_to_instance(self, data: Dict[str, Any]) -> Instance:  # pylint: disable=arguments-differ
         # Flatten and pad tokens
-        tokens = _flatten(data['tokens'])
-        tokens = ['@@START@@', *tokens, '@@END@@']
+        tokens = [x + ['@@END@@'] for x in data['tokens']]
+        tokens = _flatten(tokens)
         tokens = [Token(x) for x in tokens]
-        source = tokens[:-1]
-        target = tokens[1:]
-        fields = {
-                'source': TextField(source, self._token_indexers),
-                'target': TextField(target, self._token_indexers)
-        }
+        # source = tokens[:-1]
+        # target = tokens[1:]
+        # fields = {
+        #         'source': TextField(source, self._token_indexers),
+        #         'target': TextField(target, self._token_indexers)
+        # }
+        fields = {'tokens': TextField(tokens, self._token_indexers)}
         return Instance(fields)
 
 
@@ -199,6 +200,118 @@ class EnhancedWikitextKglmReader(DatasetReader):
                     alias_copy_inds[i] = self._alias_database.token_to_uid(entity_id, tokens[i+1])
                     shortlist_inds[i] = shortlist_ind
 
+            # Convert to fields
+            fields['entity_ids'] = TextField(
+                [Token(x) for x in entity_ids],
+                token_indexers=self._entity_indexers)
+            fields['alias_copy_inds'] = SequentialArrayField(
+                alias_copy_inds,
+                dtype=np.int64)
+            fields['shortlist'] = TextField(
+                [Token(x) for x in shortlist],
+                token_indexers=self._entity_indexers)
+            fields['shortlist_inds'] = SequentialArrayField(
+                shortlist_inds,
+                dtype=np.int64)
+            # meta_fields['entity_ids'] = entity_ids
+
+        fields['metadata'] = MetadataField(meta_fields)
+
+        return Instance(fields)
+
+
+@DatasetReader.register('enhanced-wikitext-simple-kglm')
+class EnhancedWikitextSimpleKglmReader(DatasetReader):
+
+    def __init__(self,
+                 token_indexers: Dict[str, TokenIndexer] = None,
+                 entity_indexers: Dict[str, TokenIndexer] = None,
+                 lazy: bool = False) -> None:
+        """
+        Parameters
+        ----------
+        alias_database_path : str
+            Path to the alias database.
+        """
+        super().__init__(lazy)
+        self._token_indexers = token_indexers or {'tokens': SingleIdTokenIndexer()}
+        self._entity_indexers = entity_indexers or {'entity_ids': SingleIdTokenIndexer(namespace='entity_ids')}
+        if 'tokens' not in self._token_indexers or \
+                not isinstance(self._token_indexers['tokens'], SingleIdTokenIndexer):
+            raise ConfigurationError("EnhancedWikitextReader expects 'token_indexers' to contain "
+                                     "a 'single_id' token indexer called 'tokens'.")
+        if 'entity_ids' not in self._entity_indexers or \
+                not isinstance(self._entity_indexers['entity_ids'], SingleIdTokenIndexer):
+            raise ConfigurationError("EnhancedWikitextReader expects 'entity_indexers' to contain "
+                                     "a 'single_id' token indexer called 'entities'.")
+
+    @overrides
+    def _read(self, file_path: str) -> Iterable[Instance]:
+        with open(file_path, 'r') as f:
+            for line in f:
+                data = json.loads(line)
+                yield self.text_to_instance(data)
+
+    @overrides
+    def text_to_instance(self, data: Dict[str, Any]) -> Instance:  # pylint: disable=arguments-differ
+        # Flatten and pad tokens
+        tokens = _flatten(data['tokens'])
+        tokens = ['@@START@@', *tokens, '@@END@@']
+        source = [Token(x) for x in tokens[:-1]]
+        target = [Token(x) for x in tokens[1:]]
+        fields = {
+            'source': TextField(source, self._token_indexers),
+            'target': TextField(target, self._token_indexers)
+        }
+        meta_fields = {
+            'tokens': tokens,
+            'alias_database': self._alias_database
+        }
+
+        # Process annotations
+        if 'annotations' in data:
+
+            # We maintain a "shortlist" of observed entities, that is used for baseline models
+            # that only select entities from the set that appear in the document (as opposed to
+            # the set of all possible entities).
+            shortlist = [DEFAULT_PADDING_TOKEN]
+            reverse_shortlist = {DEFAULT_PADDING_TOKEN: 0}
+
+            entity_ids = [DEFAULT_PADDING_TOKEN] * len(target)
+            shortlist_inds = np.zeros(shape=(len(target,)))
+            alias_copy_inds = np.zeros(shape=(len(target),))
+            alias_tokens = [[]] * len(target)
+            alias_ids = [[]] * len(target)
+
+            # Process annotations
+            for annotation in data['annotations']:
+
+                # Obtain the entity identifier for the annotated span
+                entity_id = annotation['id']
+                alias = annotation['alias']
+                alias_map = {token: i for i, token in enumerate(set(alias))}
+                alias_copy_inds = [alias_map[token] for token in alias]
+
+                # If neccessary, update the shortlist. Obtain the index of the entity identifier in
+                # the shortlist.
+                if entity_id not in reverse_shortlist:
+                    reverse_shortlist[entity_id] = len(reverse_shortlist)
+                    shortlist.append(entity_id)
+                shortlist_ind = reverse_shortlist[entity_id]
+
+                # Update the outputs
+                for i in range(*annotation['span']):
+                    # Note: +1 offset to account for start token.
+                    if tokens[i+1] not in alias_map:
+                        continue
+                    else:
+                        entity_ids[i] = entity_id
+                        shortlist_inds[i] = shortlist_ind
+                        alias_copy_inds[i] = alias_map[tokens[i+1]]
+                        alias_ids[i] = [alias_map[token] for token in alias]
+                        # alias_copy_inds[i] = self._alias_database.token_to_uid(entity_id, tokens[i+1])
+
+            # Ma
             # Convert to fields
             fields['entity_ids'] = TextField(
                 [Token(x) for x in entity_ids],

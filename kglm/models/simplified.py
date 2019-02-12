@@ -19,10 +19,7 @@ from kglm.training.metrics import Ppl
 logger = logging.getLogger(__name__)
 
 
-LOG0 = torch.tensor(1e-45).log()  # pylint: disable=not-callable
-
-
-@Model.register('alias-copynet')
+@Model.register('simplified')
 class AliasCopynet(Model):
     """
     Oracle alias copynet language model.
@@ -95,7 +92,7 @@ class AliasCopynet(Model):
             else:
                 output_size = hidden_size
             rnns.append(torch.nn.LSTM(input_size, output_size, batch_first=True))
-        # rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in rnns]
+        rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in rnns]
         self.rnns = torch.nn.ModuleList(rnns)
 
         # Various linear transformations.
@@ -142,15 +139,16 @@ class AliasCopynet(Model):
                 source: Dict[str, torch.Tensor],
                 target: Dict[str, torch.Tensor],
                 reset: torch.Tensor,
-                metadata: List[Dict[str, Any]],
                 entity_ids: torch.Tensor = None,
                 shortlist: Dict[str, torch.Tensor] = None,
                 shortlist_inds: torch.Tensor = None,
-                alias_copy_inds: torch.Tensor = None) -> Dict[str, torch.Tensor]:
-
-        # Tensorize the alias_database - this will only perform the operation once.
-        alias_database = metadata[0]['alias_database']
-        alias_database.tensorize(vocab=self.vocab)
+                alias_copy_inds: torch.Tensor = None,
+                alias_tokens: torch.Tensor = None,
+                alias_inds: torch.Tensor = None) -> Dict[str, torch.Tensor]:
+        alias_tokens = alias_tokens['tokens']
+        # Inds have fixed size and don't get truncated on split so truncate
+        # now.
+        alias_inds = alias_inds[:, :, :alias_tokens.shape[2]]
 
         # Reset the model if needed
         if reset.any() and (self._state is not None):
@@ -164,11 +162,9 @@ class AliasCopynet(Model):
             output_dict = self._forward_loop(
                 source=source,
                 target=target,
-                alias_database=alias_database,
-                entity_ids=entity_ids,
-                shortlist=shortlist,
-                shortlist_inds=shortlist_inds,
-                alias_copy_inds=alias_copy_inds)
+                alias_copy_inds=alias_copy_inds,
+                alias_tokens=alias_tokens,
+                alias_inds=alias_inds)
         else:
             # TODO: Figure out what we want here - probably to do some king of inference on
             # entities / mention types.
@@ -222,11 +218,11 @@ class AliasCopynet(Model):
                      alias_tokens: torch.Tensor) -> torch.Tensor:
         # Begin by flattening the tokens so that they fit the expected shape of a
         # ``Seq2SeqEncoder``.
-        batch_size, sequence_length, num_aliases, alias_length = alias_tokens.shape
+        batch_size, sequence_length, alias_length = alias_tokens.shape
         flattened = alias_tokens.view(-1, alias_length)
         copy_mask = flattened != 0
         if copy_mask.sum() == 0:
-            return encoded.new_zeros((batch_size, sequence_length, num_aliases * alias_length),
+            return encoded.new_zeros((batch_size, sequence_length, alias_length),
                                      dtype=torch.float32)
 
         # Embed and encode the alias tokens.
@@ -241,7 +237,7 @@ class AliasCopynet(Model):
         # This part gets a little funky - we need to make sure that the first dimension in
         # `projected` and `hidden` is batch_size x sequence_length.
         encoded = encoded.view(batch_size * sequence_length, 1, -1)
-        projected = projected.view(batch_size * sequence_length, -1, num_aliases * alias_length)
+        projected = projected.view(batch_size * sequence_length, -1, alias_length)
         copy_scores = torch.bmm(encoded, projected).squeeze()
         copy_scores = copy_scores.view(batch_size, sequence_length, -1).contiguous()
 
@@ -254,41 +250,37 @@ class AliasCopynet(Model):
                     target_alias_indices: torch.Tensor,
                     mask: torch.Tensor,
                     alias_indices: torch.Tensor,
-                    alias_tokens: torch.Tensor,
-                    mention_mask: torch.Tensor):
+                    alias_tokens: torch.Tensor):
+        mention_mask = target_alias_indices.gt(0)
         batch_size, sequence_length, vocab_size = generate_scores.shape
         copy_sequence_length = copy_scores.shape[-1]
 
         # Flat sequences make life **much** easier.
         flattened_targets = target_tokens.view(batch_size * sequence_length, 1)
         flattened_mask = mask.view(-1, 1).byte()
-
-        # In order to obtain proper log probabilities we create a mask to omit padding alias tokens
-        # from the calculation.
         alias_mask = alias_indices.view(batch_size, sequence_length, -1).gt(0)
-        score_mask = mask.new_ones(batch_size, sequence_length, vocab_size + copy_sequence_length)
-        score_mask[:, :, vocab_size:] = alias_mask
 
         # The log-probability distribution is then given by taking the masked log softmax.
-        concatenated_scores = torch.cat((generate_scores, copy_scores), dim=-1)
-        log_probs = masked_log_softmax(concatenated_scores, score_mask)
+        generate_log_probs = masked_log_softmax(generate_scores,
+                                                torch.ones_like(generate_scores))
+        copy_log_probs = masked_log_softmax(copy_scores, alias_mask)
 
         # GENERATE LOSS ###
         # The generated token loss is a simple cross-entropy calculation, we can just gather
         # the log probabilties...
-        flattened_log_probs = log_probs.view(batch_size * sequence_length, -1)
+        flattened_log_probs = generate_log_probs.view(batch_size * sequence_length, -1)
         generate_log_probs_source_vocab = flattened_log_probs.gather(1, flattened_targets)
         # ...except we need to ignore the contribution of UNK tokens that are copied (only when
         # computing the loss). To do that we create a mask which is 1 only if the token is not a
         # copied UNK (or padding).
         unks = target_tokens.eq(self._unk_index).view(-1, 1)
         copied = target_alias_indices.gt(0).view(-1, 1)
-        generate_mask = ~(unks & copied) & flattened_mask
+        generate_mask = ~copied & flattened_mask
         # Since we are in log-space we apply the mask by addition.
         generate_log_probs_extended_vocab = generate_log_probs_source_vocab + (generate_mask.float() + 1e-45).log()
 
         # COPY LOSS ###
-        copy_log_probs = flattened_log_probs[:, vocab_size:]
+        copy_log_probs = copy_log_probs.view(batch_size * sequence_length, -1)
         # When computing the loss we need to get the log probability of **only** the copied tokens.
         alias_indices = alias_indices.view(batch_size * sequence_length, -1)
         target_alias_indices = target_alias_indices.view(-1, 1)
@@ -305,17 +297,22 @@ class AliasCopynet(Model):
         # COMBINED LOSS ###
         # The final loss term is computed using our log probs computed w.r.t to the entire
         # vocabulary.
+
+        kg_mask = (mention_mask & mask.byte()).view(-1)
+        bg_mask = (~mention_mask & mask.byte()).view(-1)
+        mask = mask.byte().view(-1)
+
         combined_log_probs_extended_vocab = torch.cat((generate_log_probs_extended_vocab,
                                                        copy_log_probs_extended_vocab),
                                                       dim=1)
         combined_log_probs_extended_vocab = torch.logsumexp(combined_log_probs_extended_vocab,
                                                             dim=1)
-        vocab_loss = -combined_log_probs_extended_vocab.sum() / (mask.sum() + 1e-13)
+        vocab_loss = -combined_log_probs_extended_vocab[mask].sum() / (mask.float().sum() + 1e-13)
 
         # PERPLEXITY ###
         # Our perplexity terms are computed using the log probs computed w.r.t the source
         # vocabulary.
-        combined_log_probs_source_vocab = torch.cat((generate_log_probs_source_vocab,
+        combined_log_probs_source_vocab = torch.cat((generate_log_probs_extended_vocab,
                                                      copy_log_probs_source_vocab),
                                                     dim=1)
         combined_log_probs_source_vocab = torch.logsumexp(combined_log_probs_source_vocab,
@@ -323,24 +320,22 @@ class AliasCopynet(Model):
 
         penalty = self._unk_penalty * unks.float().sum()
 
-        kg_mask = (mention_mask * mask.byte()).view(-1)
-        bg_mask = ((1 - mention_mask) * mask.byte()).view(-1)
 
-        self._ppl(-combined_log_probs_source_vocab.sum(), mask.sum() + 1e-13)
-        self._upp(-combined_log_probs_source_vocab.sum() + penalty, mask.sum() + 1e-13)
-        self._kg_ppl(-combined_log_probs_source_vocab[kg_mask].sum(), kg_mask.float().sum() + 1e-13)
-        self._bg_ppl(-combined_log_probs_source_vocab[bg_mask].sum(), bg_mask.float().sum() + 1e-13)
+        self._ppl(-combined_log_probs_source_vocab[mask].sum(), mask.float().sum() + 1e-13)
+        self._upp(-combined_log_probs_source_vocab[mask].sum() + penalty, mask.float().sum() + 1e-13)
+        if kg_mask.any():
+            self._kg_ppl(-combined_log_probs_source_vocab[kg_mask].sum(), kg_mask.float().sum() + 1e-13)
+        if bg_mask.any():
+            self._bg_ppl(-combined_log_probs_source_vocab[bg_mask].sum(), bg_mask.float().sum() + 1e-13)
 
         return vocab_loss
 
     def _forward_loop(self,
                       source: Dict[str, torch.Tensor],
                       target: Dict[str, torch.Tensor],
-                      alias_database: AliasDatabase,
-                      entity_ids: Dict[str, torch.Tensor],
-                      shortlist: Dict[str, torch.Tensor],
-                      shortlist_inds: torch.Tensor,
-                      alias_copy_inds: torch.Tensor) -> Dict[str, torch.Tensor]:
+                      alias_copy_inds: torch.Tensor,
+                      alias_tokens: torch.Tensor,
+                      alias_inds: torch.Tensor) -> Dict[str, torch.Tensor]:
 
         # Get the token mask and unwrap the target tokens.
         target_mask = get_text_field_mask(target)
@@ -353,22 +348,6 @@ class AliasCopynet(Model):
             words=source,
             dropout=self._dropoute if self.training else 0)
         source_embeddings = self._locked_dropout(source_embeddings, self._dropouti)
-
-        # Embed entities.
-        entity_ids = entity_ids['entity_ids']
-        entity_embeddings = embedded_dropout(
-            embed=self._entity_embedder,
-            words=entity_ids,
-            dropout=self._dropoute if self.training else 0)
-        entity_embeddings = self._locked_dropout(entity_embeddings, self._dropouti)
-
-        # Embed shortlist.
-        shortlist_mask = get_text_field_mask(shortlist)
-        shortlist = shortlist['entity_ids']
-        shortlist_embeddings = embedded_dropout(
-            embed=self._entity_embedder,
-            words=shortlist,
-            dropout=self._dropoute if self.training else 0)
 
         # Encode source tokens.
         current_input = source_embeddings
@@ -394,26 +373,12 @@ class AliasCopynet(Model):
         encoded = current_input
         self._state = {'layer_%i' % i: h for i, h in enumerate(hidden_states)}
 
-        # Predict whether or not the next token will be an entity mention. This corresponds to the
-        # case that the entity's id is not a padding token.
-        mention_loss = self._mention_loss(encoded, entity_ids.gt(0), target_mask)
-
-        # Predict which entity (among those in the supplied shortlist) is going to be
-        # mentioned.
-        entity_loss = self._entity_loss(encoded,
-                                        shortlist_inds,
-                                        target_mask,
-                                        shortlist_embeddings,
-                                        shortlist_mask)
-
         # Predict generation-mode scores. Start by concatenating predicted entity embeddings with
         # the encoder output - then feed through a linear layer.
-        concatenated = torch.cat((encoded, entity_embeddings), dim=-1)
-        condensed = self._fc_condense(concatenated)
-        generate_scores = self._fc_generate(condensed)
+        generate_scores = self._fc_generate(encoded)
 
         # Predict copy-mode scores.
-        alias_tokens, alias_inds = alias_database.lookup(entity_ids)
+        # alias_tokens, alias_inds = alias_database.lookup(entity_ids)
         copy_scores = self._copy_scores(encoded, alias_tokens)
 
         # Combine scores to get vocab loss
@@ -423,11 +388,10 @@ class AliasCopynet(Model):
                                       alias_copy_inds,
                                       target_mask,
                                       alias_inds,
-                                      alias_tokens,
-                                      entity_ids.gt(0))
+                                      alias_tokens)
 
         # Compute total loss
-        loss = mention_loss + entity_loss + vocab_loss
+        loss = vocab_loss
 
         # Activation regularization
         if self._alpha:
@@ -435,9 +399,6 @@ class AliasCopynet(Model):
         # Temporal activation regularization (slowness)
         if self._beta:
             loss = loss + self._beta * (output[:, 1:] - output[:, :-1]).pow(2).mean()
-
-        if loss.is_nan():
-            import pdb; pdb.set_trace()
 
         return {'loss': loss}
 

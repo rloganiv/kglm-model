@@ -5,7 +5,7 @@ import random
 from typing import Deque, Dict, Iterable, Iterator, List, Tuple, Union
 
 from allennlp.data.dataset import Batch
-from allennlp.data.fields import TextField
+from allennlp.data.fields import ListField, TextField
 from allennlp.data.instance import Instance
 from allennlp.data.iterators.data_iterator import add_epoch_number, DataIterator
 import numpy as np
@@ -82,7 +82,7 @@ class FancyIterator(DataIterator):
                     batch.index_instances(self.vocab)
 
                 padding_lengths = batch.get_padding_lengths()
-                yield batch.as_tensor_dict(padding_lengths)
+                yield batch.as_tensor_dict(padding_lengths), 1
 
             self._epochs[key] = epoch + 1
 
@@ -125,6 +125,8 @@ class FancyIterator(DataIterator):
                     # TODO: Figure out how to use sequence dim here...
                     split_field = SequentialArrayField(source_field.array[start:end],
                                                        dtype=source_field._dtype)
+                elif isinstance(source_field, ListField):
+                    split_field = ListField(source_field.field_list[start:end])
                 else:
                     raise NotImplementedError('FancyIterator currently only supports splitting '
                                               '`TextField`s or `SequentialArrayField`s.')
@@ -145,3 +147,4 @@ class FancyIterator(DataIterator):
 
     def get_num_batches(self, instances: Iterable[Instance]) -> float:
         return 1
+

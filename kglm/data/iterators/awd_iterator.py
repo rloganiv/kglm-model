@@ -35,7 +35,7 @@ class AwdIterator(DataIterator):
     def __call__(self,
                  instances: Iterable[Instance],
                  num_epochs: int = None,
-                 shuffle: bool = False) -> Iterator[TensorDict]:
+                 shuffle: bool = False) -> Iterator[Tuple[TensorDict, float]]:
         key = id(instances)
         starting_epoch = self._epochs[key]
 
@@ -44,46 +44,44 @@ class AwdIterator(DataIterator):
         else:
             epochs = range(starting_epoch, starting_epoch + num_epochs)
 
+        # Following the original implementation we will simply concatenate all
+        # of the tensors together, then split it into batch_size pieces and
+        # yield little chunks of the big array. Although the chunk sizes will
+        # vary, the array will otherwise always be in the same order.
         for epoch in epochs:
-            # In order to ensure that we are (almost) constantly streaming data to the model we
-            # need to have all of the instances in memory ($$$)
             instance_list = list(instances)
-            if shuffle:
-                random.shuffle(instance_list)
             for instance in instance_list:
                 instance.index_fields(self.vocab)
+
             tensor_dicts = [instance.as_tensor_dict() for instance in instance_list]
-
-            source = [d['source']['tokens'] for d in tensor_dicts]
-            omni_source_tensor = torch.cat(source, 0)
-
-            target = [d['target']['tokens'] for d in tensor_dicts]
-            omni_target_tensor = torch.cat(target, 0)
-
-            truncate_to = self._batch_size * (omni_source_tensor.shape[0] // self._batch_size)
-
-            omni_source_tensor = omni_source_tensor[:truncate_to]
-            omni_source_tensor = omni_source_tensor.view(self._batch_size, -1)
-
-            omni_target_tensor = omni_target_tensor[:truncate_to]
-            omni_target_tensor = omni_target_tensor.view(self._batch_size, -1)
-
-            last = 0
-            while last < omni_source_tensor.shape[1]:
-                if random.random() > 0.5:
-                    delta = int(np.random.normal(self._split_size, 5))
+            big_ass_sequence = torch.cat([x['tokens']['tokens'] for x in tensor_dicts],
+                                         dim=0)
+            n_batch = big_ass_sequence.shape[0] // self._batch_size
+            big_ass_sequence = big_ass_sequence.narrow(0, 0, n_batch * self._batch_size)
+            big_ass_sequence = big_ass_sequence.view(self._batch_size, -1)
+            total_length = big_ass_sequence.shape[1]
+            i = 0
+            while i < total_length - 2:
+                if shuffle:
+                    bptt = self._split_size if np.random.random() < 0.95 else self._split_size / 2
+                    sequence_length = max(5, int(np.random.normal(bptt, 5)))
+                    sequence_length = min(sequence_length, total_length - 1 - i)
                 else:
-                    delta = int(np.random.normal(self._split_size / 2, 5))
-                start = last
-                last += delta
-                if last >= (omni_source_tensor.shape[1] - 1):
-                    break
-                dict = {
-                    'source': {'tokens': omni_source_tensor[:, start:last]},
-                    'target': {'tokens': omni_target_tensor[:, start:last]},
-                    'reset': torch.zeros(self._batch_size, dtype=torch.uint8)
+                    bptt = self._split_size
+                    sequence_length = min(self._split_size, total_length - 1 -i)
+                if i == 0:
+                    reset = torch.ones(self._batch_size, dtype=torch.uint8)
+                else:
+                    reset = torch.zeros(self._batch_size, dtype=torch.uint8)
+
+                out_dict: TensorDict = {
+                    'source': {'tokens': big_ass_sequence[:, i:i+sequence_length]},
+                    'target': {'tokens': big_ass_sequence[:, i+1:i+sequence_length+1]},
+                    'reset': reset
                 }
-                yield dict
+                lr_mult = sequence_length / bptt
+                i += sequence_length
+
+                yield out_dict, lr_mult
 
             self._epochs[key] = epoch + 1
-
