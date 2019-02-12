@@ -8,25 +8,20 @@
         "type": "awd-lstm-lm",
         "embedding_size": 5,
         "hidden_size": 7,
-        "num_layers": 3
+        "num_layers": 3,
+        "tie_weights": true
     },
     "iterator": {
-        "type": "split",
+        "type": "fancy",
         "batch_size": 2,
-        "splitter": {
-            "type": "fixed",
-            "split_size": 10,
-            "splitting_keys": ["tokens"]
-        },
-        "sorting_keys": [["tokens", "num_tokens"]]
+        "split_size": 10,
+        "splitting_keys": ["source", "target"]
     },
     "trainer": {
         "num_epochs": 2,
-        "grad_clipping": 0.25,
         "optimizer": {
-            "type": "sgd",
-            "lr": 30.0,
-            "weight_decay": 1.2e-6
+            "type": "adam",
+            "lr": 1e-4
         }
     }
 }

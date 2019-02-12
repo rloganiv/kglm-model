@@ -30,7 +30,7 @@ class SequentialArrayField(ArrayField, SequenceField):
                      for i in range(len(padding_lengths))]
 
         # Convert explicitly to an ndarray just in case it's an scalar (it'd end up not being an ndarray otherwise)
-        return_array = np.asarray(np.ones(max_shape, self._dtype) * self.padding_value)
+        return_array = np.asarray(np.full(max_shape, self.padding_value), dtype=self._dtype)
 
         # If the tensor has a different shape from the largest tensor, pad dimensions with zeros to
         # form the right shaped list of slices for insertion into the final tensor.

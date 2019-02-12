@@ -18,7 +18,7 @@ from torch.nn import Parameter
 import torch.nn.functional as F
 
 from kglm.modules import DynamicEmbedding
-from kglm.training.metrics import Perplexity, UnknownPenalizedPerplexity
+# from kglm.training.metrics import Perplexity, UnknownPenalizedPerplexity
 
 logger = logging.getLogger(__name__)
 
@@ -109,17 +109,14 @@ class EntityNLM(Model):
         if tie_weights:
             self._vocab_projection.weight = self._text_field_embedder._token_embedders['tokens'].weight  # pylint: disable=W0212
 
-        self._perplexity = Perplexity()
-        self._unknown_penalized_perplexity = UnknownPenalizedPerplexity(self.vocab)
+        # self._perplexity = Perplexity()
+        # self._unknown_penalized_perplexity = UnknownPenalizedPerplexity(self.vocab)
         self._entity_type_accuracy = CategoricalAccuracy()
         self._entity_id_accuracy = CategoricalAccuracy()
         self._mention_length_accuracy = CategoricalAccuracy()
 
         if tie_weights:
             self._vocab_projection.weight = self._text_field_embedder._token_embedders['tokens'].weight  # pylint: disable=W0212
-
-        self._perplexity = Perplexity()
-        self._unknown_penalized_perplexity = UnknownPenalizedPerplexity(self.vocab)
 
         initializer(self)
 
@@ -359,12 +356,12 @@ class EntityNLM(Model):
             vocab_loss += _vocab_loss.sum()
             logp += -_vocab_loss
 
-            self._perplexity(logits=vocab_logits,
-                             labels=next_tokens,
-                             mask=next_mask.float())
-            self._unknown_penalized_perplexity(logits=vocab_logits,
-                                               labels=next_tokens,
-                                               mask=next_mask.float())
+            # self._perplexity(logits=vocab_logits,
+            #                  labels=next_tokens,
+            #                  mask=next_mask.float())
+            # self._unknown_penalized_perplexity(logits=vocab_logits,
+            #                                    labels=next_tokens,
+            #                                    mask=next_mask.float())
 
             # Lastly update contexts
             contexts = current_hidden
@@ -409,8 +406,8 @@ class EntityNLM(Model):
     @overrides
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         return {
-                'ppl': self._perplexity.get_metric(reset),
-                'upp': self._unknown_penalized_perplexity.get_metric(reset),
+                # 'ppl': self._perplexity.get_metric(reset),
+                # 'upp': self._unknown_penalized_perplexity.get_metric(reset),
                 'et_acc': self._entity_type_accuracy.get_metric(reset),
                 'eid_acc': self._entity_id_accuracy.get_metric(reset),
                 'ml_acc': self._mention_length_accuracy.get_metric(reset)

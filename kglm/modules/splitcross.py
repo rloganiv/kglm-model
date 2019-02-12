@@ -103,7 +103,7 @@ class SplitCrossEntropyLoss(nn.Module):
             split_hiddens.append(hiddens.masked_select(tmp_mask.unsqueeze(1).expand_as(hiddens)).view(-1, hiddens.size(1)))
         return split_targets, split_hiddens
 
-    def forward(self, weight, bias, hiddens, targets, target_masks, verbose=False):
+    def forward(self, weight, bias, hiddens, targets, verbose=False):
         if self.verbose or verbose:
             for idx in sorted(self.stats):
                 print('{}: {}'.format(idx, int(np.mean(self.stats[idx]))), end=', ')
@@ -111,6 +111,7 @@ class SplitCrossEntropyLoss(nn.Module):
 
         total_loss = None
         if len(hiddens.size()) > 2: hiddens = hiddens.view(-1, hiddens.size(2))
+        if len(targets.size()) > 1: targets = targets.view(-1)
 
         split_targets, split_hiddens = self.split_on_targets(hiddens, targets)
 
@@ -141,11 +142,7 @@ class SplitCrossEntropyLoss(nn.Module):
             # For those targets in the head (idx == 0) we only need to return their loss
             if idx == 0:
                 softmaxed_head_res = softmaxed_all_head_res[running_offset:running_offset + len(split_hiddens[idx])]
-                try:
-                    entropy = -torch.gather(softmaxed_head_res, dim=1, index=split_targets[idx].view(-1, 1))
-                except RuntimeError:
-                    import pdb; pdb.set_trace()
-                entropy[split_targets[idx]==0] = 0
+                entropy = -torch.gather(softmaxed_head_res, dim=1, index=split_targets[idx].view(-1, 1))
             # If the target is in one of the splits, the probability is the p(tombstone) * p(word within tombstone)
             else:
                 softmaxed_head_res = softmaxed_all_head_res[running_offset:running_offset + len(split_hiddens[idx])]
@@ -166,8 +163,9 @@ class SplitCrossEntropyLoss(nn.Module):
                 # Warning: if you don't squeeze, you get an N x 1 return, which acts oddly with broadcasting
                 tail_entropy = torch.gather(torch.nn.functional.log_softmax(tail_res, dim=-1), dim=1, index=indices).squeeze()
                 entropy = -(head_entropy + tail_entropy)
+            entropy[split_targets[idx]==0] = 0
             ###
             running_offset += len(split_hiddens[idx])
             total_loss = entropy.float().sum() if total_loss is None else total_loss + entropy.float().sum()
 
-        return (total_loss / target_masks.float().sum() + 1e-13).type_as(weight)
+        return total_loss

@@ -1,6 +1,7 @@
 """
 Implementation of perplexity and unknown penalized perplexity metrics.
 """
+import logging
 import math
 from typing import Optional
 
@@ -12,8 +13,10 @@ import torch.nn.functional as F
 
 from kglm.data.extended_vocabulary import ExtendedVocabulary
 
+logger = logging.getLogger(__name__)
 
-@Metric.register('ppl')
+
+@Metric.register('ppl-old')
 class Perplexity(Metric):
     """Computes perplexity."""
     def __init__(self) -> None:
@@ -28,18 +31,18 @@ class Perplexity(Metric):
         Parameters
         ----------
         logits : ``torch.Tensor``, required.
-            A tensor of class logits of shape (batch_size, k, sequence_length).
+            A tensor of class logits of shape (batch_size, sequence_length, num_classes).
         labels : ``torch.Tensor``, required.
             A tensor of integer class labels of shape (batch_size, sequence_length).
         mask: ``torch.Tensor``, optional (default = None).
             A binary mask tensor of shape (batch_size, sequence_length).
         """
         logits, labels, mask = self.unwrap_to_tensors(logits, labels, mask)
-
-        log_p = -F.cross_entropy(logits, labels, reduction='none')
+        log_p = F.log_softmax(logits, dim=2)
+        log_p = torch.gather(log_p, dim=2, index=labels.unsqueeze(2)).squeeze(2)
         if mask is not None:
-            self._sum_log_p += (mask * log_p).sum()
-            self._total_count += mask.sum()
+            self._sum_log_p += (mask.float() * log_p).sum()
+            self._total_count += mask.float().sum()
         else:
             self._sum_log_p += log_p.sum()
             self._total_count += torch.numel(labels)  # pylint: disable=no-member
@@ -47,7 +50,7 @@ class Perplexity(Metric):
     @overrides
     def get_metric(self, reset: bool) -> float:
         cross_entropy = -self._sum_log_p / self._total_count
-        perplexity = math.exp(cross_entropy)
+        perplexity = cross_entropy.exp()
         if reset:
             self.reset()
         return perplexity
@@ -127,6 +130,33 @@ class UnknownPenalizedPerplexity(Metric):
         return perplexity
 
     @overrides
-    def reset(self):
+    def reset(self) -> None:
         self._sum_log_p = 0.0
         self._total_count = 0.0
+
+
+@Metric.register('ppl')
+class Ppl(Metric):
+
+    def __init__(self):
+        self.numerator = 0.0
+        self.denominator = 0.0
+
+    def __call__(self, numerator, denominator):
+        self.numerator += numerator
+        self.denominator += denominator
+
+    @overrides
+    def get_metric(self, reset: bool):
+        ratio = float(self.numerator) / (float(self.denominator) + 1e-13)
+        ppl = math.exp(ratio)
+        if reset:
+            self.reset()
+        return ppl
+
+    @overrides
+    def reset(self) -> None:
+        logger.debug('Resetting Ppl')
+        self.numerator = 0.0
+        self.denominator = 0.0
+

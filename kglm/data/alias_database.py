@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 
 AliasList = List[List[str]]
+MAX_ALIASES = 5
+MAX_TOKENS = 10
 
 
 def tokenize_to_string(text: str, tokenizer: Tokenizer) -> List[str]:
@@ -19,7 +21,6 @@ def tokenize_to_string(text: str, tokenizer: Tokenizer) -> List[str]:
     return [token.text for token in tokenizer.tokenize(text)]
 
 
-# TODO: Maybe someday we'll want a general ``Database`` of which this would be a specific type.
 class AliasDatabase:
     """A Database of Aliases"""
     def __init__(self,
@@ -50,12 +51,10 @@ class AliasDatabase:
         with open(path, 'rb') as f:
             alias_lookup = pickle.load(f)
 
-        max_aliases = 20
         for entity, aliases in Tqdm.tqdm(alias_lookup.items()):
             # Start by tokenizing the aliases
-            tokenized_aliases: AliasList = [tokenize_to_string(alias, tokenizer) for alias in aliases]
-            if max_aliases is not None:
-                tokenized_aliases = tokenized_aliases[:max_aliases]
+            tokenized_aliases: AliasList = [tokenize_to_string(alias, tokenizer)[:MAX_TOKENS] for alias in aliases]
+            tokenized_aliases = tokenized_aliases[:MAX_ALIASES]
             token_lookup[entity] = tokenized_aliases
 
             # Next obtain the set of unqiue tokens appearing in aliases for this entity. Use this
@@ -130,26 +129,12 @@ class AliasDatabase:
         self.is_tensorized = True
 
     def lookup(self, entity_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # The goal is to form a tensor of shape (batch_size, sequence_length, num_aliases,
-        # alias_length). To do this we need to first obtain the last two dimensions.
+        # Initialize empty tensors and fill them using the lookup
         batch_size, sequence_length = entity_ids.shape
-        num_aliases = 1
-        alias_length = 1
-        for i in range(batch_size):
-            for j in range(sequence_length):
-                entity_id = entity_ids[i, j]
-                local_indices = self._local_id_lookup[entity_id]
-                if local_indices is not None:
-                    num_aliases = max(num_aliases, local_indices.shape[0])
-                    alias_length = max(alias_length, local_indices.shape[1])
-
-        # Initialize empty tensors...
-        global_tensor = entity_ids.new_zeros(batch_size, sequence_length, num_aliases, alias_length,
+        global_tensor = entity_ids.new_zeros(batch_size, sequence_length, MAX_ALIASES, MAX_TOKENS,
                                              requires_grad=False)
-        local_tensor = entity_ids.new_zeros(batch_size, sequence_length, num_aliases, alias_length,
+        local_tensor = entity_ids.new_zeros(batch_size, sequence_length, MAX_ALIASES, MAX_TOKENS,
                                             requires_grad=False)
-
-        # ...and fill them using the lookup
         for i in range(batch_size):
             for j in range(sequence_length):
                 entity_id = entity_ids[i, j]

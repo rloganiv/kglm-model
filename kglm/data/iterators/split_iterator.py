@@ -41,13 +41,13 @@ class Splitter(Registrable):
     def __init__(self, splitting_keys: List[str]) -> None:
         self._splitting_keys = splitting_keys
 
-    def __call__(self, tensor_dict: TensorDict) -> Iterable[TensorDict]:
+    def __call__(self, tensor_dict: TensorDict, truncate_at: int) -> Iterable[TensorDict]:
 
         if not all(key in tensor_dict for key in self._splitting_keys):
             missing_keys = [key for key in self._splitting_keys if key not in tensor_dict]
             raise RuntimeError('Tensor dict is missing splitting keys: %s' % missing_keys)
 
-        sequence_length = self._get_sequence_length(tensor_dict)
+        sequence_length = truncate_at
 
         split_indices = self._create_split_indices(sequence_length)
         # If the last split is too small, then merge with the second to last
@@ -253,15 +253,23 @@ class SplitIterator(BucketIterator):
                     if self.vocab is not None:
                         batch.index_instances(self.vocab)
 
+
+                    # In order to make  gradient updates fair in expectation,
+                    # we randomly choose a sequence to cutoff at.
+                    all_instance_lengths = [instance.get_padding_lengths() for
+                                            instance in batch.instances]
+                    random_instance = random.choice(all_instance_lengths)
+                    truncate_at = random_instance['tokens']['num_tokens']
                     padding_lengths = batch.get_padding_lengths()
-                    logger.debug("Batch padding lengths: %s", str(padding_lengths))
-                    logger.debug("Batch size: %d", len(batch.instances))
+                    logger.debug('trunacate at: %s', truncate_at)
+                    logger.debug('padding_lengths: %s', padding_lengths)
+
                     tensor_dict = batch.as_tensor_dict(padding_lengths)
 
                     if add_to_cache:
                         self._cache[key].append(tensor_dict)
 
-                    for split_tensor_dict in self._splitter(tensor_dict):
+                    for split_tensor_dict in self._splitter(tensor_dict, truncate_at):
                         yield split_tensor_dict
 
             # Increment epoch tracker
