@@ -1,14 +1,14 @@
 """
 Readers for the enhanced Wikitext dataset.
 """
-from typing import Any, Dict, Iterable, Set
+from typing import Any, Dict, Iterable, List, Set
 import json
 import logging
 
 from allennlp.common.checks import ConfigurationError
 from allennlp.common.file_utils import cached_path
 from allennlp.data.dataset_readers import DatasetReader
-from allennlp.data.fields import TextField, MetadataField
+from allennlp.data.fields import TextField, ListField, MetadataField
 from allennlp.data.instance import Instance
 from allennlp.data.token_indexers import TokenIndexer, SingleIdTokenIndexer
 from allennlp.data.tokenizers import Token
@@ -263,10 +263,6 @@ class EnhancedWikitextSimpleKglmReader(DatasetReader):
             'source': TextField(source, self._token_indexers),
             'target': TextField(target, self._token_indexers)
         }
-        meta_fields = {
-            'tokens': tokens,
-            'alias_database': self._alias_database
-        }
 
         # Process annotations
         if 'annotations' in data:
@@ -280,8 +276,9 @@ class EnhancedWikitextSimpleKglmReader(DatasetReader):
             entity_ids = [DEFAULT_PADDING_TOKEN] * len(target)
             shortlist_inds = np.zeros(shape=(len(target,)))
             alias_copy_inds = np.zeros(shape=(len(target),))
-            alias_tokens = [[]] * len(target)
-            alias_ids = [[]] * len(target)
+            alias_tokens = [TextField([], self._token_indexers)] * len(target)
+            alias_inds: List[List[int]] = [[]] * len(target)
+            max_len = 0
 
             # Process annotations
             for annotation in data['annotations']:
@@ -289,8 +286,7 @@ class EnhancedWikitextSimpleKglmReader(DatasetReader):
                 # Obtain the entity identifier for the annotated span
                 entity_id = annotation['id']
                 alias = annotation['alias']
-                alias_map = {token: i for i, token in enumerate(set(alias))}
-                alias_copy_inds = [alias_map[token] for token in alias]
+                alias_map = {token: i+1 for i, token in enumerate(set(alias))}
 
                 # If neccessary, update the shortlist. Obtain the index of the entity identifier in
                 # the shortlist.
@@ -308,11 +304,17 @@ class EnhancedWikitextSimpleKglmReader(DatasetReader):
                         entity_ids[i] = entity_id
                         shortlist_inds[i] = shortlist_ind
                         alias_copy_inds[i] = alias_map[tokens[i+1]]
-                        alias_ids[i] = [alias_map[token] for token in alias]
-                        # alias_copy_inds[i] = self._alias_database.token_to_uid(entity_id, tokens[i+1])
+                        alias_inds[i] = [alias_map[token] for token in alias]
+                        alias_tokens[i] = TextField([Token(x) for x in alias],
+                                                    self._token_indexers)
+                        max_len = max(max_len, len(alias))
 
-            # Ma
-            # Convert to fields
+            # Make alias_inds into a numpy array
+            alias_ind_array = np.zeros((len(target), max_len))
+            for i, arr in enumerate(alias_inds):
+                for j, ind in enumerate(arr):
+                    alias_ind_array[i, j] = ind
+
             fields['entity_ids'] = TextField(
                 [Token(x) for x in entity_ids],
                 token_indexers=self._entity_indexers)
@@ -325,8 +327,9 @@ class EnhancedWikitextSimpleKglmReader(DatasetReader):
             fields['shortlist_inds'] = SequentialArrayField(
                 shortlist_inds,
                 dtype=np.int64)
-            # meta_fields['entity_ids'] = entity_ids
-
-        fields['metadata'] = MetadataField(meta_fields)
+            fields['alias_tokens'] = ListField(alias_tokens)
+            fields['alias_inds'] = SequentialArrayField(
+                alias_ind_array,
+                dtype=np.int64)
 
         return Instance(fields)
