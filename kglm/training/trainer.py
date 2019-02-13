@@ -471,7 +471,7 @@ class LmTrainer(TrainerBase):
                     for prm in self.model.parameters():
                         tmp[prm] = prm.data.clone()
                         try:
-                            prm.data = self.optimizer._active_optimizer.state[prm]['ax'].clone()
+                            prm.data = self.optimizer.active_optimizer.state[prm]['ax']
                         except KeyError:
                             continue
 
@@ -537,7 +537,7 @@ class LmTrainer(TrainerBase):
                 try:
                     if self.optimizer.triggered:
                         for prm in self.model.parameters():
-                            prm.data = tmp[prm].clone()
+                            prm.data = tmp[prm]
                 except UnboundLocalError:  # Happens when 1st triggered
                     continue
 
@@ -642,7 +642,6 @@ class LmTrainer(TrainerBase):
             self._batch_num_total = batch_num_total
 
         return epoch_to_return
-
 
     @classmethod
     def from_params(cls,
@@ -800,3 +799,4 @@ class TrainerPieces(NamedTuple):
         return TrainerPieces(model, iterator,
                              train_data, validation_data, test_data,
                              validation_iterator, trainer_params)
+

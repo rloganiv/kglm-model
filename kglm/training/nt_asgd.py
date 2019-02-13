@@ -3,6 +3,7 @@ Hacky implementation of the NT-ASGD optimization strategy from:
     TODO: Paste arXiv link.
 """
 from copy import deepcopy
+from itertools import chain
 import logging
 from typing import Iterable, List
 
@@ -31,20 +32,22 @@ class NTASGDOptimizer:
                                       t0=0,
                                       lambd=0.0,
                                       weight_decay=weight_decay)
-        if triggered:
-            self._active_optimizer = self._asgd
-        else:
-            self._active_optimizer = self._sgd
 
     ### Things that only NTASGDOptimizer does ###
     def trigger(self):
         logger.info('Triggering ASGD')
-        self._active_optimizer = self._asgd
         self._triggered = True
 
     @property
     def triggered(self):
         return self._triggered
+
+    @property
+    def active_optimizer(self):
+        if self.triggered:
+            return self._asgd
+        else:
+            return self._sgd
 
     ### Optimizer methods that need to be redefined ###
     def __getstate__(self):
@@ -70,26 +73,27 @@ class NTASGDOptimizer:
     def load_state_dict(self, state_dict):
         state_dict = deepcopy(state_dict)
         self._triggered = state_dict['_triggered']
-        self._sgd = self._sgd.load_state_dict(state_dict['_sgd'])
-        self._asgd = self._asgd.load_state_dict(state_dict['_asgd'])
-        if self._triggered:
-            self._active_optimizer = self._asgd
-        else:
-            self._active_optimizer = self._sgd
+        self._sgd.load_state_dict(state_dict['_sgd'])
+        self._asgd.load_state_dict(state_dict['_asgd'])
 
     ### Methods deferred to the active optimizer ###
     def zero_grad(self):
-        self._active_optimizer.zero_grad()
+        self.active_optimizer.zero_grad()
 
     def step(self, closure=None):
-        self._active_optimizer.step(closure)
+        self.active_optimizer.step(closure)
 
     def add_param_group(self, param_group):
-        self._active_optimizer.add_param_group(param_group)
+        self.active_optimizer.add_param_group(param_group)
 
     @property
     def param_groups(self):
-        return self._active_optimizer.param_groups
+        return self.active_optimizer.param_groups
+
+    @property
+    def state(self):
+        return self.active_optimizer.state
+
 
 
 # Note: This technically does not change the learning rate, but I really don't
@@ -117,7 +121,7 @@ class NTASGDScheduler(LearningRateScheduler):
         self.history: List[float] = []
 
     def step(self, metric: float = None, epoch: int = None) -> None:
-        logger.debug('Optimizer: %s', self.optimizer._active_optimizer)
+        logger.debug('Optimizer: %s', self.optimizer.active_optimizer)
         logger.debug('Metric: %0.4f', metric)
 
         # Don't need to do anything if we've already switched from SGD to
@@ -137,3 +141,4 @@ class NTASGDScheduler(LearningRateScheduler):
         if worse_off:
             self.optimizer.trigger()
         self.history.append(metric)
+
