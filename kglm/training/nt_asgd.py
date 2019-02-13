@@ -2,6 +2,7 @@
 Hacky implementation of the NT-ASGD optimization strategy from:
     TODO: Paste arXiv link.
 """
+from copy import deepcopy
 import logging
 from typing import Iterable, List
 
@@ -14,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 @Optimizer.register('nt-asgd')
-class NTASGDOptimizer(torch.optim.Optimizer):
+class NTASGDOptimizer:
     def __init__(self,
                  params: Iterable[torch.nn.Parameter],
                  lr: float,
@@ -34,14 +35,8 @@ class NTASGDOptimizer(torch.optim.Optimizer):
             self._active_optimizer = self._asgd
         else:
             self._active_optimizer = self._sgd
-        defaults = dict(lr=lr,
-                        weight_decay=weight_decay,
-                        triggered=triggered)
-        super(NTASGDOptimizer, self).__init__(params, defaults)
 
-    def step(self, closure=None):
-        self._active_optimizer.step(closure)
-
+    ### Things that only NTASGDOptimizer does ###
     def trigger(self):
         logger.info('Triggering ASGD')
         self._active_optimizer = self._asgd
@@ -50,6 +45,48 @@ class NTASGDOptimizer(torch.optim.Optimizer):
     @property
     def triggered(self):
         return self._triggered
+
+    ### Optimizer methods that need to be redefined ###
+    def __getstate__(self):
+        return {
+            '_triggered': self._triggered,
+            '_sgd': self._sgd,
+            '_asgd': self._asgd
+        }
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
+    def state_dict(self):
+        return {
+            '_triggered': self._triggered,
+            '_sgd': self._sgd.state_dict(),
+            '_asgd': self._asgd.state_dict()
+        }
+
+    def __repr__(self):
+        return f'NTASGDOptimizer(triggered={self._triggered})'
+
+    def load_state_dict(self, state_dict):
+        state_dict = deepcopy(state_dict)
+        self._triggered = state_dict['_triggered']
+        self._sgd = self._sgd.load_state_dict(state_dict['_sgd'])
+        self._asgd = self._asgd.load_state_dict(state_dict['_asgd'])
+        if self._triggered:
+            self._active_optimizer = self._asgd
+        else:
+            self._active_optimizer = self._sgd
+
+    ### Methods deferred to the active optimizer ###
+    def zero_grad(self):
+        self._active_optimizer.zero_grad()
+
+    def step(self, closure=None):
+        self._active_optimizer.step(closure)
+
+    def add_param_group(self, param_group):
+        self._active_optimizer.add_param_group(param_group)
+
 
 # Note: This technically does not change the learning rate, but I really don't
 # want to have to make changes to the Trainer to accept this as a general
