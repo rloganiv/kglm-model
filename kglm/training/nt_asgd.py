@@ -87,6 +87,10 @@ class NTASGDOptimizer:
     def add_param_group(self, param_group):
         self._active_optimizer.add_param_group(param_group)
 
+    @property
+    def param_groups(self):
+        return self._active_optimizer.param_groups
+
 
 # Note: This technically does not change the learning rate, but I really don't
 # want to have to make changes to the Trainer to accept this as a general
