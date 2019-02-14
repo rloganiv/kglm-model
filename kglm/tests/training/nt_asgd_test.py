@@ -15,11 +15,11 @@ class NTASGDOptimizerTest(AllenNlpTestCase):
 
     def test_trigger(self):
         # Active optimizer should be SGD before triggering
-        assert self.optim._active_optimizer == self.optim._sgd
+        assert self.optim.active_optimizer == self.optim._sgd
         assert not self.optim.triggered
         # Active optimizer should be ASGD after triggering
         self.optim.trigger()
-        assert self.optim._active_optimizer == self.optim._asgd
+        assert self.optim.active_optimizer == self.optim._asgd
         assert self.optim.triggered
 
     def test_awd_lstm_magic_trick(self):
@@ -43,7 +43,7 @@ class NTASGDOptimizerTest(AllenNlpTestCase):
         tmp = {}
         for prm in self.model.parameters():
             tmp[prm] = prm.data.clone()
-            prm.data = self.optim._active_optimizer.state[prm]['ax'].clone()
+            prm.data = self.optim.active_optimizer.state[prm]['ax'].clone()
 
         # HERE IS WHERE WE WOULD EVALUATE
 
