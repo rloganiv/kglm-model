@@ -1,9 +1,8 @@
 # pylint: disable=protected-access,not-callable,unused-import
-
-from kglm.common.testing import KglmModelTestCase
 import numpy as np
 import torch
 
+from kglm.common.testing import KglmModelTestCase
 from kglm.data.dataset_readers.enhanced_wikitext import EnhancedWikitextKglmReader
 from kglm.models.alias_copynet import AliasCopynet
 
