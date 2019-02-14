@@ -436,9 +436,6 @@ class AliasCopynet(Model):
         if self._beta:
             loss = loss + self._beta * (output[:, 1:] - output[:, :-1]).pow(2).mean()
 
-        if loss.is_nan():
-            import pdb; pdb.set_trace()
-
         return {'loss': loss}
 
     @overrides
