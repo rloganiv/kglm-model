@@ -12,16 +12,22 @@
         "tie_weights": true
     },
     "iterator": {
-        "type": "fancy",
-        "batch_size": 2,
-        "split_size": 10,
-        "splitting_keys": ["source", "target"]
+        "type": "awd",
+        "batch_size": 3,
+        "split_size": 30
     },
     "trainer": {
+        "type": "lm",
         "num_epochs": 2,
         "optimizer": {
-            "type": "adam",
-            "lr": 1e-4
-        }
+            "type": "nt-asgd",
+            "lr": 30,
+            "weight_decay": 1.2e-6
+        },
+        "learning_rate_scheduler": {
+            "type": "nt-asgd",
+            "non_monotone_interval": 5
+        },
+        "validation_metric": "-ppl"
     }
 }
