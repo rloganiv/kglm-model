@@ -175,7 +175,7 @@ class AwdLstmLanguageModel(Model):
 
         # Compute logits and loss
         logits = self.decoder(current_input)
-        loss = sequence_cross_entropy_with_logits(logits, target,
+        loss = sequence_cross_entropy_with_logits(logits, target.contiguous(),
                                                   target_mask,
                                                   average="token")
         num_tokens = target_mask.float().sum() + 1e-13
