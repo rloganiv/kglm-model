@@ -8,7 +8,7 @@ import logging
 from allennlp.common.checks import ConfigurationError
 from allennlp.common.file_utils import cached_path
 from allennlp.data.dataset_readers import DatasetReader
-from allennlp.data.fields import TextField, ListField, MetadataField
+from allennlp.data.fields import ListField, MetadataField, TextField
 from allennlp.data.instance import Instance
 from allennlp.data.token_indexers import TokenIndexer, SingleIdTokenIndexer
 from allennlp.data.tokenizers import Token
@@ -50,12 +50,6 @@ class EnhancedWikitextReader(DatasetReader):
         tokens = [x + ['@@END@@'] for x in data['tokens']]
         tokens = _flatten(tokens)
         tokens = [Token(x) for x in tokens]
-        # source = tokens[:-1]
-        # target = tokens[1:]
-        # fields = {
-        #         'source': TextField(source, self._token_indexers),
-        #         'target': TextField(target, self._token_indexers)
-        # }
         fields = {'tokens': TextField(tokens, self._token_indexers)}
         return Instance(fields)
 
@@ -177,14 +171,20 @@ class EnhancedWikitextKglmReader(DatasetReader):
             reverse_shortlist = {DEFAULT_PADDING_TOKEN: 0}
 
             entity_ids = [DEFAULT_PADDING_TOKEN] * len(target)
-            shortlist_inds = np.zeros(shape=(len(target,)))
+            relations = [[DEFAULT_PADDING_TOKEN]] * len(target)
+            parent_ids = [[DEFAULT_PADDING_TOKEN]] * len(target)
+            shortlist_inds = np.zeros(shape=(len(target),))
             alias_copy_inds = np.zeros(shape=(len(target),))
+            new_entity_mask = np.zeros(shape=(len(target),))
 
             # Process annotations
             for annotation in data['annotations']:
 
                 # Obtain the entity identifier for the annotated span
                 entity_id = annotation['id']
+                relation = annotation['relation']
+                parent_id = annotation['parent_id']
+                new_entity = relation == ['@@NEW@@']
 
                 # If neccessary, update the shortlist. Obtain the index of the entity identifier in
                 # the shortlist.
@@ -197,13 +197,29 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 for i in range(*annotation['span']):
                     # Note: +1 offset to account for start token.
                     entity_ids[i] = entity_id
-                    alias_copy_inds[i] = self._alias_database.token_to_uid(entity_id, tokens[i+1])
+                    if new_entity:
+                        new_entity_mask[i] = 1
+                    else:
+                        relations[i] = relation
+                        parent_ids[i] = parent_id
                     shortlist_inds[i] = shortlist_ind
+                    alias_copy_inds[i] = self._alias_database.token_to_uid(entity_id, tokens[i+1])
 
             # Convert to fields
             fields['entity_ids'] = TextField(
                 [Token(x) for x in entity_ids],
                 token_indexers=self._entity_indexers)
+            fields['relations'] = ListField([
+                TextField([Token(x) for x in sublist],
+                          token_indexers=self._entity_indexers)
+                for sublist in relations])
+            fields['parent_ids'] = ListField([
+                TextField([Token(x) for x in sublist],
+                          token_indexers=self._entity_indexers)
+                for sublist in parent_ids])
+            fields['new_entity_mask'] = SequentialArrayField(
+                new_entity_mask,
+                dtype=np.uint8)
             fields['alias_copy_inds'] = SequentialArrayField(
                 alias_copy_inds,
                 dtype=np.int64)
@@ -213,7 +229,6 @@ class EnhancedWikitextKglmReader(DatasetReader):
             fields['shortlist_inds'] = SequentialArrayField(
                 shortlist_inds,
                 dtype=np.int64)
-            # meta_fields['entity_ids'] = entity_ids
 
         fields['metadata'] = MetadataField(meta_fields)
 
