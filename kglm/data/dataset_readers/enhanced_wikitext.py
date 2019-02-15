@@ -173,8 +173,9 @@ class EnhancedWikitextKglmReader(DatasetReader):
             entity_ids = [DEFAULT_PADDING_TOKEN] * len(target)
             relations = [[DEFAULT_PADDING_TOKEN]] * len(target)
             parent_ids = [[DEFAULT_PADDING_TOKEN]] * len(target)
-            shortlist_inds = np.zeros(shape=(len(target,)))
+            shortlist_inds = np.zeros(shape=(len(target),))
             alias_copy_inds = np.zeros(shape=(len(target),))
+            new_entity_mask = np.zeros(shape=(len(target),))
 
             # Process annotations
             for annotation in data['annotations']:
@@ -183,6 +184,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 entity_id = annotation['id']
                 relation = annotation['relation']
                 parent_id = annotation['parent_id']
+                new_entity = relation == ['@@NEW@@']
 
                 # If neccessary, update the shortlist. Obtain the index of the entity identifier in
                 # the shortlist.
@@ -195,8 +197,11 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 for i in range(*annotation['span']):
                     # Note: +1 offset to account for start token.
                     entity_ids[i] = entity_id
-                    relations[i] = relation
-                    parent_ids[i] = parent_id
+                    if new_entity:
+                        new_entity_mask[i] = 1
+                    else:
+                        relations[i] = relation
+                        parent_ids[i] = parent_id
                     shortlist_inds[i] = shortlist_ind
                     alias_copy_inds[i] = self._alias_database.token_to_uid(entity_id, tokens[i+1])
 
@@ -212,6 +217,9 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 TextField([Token(x) for x in sublist],
                           token_indexers=self._entity_indexers)
                 for sublist in parent_ids])
+            fields['new_entity_mask'] = SequentialArrayField(
+                new_entity_mask,
+                dtype=np.uint8)
             fields['alias_copy_inds'] = SequentialArrayField(
                 alias_copy_inds,
                 dtype=np.int64)
