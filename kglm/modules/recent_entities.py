@@ -1,10 +1,13 @@
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Tuple
 
 from allennlp.modules.token_embedders import TokenEmbedder
+from overrides import overrides
 import torch
 
+from kglm.nn.util import nested_enumerate
 
-class RecentEntities(torch.nn.Module):
+
+class RecentEntities:
     """
     Module for tracking a dynamically changing list of entities.
 
@@ -20,29 +23,72 @@ class RecentEntities(torch.nn.Module):
                  cutoff: int) -> None:
         self._entity_embedder = entity_embedder
         self._cutoff = cutoff
-        self._previous_ids: List[torch.LongTensor] = []
-        self._last_seen: List[Dict[int, int]] = []
+        self._remaining: List[Dict[int, int]] = []
 
-    def __forward__(self,
-                    hidden: torch.FloatTensor,
-                    parent_ids: torch.LongTensor) -> None:
+    def __call__(self,
+                 parent_ids: torch.LongTensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Computes the log-probability of selecting the provided of entity ids conditioned on the
         current hidden state, as well as updates the ``RecentEntities`` hidden state.
 
         Parameters
         ----------
-        hidden : ``torch.FloatTensor``
-            A tensor of shape ``(batch_size, sequence_length, hidden_dim)`` containing the
-            hidden states for the current batch.
         parent_ids : ``torch.LongTensor``
-            The target entity ids.
+            A tensor of shape ``(batch_size, sequence_length)`` whose elements are the parent ids
+            of the corresponding token in the ``target`` sequence.
+
+        Returns
+        -------
+        A tuple ``(candidate_ids, candidate_mask)`` containings the following elements:
+        candidate_ids : ``torch.LongTensor``
+            A tensor of shape ``(batch_size, n_candidates)`` of all of the candidates for each
+            batch element.
+        candidate_mask : ``torch.LongTensor``
+            A tensor of shape ``(batch_size, sequence_length, n_candidates)`` defining which
+            subset of candidates can be selected at the given point in the sequence.
         """
+        batch_size, sequence_length = parent_ids.shape[:2]
+
+        # TODO: See if we can get away without nested loops / cast to CPU.
+        candidate_ids = self._get_candidates(parent_ids)
+        candidate_lookup = [{parent_id: j for j, parent_id in enumerate(l)} for l in candidate_ids.tolist()]
+
+        # Create mask
+        candidate_mask = parent_ids.new_zeros(size=(batch_size, sequence_length, candidate_ids.shape[-1]),
+                                              dtype=torch.uint8)
+
+        # Start by accounting for unfinished masks that remain from the last batch
+        for i, lookup in enumerate(self._remaining):
+            for parent_id, remainder in lookup.items():
+                # Find index w.r.t. the **current** set of candidates
+                k = candidate_lookup[i][parent_id]
+                # Fill in the remaining amount of mask
+                candidate_mask[i, :remainder, k] = 1
+                # If splits are really short, then we might still have some remaining
+                lookup[parent_id] -= sequence_length
+
+        # Cast to list so we can use elements as keys (not possible for tensors)
+        parent_id_list = parent_ids.tolist()
+        for i, j, *_, parent_id in nested_enumerate(parent_id_list):
+            if parent_id == 0:
+                continue
+            else:
+                # Fill in mask
+                k = candidate_lookup[i][parent_id]
+                candidate_mask[i, j:j + self._cutoff, k] = 1
+                # Track how many sequence elements remain
+                remainder = sequence_length - (j + self._cutoff)
+                self._remaining[i][parent_id] = (j + self._cutoff) - sequence_length
+
+        # Remove any ids for non-recent parents (e.g. those without remaining mask)
+        for i, lookup in enumerate(self._remaining):
+            self._remaining[i] = {key: value for key, value in lookup.items() if value > 0}
+
+        return candidate_ids, candidate_mask
 
     # pylint: disable=redefined-builtin
     def _get_candidates(self,
-                        parent_ids: torch.LongTensor,
-                        sorted: bool = False) -> torch.LongTensor:
+                        parent_ids: torch.LongTensor) -> torch.LongTensor:
         """
         Combines the unique ids from the current batch with the previous set of ids to form the
         collection of **all** relevant parent entities.
@@ -63,12 +109,12 @@ class RecentEntities(torch.nn.Module):
         """
         # Get the tensors of unique ids for each batch element and store them in a list
         all_unique: List[torch.LongTensor] = []
-        for i, id_sequence in enumerate(parent_ids):
-            if self._previous_ids is not None:
-                combined = torch.cat((self._previous_ids[i], id_sequence.view(-1)), dim=0)
-                unique = torch.unique(combined, sorted=sorted)
-            else:
-                unique = torch.unique(id_sequence, sorted=sorted)
+        for i, ids in enumerate(parent_ids):
+            if self._remaining[i] is not None:
+                previous_ids = list(self._remaining[i].keys())
+                previous_ids = parent_ids.new_tensor(previous_ids)
+                ids = torch.cat((ids.view(-1), previous_ids), dim=0)
+            unique = torch.unique(ids, sorted=True)
             all_unique.append(unique)
 
         # Convert the list to a tensor by adding adequete padding.
@@ -80,23 +126,6 @@ class RecentEntities(torch.nn.Module):
 
         return unique_parent_ids
 
-    def _update_state(self,
-                      parent_ids: torch.LongTensor):
-        # We know for certain that everything before the cutoff cannot be carried over.
-        truncated_parent_ids = parent_ids[:, -self._cutoff:]
-
-        sequence_length = truncated_parent_ids.shape[1]
-        for batch_index, batch_element in enumerate(truncated_parent_ids):
-            for timestep, _parent_ids in enumerate(batch_element):
-                for parent_id in _parent_ids:
-                    self._last_seen[batch_index][parent_id] = sequence_length - timestep - 1
-            # Get rid of anything past the cutoff
-            self._last_seen[batch_index] = {key: value for key, value in self._last_seen[batch_index].items()
-                                            if abs(value) < self._cutoff}
-            # Update previous ids
-            previous_ids = list(self._last_seen[batch_index].keys())
-            self._previous_ids[batch_index] = self._previous_ids[batch_index].new_tensor(previous_ids)
-
     def reset(self, reset: torch.ByteTensor) -> None:
         """
         Parameters
@@ -105,7 +134,7 @@ class RecentEntities(torch.nn.Module):
             A tensor of shape ``(batch_size,)`` indicating whether the state (e.g. list of
             previously seen entities) for the corresponding batch element should be reset.
         """
-        if (len(reset) != len(self._previous_ids)) and not reset.all():
+        if (len(reset) != len(self._remaining)) and not reset.all():
             raise RuntimeError('Changing the batch size without resetting all internal states is '
                                'undefined.')
 
@@ -113,12 +142,10 @@ class RecentEntities(torch.nn.Module):
         # This simplifies the case where the batch_size has been
         if reset.all():
             batch_size = reset.shape[0]
-            self._last_seen = [{}] * batch_size
-            self._previous_ids = [reset.new_empty(size=(0,), dtype=torch.int64)] * batch_size
+            self._remaining = [dict() for _ in range(batch_size)]
 
         # Otherwise only reset the internal state for the indicated batch elements
         else:
             for i, should_reset in enumerate(reset):
                 if should_reset:
-                    self._previous_ids[i] = self._previous_ids[i].new_empty(size=(0,))
-                    self._last_seen[i] = {}
+                    self._remaining[i] = {}
