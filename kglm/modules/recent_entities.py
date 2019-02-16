@@ -11,29 +11,21 @@ class RecentEntities(torch.nn.Module):
     Parameters
     ----------
     entity_embedder : ``TokenEmbedder``
-        Used to create embeddings for entities.
-    batch_size : ``int``
-        The batch size.
-    maximum_entities : ``int``
-        The maximum number of entities that can be considered recent.
-    lifespan : ``int``
-        The number of time steps that must elapse before an entity is removed from the set of
-        recent entities.
+        Lookup the embeddings of recent entities
+    cutoff : ``int``
+        Number of time steps that an entity is considered 'recent'.
     """
     def __init__(self,
                  entity_embedder: TokenEmbedder,
-                 batch_size: int,  # TODO: Can we avoid explicitly defining this?
-                 maximum_entities: int,  # TODO: Determine if this is needed.
-                 lifespan: int) -> None:
+                 cutoff: int) -> None:
         self._entity_embedder = entity_embedder
-        self._batch_size = batch_size
-        self._maximum_entities = maximum_entities
-        self._last_seen: Optional[List[Any]] = None
-        self._lifespan = lifespan
+        self._cutoff = cutoff
+        self._previous_ids: List[torch.LongTensor] = []
+        self._last_seen: List[Dict[int, int]] = []
 
     def __forward__(self,
                     hidden: torch.FloatTensor,
-                    entity_ids: torch.LongTensor) -> None:
+                    parent_ids: torch.LongTensor) -> None:
         """
         Computes the log-probability of selecting the provided of entity ids conditioned on the
         current hidden state, as well as updates the ``RecentEntities`` hidden state.
@@ -43,57 +35,67 @@ class RecentEntities(torch.nn.Module):
         hidden : ``torch.FloatTensor``
             A tensor of shape ``(batch_size, sequence_length, hidden_dim)`` containing the
             hidden states for the current batch.
-        entity_ids : ``torch.LongTensor``
+        parent_ids : ``torch.LongTensor``
             The target entity ids.
         """
-        raise NotImplementedError
 
-    def _create_logit_mask(self,
-                           entity_ids: torch.LongTensor = None) -> torch.ByteTensor:
+    # pylint: disable=redefined-builtin
+    def _get_candidates(self,
+                        parent_ids: torch.LongTensor,
+                        sorted: bool = False) -> torch.LongTensor:
         """
-        Creates a mask which specifying the valid entities choices at each time step.
+        Combines the unique ids from the current batch with the previous set of ids to form the
+        collection of **all** relevant parent entities.
 
         Parameters
         ----------
-        entity_ids : ``torch.LongTensor``
-            The target entity ids.
+        parent_ids : ``torch.LongTensor``
+            A tensor of shape ``(batch_size, seq_length, num_parents)`` containing the ids of all
+            possible parents of the corresponding mention.
+        sorted : ``bool`` (default=``False``)
+            Whether or not to sort the parent ids.
 
         Returns
         -------
-        logit_mask : ``torch.ByteTensor``
-            A mask indicating which entities are valid at each time step.
+        unique_parent_ids : ``torch.LongTensor``
+            A tensor of shape ``(batch_size, max_num_parents)`` containing all of the unique
+            candidate parent ids.
         """
-        raise NotImplementedError
+        # Get the tensors of unique ids for each batch element and store them in a list
+        all_unique: List[torch.LongTensor] = []
+        for i, id_sequence in enumerate(parent_ids):
+            if self._previous_ids is not None:
+                combined = torch.cat((self._previous_ids[i], id_sequence.view(-1)), dim=0)
+                unique = torch.unique(combined, sorted=sorted)
+            else:
+                unique = torch.unique(id_sequence, sorted=sorted)
+            all_unique.append(unique)
 
-    # TODO: Settle on name. Figure out what this should return: a tensor of (normalized) logits, with or without the corresponding mask? How will user know which entity a logit corresponds to?
-    def get_logits(self,
-                   hidden: torch.Tensor):
-        """
-        Parameters
-        ----------
-        hidden : ``torch.Tensor``
-            A tensor of shape ``(batch_size)`` containing the hidden state for the current time
-            step.
-        """
-        if self.training:
-            raise Warning(
-                '``RecentEntities.get_logits`` is not intended to be used during training. Are '
-                'you sure you don\'t mean to use ``__forward__``?')
-        raise NotImplementedError
+        # Convert the list to a tensor by adding adequete padding.
+        batch_size = parent_ids.shape[0]
+        max_num_parents = max(unique.shape[0] for unique in all_unique)
+        unique_parent_ids = parent_ids.new_zeros(size=(batch_size, max_num_parents))
+        for i, unique in enumerate(all_unique):
+            unique_parent_ids[i, :unique.shape[0]] = unique
 
-    # TODO: Settle on name. Should we allow multiple entity ids to be selected during inference?
-    def update(self, entity_ids: torch.LongTensor) -> None:
-        """
-        Parameters
-        ----------
-        entity_ids : ``torch.LongTensor``
-            A tensor of shape ``(batch_size,)``
-        """
-        if self.training:
-            raise Warning(
-                '``RecentEntities.update`` is not intended to be used during training. Are '
-                'you sure you don\'t mean to use ``__forward__``?')
-        raise NotImplementedError
+        return unique_parent_ids
+
+    def _update_state(self,
+                      parent_ids: torch.LongTensor):
+        # We know for certain that everything before the cutoff cannot be carried over.
+        truncated_parent_ids = parent_ids[:, -self._cutoff:]
+
+        sequence_length = truncated_parent_ids.shape[1]
+        for batch_index, batch_element in enumerate(truncated_parent_ids):
+            for timestep, _parent_ids in enumerate(batch_element):
+                for parent_id in _parent_ids:
+                    self._last_seen[batch_index][parent_id] = sequence_length - timestep - 1
+            # Get rid of anything past the cutoff
+            self._last_seen[batch_index] = {key: value for key, value in self._last_seen[batch_index].items()
+                                            if abs(value) < self._cutoff}
+            # Update previous ids
+            previous_ids = list(self._last_seen[batch_index].keys())
+            self._previous_ids[batch_index] = self._previous_ids[batch_index].new_tensor(previous_ids)
 
     def reset(self, reset: torch.ByteTensor) -> None:
         """
@@ -103,5 +105,20 @@ class RecentEntities(torch.nn.Module):
             A tensor of shape ``(batch_size,)`` indicating whether the state (e.g. list of
             previously seen entities) for the corresponding batch element should be reset.
         """
-        for i in reset:
-            self._last_seen[i] = []
+        if (len(reset) != len(self._previous_ids)) and not reset.all():
+            raise RuntimeError('Changing the batch size without resetting all internal states is '
+                               'undefined.')
+
+        # If everything is being reset, then we treat as if the Module has just been initialized.
+        # This simplifies the case where the batch_size has been
+        if reset.all():
+            batch_size = reset.shape[0]
+            self._last_seen = [{}] * batch_size
+            self._previous_ids = [reset.new_empty(size=(0,), dtype=torch.int64)] * batch_size
+
+        # Otherwise only reset the internal state for the indicated batch elements
+        else:
+            for i, should_reset in enumerate(reset):
+                if should_reset:
+                    self._previous_ids[i] = self._previous_ids[i].new_empty(size=(0,))
+                    self._last_seen[i] = {}
