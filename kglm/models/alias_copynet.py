@@ -19,9 +19,6 @@ from kglm.training.metrics import Ppl
 logger = logging.getLogger(__name__)
 
 
-LOG0 = torch.tensor(1e-45).log()  # pylint: disable=not-callable
-
-
 @Model.register('alias-copynet')
 class AliasCopynet(Model):
     """
@@ -60,7 +57,7 @@ class AliasCopynet(Model):
         # `TokenEmbedders` to apply dropout later on.
         # pylint: disable=protected-access
         self._token_embedder = token_embedder._token_embedders['tokens']
-        self._entity_embedder = entity_embedder._token_embedders['entity_ids']
+        # self._entity_embedder = entity_embedder._token_embedders['entity_ids']
         self._alias_encoder = alias_encoder
         self._hidden_size = hidden_size
         self._num_layers = num_layers
@@ -78,7 +75,7 @@ class AliasCopynet(Model):
         self._alpha = alpha
         self._beta = beta
 
-        # RNN Encoders. TODO: Experiment with seperate encoder for aliases.
+        # RNN Encoders.
         entity_embedding_dim = entity_embedder.get_output_dim()
         token_embedding_dim = entity_embedder.get_output_dim()
         assert entity_embedding_dim == token_embedding_dim
@@ -95,21 +92,21 @@ class AliasCopynet(Model):
             else:
                 output_size = hidden_size
             rnns.append(torch.nn.LSTM(input_size, output_size, batch_first=True))
-        # rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in rnns]
+        rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in rnns]
         self.rnns = torch.nn.ModuleList(rnns)
 
         # Various linear transformations.
-        self._fc_mention = torch.nn.Linear(
-            in_features=embedding_dim,
-            out_features=2)
+        # self._fc_mention = torch.nn.Linear(
+        #     in_features=embedding_dim,
+        #     out_features=2)
 
-        self._fc_entity = torch.nn.Linear(
-            in_features=embedding_dim,
-            out_features=embedding_dim)
+        # self._fc_entity = torch.nn.Linear(
+        #     in_features=embedding_dim,
+        #     out_features=embedding_dim)
 
-        self._fc_condense = torch.nn.Linear(
-            in_features=2 * embedding_dim,
-            out_features=embedding_dim)
+        # self._fc_condense = torch.nn.Linear(
+        #     in_features=2 * embedding_dim,
+        #     out_features=embedding_dim)
 
         self._fc_generate = torch.nn.Linear(
             in_features=embedding_dim,
@@ -294,20 +291,13 @@ class AliasCopynet(Model):
         alias_indices = alias_indices.view(batch_size * sequence_length, -1)
         target_alias_indices = target_alias_indices.view(-1, 1)
         copy_mask = alias_indices.eq(target_alias_indices) & flattened_mask & target_alias_indices.gt(0)
-        copy_log_probs_extended_vocab = copy_log_probs + (copy_mask.float() + 1e-45).log()
-        # When computing perplexity, we do so with respect to the source vocabulary. Evaluating the
-        # contribution of the copy mechanism using the probabilities above is then incorrect for
-        # UNK tokens since we are only adding the likelihood of the copied term - we really want the
-        # sum of likelihoods of all words that would be mapped to <UNK>. We compute this below.
-        alias_tokens = alias_tokens.view(batch_size * sequence_length, -1)
-        copy_mask = alias_tokens.eq(flattened_targets) & flattened_mask
-        copy_log_probs_source_vocab = copy_log_probs + (copy_mask.float() + 1e-45).log()
+        copy_log_probs = copy_log_probs + (copy_mask.float() + 1e-45).log()
 
         # COMBINED LOSS ###
         # The final loss term is computed using our log probs computed w.r.t to the entire
         # vocabulary.
         combined_log_probs_extended_vocab = torch.cat((generate_log_probs_extended_vocab,
-                                                       copy_log_probs_extended_vocab),
+                                                       copy_log_probs),
                                                       dim=1)
         combined_log_probs_extended_vocab = torch.logsumexp(combined_log_probs_extended_vocab,
                                                             dim=1)
@@ -317,20 +307,29 @@ class AliasCopynet(Model):
         # Our perplexity terms are computed using the log probs computed w.r.t the source
         # vocabulary.
         combined_log_probs_source_vocab = torch.cat((generate_log_probs_source_vocab,
-                                                     copy_log_probs_source_vocab),
+                                                     copy_log_probs),
                                                     dim=1)
         combined_log_probs_source_vocab = torch.logsumexp(combined_log_probs_source_vocab,
                                                           dim=1)
 
-        penalty = self._unk_penalty * unks.float().sum()
+        # For UPP we penalize **only** p(UNK); not the copy probabilities!
+        penalized_log_probs_source_vocab = generate_log_probs_source_vocab - self._unk_penalty * unks.float()
+        penalized_log_probs_source_vocab = torch.cat((penalized_log_probs_source_vocab,
+                                                      copy_log_probs),
+                                                     dim=1)
+        penalized_log_probs_source_vocab = torch.logsumexp(penalized_log_probs_source_vocab,
+                                                           dim=1)
 
         kg_mask = (mention_mask * mask.byte()).view(-1)
         bg_mask = ((1 - mention_mask) * mask.byte()).view(-1)
+        mask = (kg_mask | bg_mask)
 
-        self._ppl(-combined_log_probs_source_vocab.sum(), mask.sum() + 1e-13)
-        self._upp(-combined_log_probs_source_vocab.sum() + penalty, mask.sum() + 1e-13)
-        self._kg_ppl(-combined_log_probs_source_vocab[kg_mask].sum(), kg_mask.float().sum() + 1e-13)
-        self._bg_ppl(-combined_log_probs_source_vocab[bg_mask].sum(), bg_mask.float().sum() + 1e-13)
+        self._ppl(-combined_log_probs_source_vocab[mask].sum(), mask.float().sum() + 1e-13)
+        self._upp(-penalized_log_probs_source_vocab[mask].sum(), mask.float().sum() + 1e-13)
+        if kg_mask.any():
+            self._kg_ppl(-combined_log_probs_source_vocab[kg_mask].sum(), kg_mask.float().sum() + 1e-13)
+        if bg_mask.any():
+            self._bg_ppl(-combined_log_probs_source_vocab[bg_mask].sum(), bg_mask.float().sum() + 1e-13)
 
         return vocab_loss
 
@@ -357,19 +356,19 @@ class AliasCopynet(Model):
 
         # Embed entities.
         entity_ids = entity_ids['entity_ids']
-        entity_embeddings = embedded_dropout(
-            embed=self._entity_embedder,
-            words=entity_ids,
-            dropout=self._dropoute if self.training else 0)
-        entity_embeddings = self._locked_dropout(entity_embeddings, self._dropouti)
+        # entity_embeddings = embedded_dropout(
+        #     embed=self._entity_embedder,
+        #     words=entity_ids,
+        #     dropout=self._dropoute if self.training else 0)
+        # entity_embeddings = self._locked_dropout(entity_embeddings, self._dropouti)
 
-        # Embed shortlist.
-        shortlist_mask = get_text_field_mask(shortlist)
-        shortlist = shortlist['entity_ids']
-        shortlist_embeddings = embedded_dropout(
-            embed=self._entity_embedder,
-            words=shortlist,
-            dropout=self._dropoute if self.training else 0)
+        # # Embed shortlist.
+        # shortlist_mask = get_text_field_mask(shortlist)
+        # shortlist = shortlist['entity_ids']
+        # shortlist_embeddings = embedded_dropout(
+        #     embed=self._entity_embedder,
+        #     words=shortlist,
+        #     dropout=self._dropoute if self.training else 0)
 
         # Encode source tokens.
         current_input = source_embeddings
@@ -397,21 +396,21 @@ class AliasCopynet(Model):
 
         # Predict whether or not the next token will be an entity mention. This corresponds to the
         # case that the entity's id is not a padding token.
-        mention_loss = self._mention_loss(encoded, entity_ids.gt(0), target_mask)
+        # mention_loss = self._mention_loss(encoded, entity_ids.gt(0), target_mask)
 
         # Predict which entity (among those in the supplied shortlist) is going to be
         # mentioned.
-        entity_loss = self._entity_loss(encoded,
-                                        shortlist_inds,
-                                        target_mask,
-                                        shortlist_embeddings,
-                                        shortlist_mask)
+        # entity_loss = self._entity_loss(encoded,
+        #                                 shortlist_inds,
+        #                                 target_mask,
+        #                                 shortlist_embeddings,
+        #                                 shortlist_mask)
 
         # Predict generation-mode scores. Start by concatenating predicted entity embeddings with
         # the encoder output - then feed through a linear layer.
-        concatenated = torch.cat((encoded, entity_embeddings), dim=-1)
-        condensed = self._fc_condense(concatenated)
-        generate_scores = self._fc_generate(condensed)
+        # concatenated = torch.cat((encoded, entity_embeddings), dim=-1)
+        # condensed = self._fc_condense(concatenated)
+        generate_scores = self._fc_generate(encoded)
 
         # Predict copy-mode scores.
         alias_tokens, alias_inds = alias_database.lookup(entity_ids)
@@ -428,7 +427,7 @@ class AliasCopynet(Model):
                                       entity_ids.gt(0))
 
         # Compute total loss
-        loss = mention_loss + entity_loss + vocab_loss
+        loss = vocab_loss # + mention_loss + entity_loss
 
         # Activation regularization
         if self._alpha:
@@ -461,3 +460,4 @@ class AliasCopynet(Model):
             'kg_ppl': self._kg_ppl.get_metric(reset),
             'bg_ppl': self._bg_ppl.get_metric(reset)
         }
+

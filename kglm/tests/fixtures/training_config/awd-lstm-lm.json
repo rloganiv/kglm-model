@@ -19,6 +19,7 @@
     "trainer": {
         "type": "lm",
         "num_epochs": 2,
+        "grad_clipping": 0.25,
         "optimizer": {
             "type": "nt-asgd",
             "lr": 30,

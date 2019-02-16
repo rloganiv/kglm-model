@@ -1,4 +1,7 @@
 {
+    "random_seed": 1111,
+    "numpy_seed": 1111,
+    "pytorch_seed": 1111,
     "vocabulary": {
         "type": "extended",
         "min_count": {"tokens": 3}
