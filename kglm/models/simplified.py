@@ -269,15 +269,15 @@ class AliasCopynet(Model):
         # The generated token loss is a simple cross-entropy calculation, we can just gather
         # the log probabilties...
         flattened_log_probs = generate_log_probs.view(batch_size * sequence_length, -1)
-        generate_log_probs_source_vocab = flattened_log_probs.gather(1, flattened_targets)
-        # ...except we need to ignore the contribution of UNK tokens that are copied (only when
-        # computing the loss). To do that we create a mask which is 1 only if the token is not a
-        # copied UNK (or padding).
+        generate_log_probs = flattened_log_probs.gather(1, flattened_targets)
+        # ...except we need to ignore the contribution of UNK tokens that are
+        # copied (always in the simplified model). To do that we create a mask
+        # which is 1 only if the token is not a copied UNK (or padding).
         unks = target_tokens.eq(self._unk_index).view(-1, 1)
         copied = target_alias_indices.gt(0).view(-1, 1)
         generate_mask = ~copied & flattened_mask
         # Since we are in log-space we apply the mask by addition.
-        generate_log_probs_extended_vocab = generate_log_probs_source_vocab + (generate_mask.float() + 1e-45).log()
+        generate_log_probs = generate_log_probs + (generate_mask.float() + 1e-45).log()
 
         # COPY LOSS ###
         copy_log_probs = copy_log_probs.view(batch_size * sequence_length, -1)
@@ -285,48 +285,40 @@ class AliasCopynet(Model):
         alias_indices = alias_indices.view(batch_size * sequence_length, -1)
         target_alias_indices = target_alias_indices.view(-1, 1)
         copy_mask = alias_indices.eq(target_alias_indices) & flattened_mask & target_alias_indices.gt(0)
-        copy_log_probs_extended_vocab = copy_log_probs + (copy_mask.float() + 1e-45).log()
-        # When computing perplexity, we do so with respect to the source vocabulary. Evaluating the
-        # contribution of the copy mechanism using the probabilities above is then incorrect for
-        # UNK tokens since we are only adding the likelihood of the copied term - we really want the
-        # sum of likelihoods of all words that would be mapped to <UNK>. We compute this below.
-        alias_tokens = alias_tokens.view(batch_size * sequence_length, -1)
-        copy_mask = alias_tokens.eq(flattened_targets) & flattened_mask
-        copy_log_probs_source_vocab = copy_log_probs + (copy_mask.float() + 1e-45).log()
+        copy_log_probs = copy_log_probs + (copy_mask.float() + 1e-45).log()
 
         # COMBINED LOSS ###
         # The final loss term is computed using our log probs computed w.r.t to the entire
         # vocabulary.
-
         kg_mask = (mention_mask & mask.byte()).view(-1)
         bg_mask = (~mention_mask & mask.byte()).view(-1)
         mask = mask.byte().view(-1)
 
-        combined_log_probs_extended_vocab = torch.cat((generate_log_probs_extended_vocab,
-                                                       copy_log_probs_extended_vocab),
-                                                      dim=1)
-        combined_log_probs_extended_vocab = torch.logsumexp(combined_log_probs_extended_vocab,
-                                                            dim=1)
-        vocab_loss = -combined_log_probs_extended_vocab[mask].sum() / (mask.float().sum() + 1e-13)
+        combined_log_probs = torch.cat((generate_log_probs,
+                                        copy_log_probs),
+                                       dim=1)
+        combined_log_probs = torch.logsumexp(combined_log_probs,
+                                             dim=1)
+        vocab_loss = -combined_log_probs[mask].sum() / (mask.float().sum() + 1e-13)
 
         # PERPLEXITY ###
         # Our perplexity terms are computed using the log probs computed w.r.t the source
         # vocabulary.
-        combined_log_probs_source_vocab = torch.cat((generate_log_probs_extended_vocab,
-                                                     copy_log_probs_source_vocab),
-                                                    dim=1)
-        combined_log_probs_source_vocab = torch.logsumexp(combined_log_probs_source_vocab,
-                                                          dim=1)
 
-        penalty = self._unk_penalty * unks.float().sum()
+        # For UPP we penalize **only** p(UNK); not the copy probabilities!
+        penalized_log_probs = generate_log_probs - self._unk_penalty * unks.float()
+        penalized_log_probs = torch.cat((penalized_log_probs,
+                                         copy_log_probs),
+                                        dim=1)
+        penalized_log_probs = torch.logsumexp(penalized_log_probs,
+                                              dim=1)
 
-
-        self._ppl(-combined_log_probs_source_vocab[mask].sum(), mask.float().sum() + 1e-13)
-        self._upp(-combined_log_probs_source_vocab[mask].sum() + penalty, mask.float().sum() + 1e-13)
+        self._ppl(-combined_log_probs[mask].sum(), mask.float().sum() + 1e-13)
+        self._upp(-penalized_log_probs[mask].sum(), mask.float().sum() + 1e-13)
         if kg_mask.any():
-            self._kg_ppl(-combined_log_probs_source_vocab[kg_mask].sum(), kg_mask.float().sum() + 1e-13)
+            self._kg_ppl(-combined_log_probs[kg_mask].sum(), kg_mask.float().sum() + 1e-13)
         if bg_mask.any():
-            self._bg_ppl(-combined_log_probs_source_vocab[bg_mask].sum(), bg_mask.float().sum() + 1e-13)
+            self._bg_ppl(-combined_log_probs[bg_mask].sum(), bg_mask.float().sum() + 1e-13)
 
         return vocab_loss
 

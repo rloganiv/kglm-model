@@ -1,7 +1,7 @@
 from collections import Counter
 import gc
 import logging
-from typing import Tuple
+from typing import Any, Iterable, Iterator, Tuple
 
 import torch
 
@@ -57,3 +57,13 @@ def sample_from_logp(logp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     hack = torch.ones(logp.shape[:-1], device=logp.device, dtype=torch.uint8)
     selected_logp = logp[hack, selected_idx[hack]]
     return selected_logp, selected_idx
+
+
+def nested_enumerate(iterable):
+    try:
+        for i, element in enumerate(iterable):
+            for item in nested_enumerate(element):
+                combo = i, *item
+                yield combo
+    except TypeError:
+        yield (iterable,)

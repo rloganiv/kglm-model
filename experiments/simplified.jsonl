@@ -2,7 +2,7 @@
     "vocabulary": {
         "type": "extended",
         "extend": false,
-        "directory_path": "data/vocab"
+        "directory_path": "data/enhanced-wikitext-2-vocab"
     },
     "dataset_reader": {
         "type": "enhanced-wikitext-simple-kglm",

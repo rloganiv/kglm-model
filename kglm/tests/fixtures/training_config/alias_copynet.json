@@ -36,8 +36,8 @@
     },
     "iterator": {
         "type": "fancy",
-        "batch_size": 2,
-        "split_size": 10,
+        "batch_size": 3,
+        "split_size": 30,
         "splitting_keys": [
                 "source",
                 "target",
@@ -47,12 +47,18 @@
         ]
     },
     "trainer": {
+        "type": "lm",
         "num_epochs": 2,
-        "cuda_device": -1,
         "grad_clipping": 0.25,
         "optimizer": {
-            "type": "sgd",
-            "lr": 30.0
-        }
+            "type": "nt-asgd",
+            "lr": 30,
+            "weight_decay": 1.2e-6
+        },
+        "learning_rate_scheduler": {
+            "type": "nt-asgd",
+            "non_monotone_interval": 5
+        },
+        "validation_metric": "-ppl"
     }
 }

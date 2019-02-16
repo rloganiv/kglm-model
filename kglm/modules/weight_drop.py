@@ -32,3 +32,4 @@ class WeightDrop(torch.nn.Module):
             raw_w = getattr(self, f'{weight}_raw')
             self.module._parameters[weight] = F.dropout(raw_w, p=self.dropout, training=False)
         if hasattr(self.module, 'reset'): self.module.reset()
+

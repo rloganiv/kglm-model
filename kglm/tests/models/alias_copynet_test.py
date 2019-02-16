@@ -1,14 +1,13 @@
 # pylint: disable=protected-access,not-callable,unused-import
-
-from allennlp.common.testing import ModelTestCase
 import numpy as np
 import torch
 
+from kglm.common.testing import KglmModelTestCase
 from kglm.data.dataset_readers.enhanced_wikitext import EnhancedWikitextKglmReader
 from kglm.models.alias_copynet import AliasCopynet
 
 
-class  AliasCopynetTest(ModelTestCase):
+class AliasCopynetTest(KglmModelTestCase):
 
     def setUp(self):
         super().setUp()
@@ -16,6 +15,4 @@ class  AliasCopynetTest(ModelTestCase):
                           "kglm/tests/fixtures/enhanced-wikitext.jsonl")
 
     def test_model_can_train_save_and_load(self):
-        # TODO: Construct a test case where we can ensure that _copy_mode_projection is learning
-        # something.
-        self.ensure_model_can_train_save_and_load(self.param_file) #, gradients_to_ignore=['_copy_mode_projection'])
+        self.ensure_model_can_train_save_and_load(self.param_file)
