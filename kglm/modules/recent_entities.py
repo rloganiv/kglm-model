@@ -13,15 +13,11 @@ class RecentEntities:
 
     Parameters
     ----------
-    entity_embedder : ``TokenEmbedder``
-        Lookup the embeddings of recent entities
     cutoff : ``int``
         Number of time steps that an entity is considered 'recent'.
     """
     def __init__(self,
-                 entity_embedder: TokenEmbedder,
                  cutoff: int) -> None:
-        self._entity_embedder = entity_embedder
         self._cutoff = cutoff
         self._remaining: List[Dict[int, int]] = []
 

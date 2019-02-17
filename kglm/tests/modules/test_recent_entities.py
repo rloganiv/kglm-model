@@ -10,8 +10,7 @@ class RecentEntitiesTest(AllenNlpTestCase):
     def setUp(self):
         self.entity_embedder = Embedding(5, 10)
         self.cutoff = 2
-        self.recent_entities = RecentEntities(entity_embedder=None,
-                                              cutoff=self.cutoff)
+        self.recent_entities = RecentEntities(cutoff=self.cutoff)
         super().setUp()
 
     def test_get_candidates(self):
