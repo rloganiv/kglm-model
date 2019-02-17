@@ -118,6 +118,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
                  alias_database_path: str,
                  token_indexers: Dict[str, TokenIndexer] = None,
                  entity_indexers: Dict[str, TokenIndexer] = None,
+                 relation_indexers: Dict[str, TokenIndexer] = None,
                  lazy: bool = False) -> None:
         """
         Parameters
@@ -128,6 +129,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
         super().__init__(lazy)
         self._token_indexers = token_indexers or {'tokens': SingleIdTokenIndexer()}
         self._entity_indexers = entity_indexers or {'entity_ids': SingleIdTokenIndexer(namespace='entity_ids')}
+        self._relation_indexers = relation_indexers or {'relations': SingleIdTokenIndexer(namespace='relations')}
         if 'tokens' not in self._token_indexers or \
                 not isinstance(self._token_indexers['tokens'], SingleIdTokenIndexer):
             raise ConfigurationError("EnhancedWikitextReader expects 'token_indexers' to contain "
@@ -135,6 +137,10 @@ class EnhancedWikitextKglmReader(DatasetReader):
         if 'entity_ids' not in self._entity_indexers or \
                 not isinstance(self._entity_indexers['entity_ids'], SingleIdTokenIndexer):
             raise ConfigurationError("EnhancedWikitextReader expects 'entity_indexers' to contain "
+                                     "a 'single_id' token indexer called 'entities'.")
+        if 'relations' not in self._relation_indexers or \
+                not isinstance(self._relation_indexers['relations'], SingleIdTokenIndexer):
+            raise ConfigurationError("EnhancedWikitextReader expects 'relation_indexers' to contain "
                                      "a 'single_id' token indexer called 'entities'.")
         self._alias_database = AliasDatabase.load(path=alias_database_path)
 
@@ -211,7 +217,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 token_indexers=self._entity_indexers)
             fields['relations'] = ListField([
                 TextField([Token(x) for x in sublist],
-                          token_indexers=self._entity_indexers)
+                          token_indexers=self._relation_indexers)
                 for sublist in relations])
             fields['parent_ids'] = ListField([
                 TextField([Token(x) for x in sublist],
