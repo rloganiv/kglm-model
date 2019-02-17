@@ -43,6 +43,7 @@
         "splitting_keys": [
                 "source",
                 "target",
+                "mode",
                 "entity_ids",
                 "shortlist_inds",
                 "alias_copy_inds"
