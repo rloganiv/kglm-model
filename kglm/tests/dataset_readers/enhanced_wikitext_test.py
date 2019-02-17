@@ -50,12 +50,12 @@ class TestEnhancedWikitextKglmReader:
 
         # Test new entity mask is being generated properly
         # Non-mention tokens are not new entities
-        first_instance_new_entity_mask = instances[0]['new_entity_mask'].array
-        assert first_instance_new_entity_mask[0] == 0
+        first_instance_mode = instances[0]['mode'].array
+        assert first_instance_mode[0] == 0
         # "state highway" is a new entity mention
-        assert first_instance_new_entity_mask[16] == 1
-        # "Washington" is not since it has parents in the KG
-        assert first_instance_new_entity_mask[27] == 0
+        assert first_instance_mode[16] == 1
+        # "Washington" is a derived entity mention
+        assert first_instance_mode[27] == 2
 
         # Test entity id
         first_instance_entity_ids = [x.text for x in instances[0]['entity_ids'].tokens]
