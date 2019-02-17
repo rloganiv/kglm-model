@@ -95,9 +95,9 @@ class Kglm(Model):
         self.rnns = torch.nn.ModuleList(rnns)
 
         # Various linear transformations.
-        # self._fc_mention = torch.nn.Linear(
-        #     in_features=embedding_dim,
-        #     out_features=2)
+        self._fc_mode = torch.nn.Linear(
+            in_features=embedding_dim,
+            out_features=3)
 
         # self._fc_entity = torch.nn.Linear(
         #     in_features=embedding_dim,
@@ -136,6 +136,7 @@ class Kglm(Model):
                 target: Dict[str, torch.Tensor],
                 reset: torch.Tensor,
                 metadata: List[Dict[str, Any]],
+                mode: torch.Tensor = None,
                 entity_ids: torch.Tensor = None,
                 shortlist: Dict[str, torch.Tensor] = None,
                 shortlist_inds: torch.Tensor = None,
@@ -159,6 +160,7 @@ class Kglm(Model):
                 source=source,
                 target=target,
                 alias_database=alias_database,
+                mode=mode,
                 entity_ids=entity_ids,
                 shortlist=shortlist,
                 shortlist_inds=shortlist_inds,
@@ -170,18 +172,18 @@ class Kglm(Model):
 
         return output_dict
 
-    def _mention_loss(self,
-                      encoded: torch.Tensor,
-                      targets: torch.Tensor,
-                      mask: torch.Tensor) -> torch.Tensor:
+    def _mode_loss(self,
+                   encoded: torch.Tensor,
+                   mode: torch.Tensor,
+                   mask: torch.Tensor) -> torch.Tensor:
         """
         Computes the loss for predicting whether or not the the next token will be part of an
         entity mention.
         """
-        logits = self._fc_mention(encoded)
-        mention_loss = sequence_cross_entropy_with_logits(logits, targets, mask,
-                                                          average='token')
-        return mention_loss
+        logits = self._fc_mode(encoded)
+        mode_loss = sequence_cross_entropy_with_logits(logits, mode, mask,
+                                                       average='token')
+        return mode_loss
 
     def _entity_loss(self,
                      encoded: torch.Tensor,
@@ -333,6 +335,7 @@ class Kglm(Model):
                       source: Dict[str, torch.Tensor],
                       target: Dict[str, torch.Tensor],
                       alias_database: AliasDatabase,
+                      mode: torch.Tensor,
                       entity_ids: Dict[str, torch.Tensor],
                       shortlist: Dict[str, torch.Tensor],
                       shortlist_inds: torch.Tensor,
@@ -390,9 +393,8 @@ class Kglm(Model):
         encoded = current_input
         self._state = {'layer_%i' % i: h for i, h in enumerate(hidden_states)}
 
-        # Predict whether or not the next token will be an entity mention. This corresponds to the
-        # case that the entity's id is not a padding token.
-        # mention_loss = self._mention_loss(encoded, entity_ids.gt(0), target_mask)
+        # Predict whether or not the next token will be an entity mention, and if so which type.
+        mode_loss = self._mode_loss(encoded, mode, target_mask)
 
         # Predict which entity (among those in the supplied shortlist) is going to be
         # mentioned.
@@ -423,7 +425,7 @@ class Kglm(Model):
                                       entity_ids.gt(0))
 
         # Compute total loss
-        loss = vocab_loss # + mention_loss + entity_loss
+        loss = vocab_loss + mode_loss
 
         # Activation regularization
         if self._alpha:
