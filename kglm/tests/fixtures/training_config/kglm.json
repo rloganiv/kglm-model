@@ -25,6 +25,15 @@
                 }
             }
         },
+        "relation_embedder": {
+            "token_embedders": {
+                "relations": {
+                    "type": "embedding",
+                    "embedding_dim": 10,
+                    "trainable": true
+                }
+            }
+        },
         "alias_encoder": {
             "type": "lstm",
             "input_size": 10,
