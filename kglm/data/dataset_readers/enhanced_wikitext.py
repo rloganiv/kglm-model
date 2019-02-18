@@ -116,6 +116,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
 
     def __init__(self,
                  alias_database_path: str,
+                 mode: str = "generative",
                  token_indexers: Dict[str, TokenIndexer] = None,
                  entity_indexers: Dict[str, TokenIndexer] = None,
                  relation_indexers: Dict[str, TokenIndexer] = None,
@@ -125,8 +126,17 @@ class EnhancedWikitextKglmReader(DatasetReader):
         ----------
         alias_database_path : str
             Path to the alias database.
+        mode : str, optional (default="generative")
+            One of "discriminative" or "generative", indicating whether generated
+            instances are suitable for the discriminative or generative version of
+            the model.
         """
         super().__init__(lazy)
+        if mode not in {"discriminative", "generative"}:
+            raise ConfigurationError("Got mode {}, expected one of 'generative'"
+                                     "or 'discriminative'".format(mode))
+        self._mode = mode
+
         self._token_indexers = token_indexers or {'tokens': SingleIdTokenIndexer()}
         self._entity_indexers = entity_indexers or {'entity_ids': SingleIdTokenIndexer(namespace='entity_ids')}
         self._relation_indexers = relation_indexers or {'relations': SingleIdTokenIndexer(namespace='relations')}
@@ -158,10 +168,14 @@ class EnhancedWikitextKglmReader(DatasetReader):
         tokens = ['@@START@@', *tokens, '@@END@@']
         source = [Token(x) for x in tokens[:-1]]
         target = [Token(x) for x in tokens[1:]]
+        assert len(source) == len(target)
         fields = {
-            'source': TextField(source, self._token_indexers),
-            'target': TextField(target, self._token_indexers)
+            'source': TextField(source, self._token_indexers)
         }
+
+        if self._mode == "generative":
+            fields["target"] = TextField(target, self._token_indexers)
+
         meta_fields = {
             'tokens': tokens,
             'alias_database': self._alias_database
@@ -181,7 +195,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
             parent_ids = [[DEFAULT_PADDING_TOKEN]] * len(target)
             shortlist_inds = np.zeros(shape=(len(target),))
             alias_copy_inds = np.zeros(shape=(len(target),))
-            mode = np.zeros(shape=(len(target),))
+            mention_type = np.zeros(shape=(len(target),))
 
             # Process annotations
             for annotation in data['annotations']:
@@ -200,17 +214,20 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 shortlist_ind = reverse_shortlist[entity_id]
 
                 # Update the outputs
+                # Offset is 0 in generative case, since each timestep is for predicting
+                # attributes of the next token. In the discriminative case, each timestep
+                # is for predicting attributes of the current token.
+                offset = 0 if self._mode == "generative" else 1
                 for i in range(*annotation['span']):
-                    entity_ids[i] = entity_id
+                    entity_ids[i+offset] = entity_id
                     if new_entity:
-                        mode[i] = 1
-                        shortlist_inds[i] = shortlist_ind
+                        mention_type[i+offset] = 1
+                        shortlist_inds[i+offset] = shortlist_ind
                     else:
-                        mode[i] = 2
-                        relations[i] = relation
-                        parent_ids[i] = parent_id
-                    # Note: +1 offset to account for start token.
-                    alias_copy_inds[i] = self._alias_database.token_to_uid(entity_id, tokens[i+1])
+                        mention_type[i+offset] = 2
+                        relations[i+offset] = relation
+                        parent_ids[i+offset] = parent_id
+                    alias_copy_inds[i+offset] = self._alias_database.token_to_uid(entity_id, tokens[i+1])
 
             # Convert to fields
             fields['entity_ids'] = TextField(
@@ -224,7 +241,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 TextField([Token(x) for x in sublist],
                           token_indexers=self._entity_indexers)
                 for sublist in parent_ids])
-            fields['mode'] = SequentialArrayField(mode, dtype=np.int64)
+            fields['mention_type'] = SequentialArrayField(mention_type, dtype=np.int64)
             fields['alias_copy_inds'] = SequentialArrayField(alias_copy_inds, dtype=np.int64)
             fields['shortlist'] = TextField(
                 [Token(x) for x in shortlist],

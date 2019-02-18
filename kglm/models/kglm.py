@@ -97,7 +97,7 @@ class Kglm(Model):
         self.rnns = torch.nn.ModuleList(rnns)
 
         # Various linear transformations.
-        self._fc_mode = torch.nn.Linear(
+        self._fc_mention_type = torch.nn.Linear(
             in_features=embedding_dim,
             out_features=3)
 
@@ -137,7 +137,7 @@ class Kglm(Model):
         self._upp = Ppl()
         self._kg_ppl = Ppl()  # Knowledge-graph ppl
         self._bg_ppl = Ppl()  # Background ppl
-        self._avg_mode_loss = Average()
+        self._avg_mention_type_loss = Average()
         self._avg_new_entity_loss = Average()
         self._avg_knowledge_graph_entity_loss = Average()
         self._avg_vocab_loss = Average()
@@ -150,7 +150,7 @@ class Kglm(Model):
                 target: Dict[str, torch.Tensor],
                 reset: torch.Tensor,
                 metadata: List[Dict[str, Any]],
-                mode: torch.Tensor = None,
+                mention_type: torch.Tensor = None,
                 entity_ids: Dict[str, torch.Tensor] = None,
                 parent_ids: Dict[str, torch.Tensor] = None,
                 relations: Dict[str, torch.Tensor] = None,
@@ -176,7 +176,7 @@ class Kglm(Model):
                 source=source,
                 target=target,
                 alias_database=alias_database,
-                mode=mode,
+                mention_type=mention_type,
                 entity_ids=entity_ids,
                 parent_ids=parent_ids,
                 relations=relations,
@@ -230,18 +230,18 @@ class Kglm(Model):
 
         return encoded, alpha_loss, beta_loss
 
-    def _mode_loss(self,
-                   encoded: torch.Tensor,
-                   mode: torch.Tensor,
-                   mask: torch.Tensor) -> torch.Tensor:
+    def _mention_type_loss(self,
+                           encoded: torch.Tensor,
+                           mention_type: torch.Tensor,
+                           mask: torch.Tensor) -> torch.Tensor:
         """
         Computes the loss for predicting whether or not the the next token will be part of an
         entity mention.
         """
-        logits = self._fc_mode(encoded)
-        mode_loss = sequence_cross_entropy_with_logits(logits, mode, mask,
-                                                       average='token')
-        return mode_loss
+        logits = self._fc_mention_type(encoded)
+        mention_type_loss = sequence_cross_entropy_with_logits(logits, mention_type, mask,
+                                                               average='token')
+        return mention_type_loss
 
     def _new_entity_loss(self,
                          encoded: torch.Tensor,
@@ -514,7 +514,7 @@ class Kglm(Model):
                       source: Dict[str, torch.Tensor],
                       target: Dict[str, torch.Tensor],
                       alias_database: AliasDatabase,
-                      mode: torch.Tensor,
+                      mention_type: torch.Tensor,
                       entity_ids: Dict[str, torch.Tensor],
                       parent_ids: Dict[str, torch.Tensor],
                       relations: Dict[str, torch.Tensor],
@@ -536,8 +536,8 @@ class Kglm(Model):
         encoded, alpha_loss, beta_loss = self._encode_source(source)
 
         # Predict whether or not the next token will be an entity mention, and if so which type.
-        mode_loss = self._mode_loss(encoded, mode, target_mask)
-        self._avg_mode_loss(float(mode_loss))
+        mention_type_loss = self._mention_type_loss(encoded, mention_type, target_mask)
+        self._avg_mention_type_loss(float(mention_type_loss))
 
         # For new mentions, predict which entity (among those in the supplied shortlist) will be
         # mentioned.
@@ -575,7 +575,7 @@ class Kglm(Model):
         self._avg_vocab_loss(float(vocab_loss))
 
         # Compute total loss
-        loss = vocab_loss + mode_loss + new_entity_loss + knowledge_graph_entity_loss
+        loss = vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss
 
         # Activation regularization
         if self._alpha:
@@ -607,7 +607,7 @@ class Kglm(Model):
             'upp': self._upp.get_metric(reset),
             'kg_ppl': self._kg_ppl.get_metric(reset),
             'bg_ppl': self._bg_ppl.get_metric(reset),
-            'mode': self._avg_mode_loss.get_metric(reset),
+            'type': self._avg_mention_type_loss.get_metric(reset),
             'new': self._avg_new_entity_loss.get_metric(reset),
             'kg': self._avg_knowledge_graph_entity_loss.get_metric(reset),
             'vocab': self._avg_vocab_loss.get_metric(reset),

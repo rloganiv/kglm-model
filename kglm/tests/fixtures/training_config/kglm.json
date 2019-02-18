@@ -52,7 +52,7 @@
         "splitting_keys": [
                 "source",
                 "target",
-                "mode",
+                "mention_type",
                 "entity_ids",
                 "parent_ids",
                 "relations",
