@@ -45,6 +45,8 @@
                 "target",
                 "mode",
                 "entity_ids",
+                "parent_ids",
+                "relations",
                 "shortlist_inds",
                 "alias_copy_inds"
         ]

@@ -103,9 +103,13 @@ class Kglm(Model):
             in_features=embedding_dim,
             out_features=embedding_dim)
 
-        # self._fc_condense = torch.nn.Linear(
-        #     in_features=2 * embedding_dim,
-        #     out_features=embedding_dim)
+        self._fc_parent = torch.nn.Linear(
+            in_features=embedding_dim,
+            out_features=embedding_dim)
+
+        self._fc_condense = torch.nn.Linear(
+            in_features=2 * embedding_dim,
+            out_features=embedding_dim)
 
         self._fc_generate = torch.nn.Linear(
             in_features=embedding_dim,
@@ -137,11 +141,12 @@ class Kglm(Model):
                 reset: torch.Tensor,
                 metadata: List[Dict[str, Any]],
                 mode: torch.Tensor = None,
-                entity_ids: torch.Tensor = None,
+                entity_ids: Dict[str, torch.Tensor] = None,
+                parent_ids: Dict[str, torch.Tensor] = None,
+                relations: Dict[str, torch.Tensor] = None,
                 shortlist: Dict[str, torch.Tensor] = None,
                 shortlist_inds: torch.Tensor = None,
-                alias_copy_inds: torch.Tensor = None,
-                **kwargs) -> Dict[str, torch.Tensor]:
+                alias_copy_inds: torch.Tensor = None) -> Dict[str, torch.Tensor]:
 
         # Tensorize the alias_database - this will only perform the operation once.
         alias_database = metadata[0]['alias_database']
@@ -154,6 +159,7 @@ class Kglm(Model):
                 h[:, reset, :] = torch.zeros_like(h[:, reset, :])
                 c[:, reset, :] = torch.zeros_like(c[:, reset, :])
                 self._state['layer_%i' % layer] = (h, c)
+        self._recent_entities.reset(reset)
 
         if entity_ids is not None:
             output_dict = self._forward_loop(
@@ -162,6 +168,8 @@ class Kglm(Model):
                 alias_database=alias_database,
                 mode=mode,
                 entity_ids=entity_ids,
+                parent_ids=parent_ids,
+                relations=relations,
                 shortlist=shortlist,
                 shortlist_inds=shortlist_inds,
                 alias_copy_inds=alias_copy_inds)
@@ -175,7 +183,6 @@ class Kglm(Model):
     def _encode_source(self, source: Dict[str, torch.Tensor]) -> torch.Tensor:
 
         # Extract and embed source tokens.
-        source = source['tokens']
         source_embeddings = embedded_dropout(
             embed=self._token_embedder,
             words=source,
@@ -226,7 +233,7 @@ class Kglm(Model):
     def _new_entity_loss(self,
                          encoded: torch.Tensor,
                          shortlist_inds: torch.Tensor,
-                         shortlist: Dict[str, torch.Tensor],
+                         shortlist: torch.Tensor,
                          target_mask: torch.Tensor) -> torch.Tensor:
 
         # First we embed the shortlist entries
@@ -251,9 +258,62 @@ class Kglm(Model):
         target_log_probs[mask] = 0
 
         # Return the token-wise average loss
-        return target_log_probs.sum() / (target_mask.sum() + 1e-13)
+        return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
 
+    def _parent_loss(self,
+                     encoded: torch.Tensor,
+                     entity_ids: torch.Tensor,
+                     parent_ids: torch.Tensor,
+                     target_mask: torch.Tensor) -> torch.Tensor:
+        # Lookup recent entities (which are candidates for parents) and get their embeddings.
+        candidate_ids, candidate_mask = self._recent_entities(entity_ids)
+        candidate_embeddings = embedded_dropout(self._entity_embedder,
+                                                words=candidate_ids,
+                                                dropout=self._dropoute if self.training else 0)
 
+        # Logits are computed using a general bilinear form that measures the similarity between
+        # the projected hidden state and the embeddings of entities in the shortlist
+        projected_encodings = self._fc_parent(encoded)
+        projected_encodings = self._locked_dropout(projected_encodings, self._dropout)
+        selection_logits = torch.bmm(projected_encodings, candidate_embeddings.transpose(1, 2))
+
+        # Get log probabilities using masked softmax (need to double check mask works properly).
+        log_probs = masked_log_softmax(selection_logits, candidate_mask)
+
+        # Now for the tricky part. We need to convert the parent ids to a mask that selects the
+        # relevant probabilities from log_probs. To do this we need to align the candidates with
+        # the parent ids, which can be achieved by an element-wise equality comparison. We also
+        # need to ensure that null parents are not selected.
+
+        # shape: (batch_size, sequence_length, 1, num_parents)
+        _parent_ids = parent_ids.unsqueeze(2)
+
+        batch_size, num_candidates = candidate_ids.shape
+        # shape: (batch_size, 1, 1, num_candidates)
+        _candidate_ids = candidate_ids.view(batch_size, 1, num_candidates, 1)
+
+        # shape: (batch_size, sequence_length, num_candidates)
+        aligned = _parent_ids.eq(_candidate_ids).any(-1)  # `any` reduces the num_parents dimension
+        # shape: (batch_size, 1, num_candidates)
+        nonzero = ~candidate_ids.eq(0).unsqueeze(1)
+        selection_mask = aligned & nonzero
+
+        target_log_probs = log_probs.masked_select(selection_mask)
+
+        return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
+
+    def _relation_loss(self, *args, **kwargs):
+        pass
+
+    def _generate_scores(self,
+                         encoded: torch.Tensor,
+                         entity_ids: torch.Tensor) -> torch.Tensor:
+        entity_embeddings = embedded_dropout(embed=self._entity_embedder,
+                                             words=entity_ids,
+                                             dropout=self._dropoute if self.training else 0)
+        concatenated = torch.cat((encoded, entity_embeddings), dim=-1)
+        condensed = self._fc_condense(concatenated)
+        return self._fc_generate(condensed)
 
     def _copy_scores(self,
                      encoded: torch.Tensor,
@@ -292,7 +352,6 @@ class Kglm(Model):
                     target_alias_indices: torch.Tensor,
                     mask: torch.Tensor,
                     alias_indices: torch.Tensor,
-                    alias_tokens: torch.Tensor,
                     mention_mask: torch.Tensor):
         batch_size, sequence_length, vocab_size = generate_scores.shape
         copy_sequence_length = copy_scores.shape[-1]
@@ -379,33 +438,23 @@ class Kglm(Model):
                       alias_database: AliasDatabase,
                       mode: torch.Tensor,
                       entity_ids: Dict[str, torch.Tensor],
+                      parent_ids: Dict[str, torch.Tensor],
+                      relations: Dict[str, torch.Tensor],
                       shortlist: Dict[str, torch.Tensor],
                       shortlist_inds: torch.Tensor,
                       alias_copy_inds: torch.Tensor) -> Dict[str, torch.Tensor]:
 
-        # Get the token mask and unwrap the target tokens.
+        # Get the token mask and extract indexed text fields.
+        # shape: (batch_size, sequence_length)
         target_mask = get_text_field_mask(target)
+        source = source['tokens']
         target = target['tokens']
+        entity_ids = entity_ids['entity_ids']
+        relations = relations['relations']
+        parent_ids = parent_ids['entity_ids']
 
         # Embed source tokens.
-        encoded = self._encode_source(source)
-
-        # Embed entities.
-        entity_ids = entity_ids['entity_ids']
-        # entity_embeddings = embedded_dropout(
-        #     embed=self._entity_embedder,
-        #     words=entity_ids,
-        #     dropout=self._dropoute if self.training else 0)
-        # entity_embeddings = self._locked_dropout(entity_embeddings, self._dropouti)
-
-        # # Embed shortlist.
-        # shortlist_mask = get_text_field_mask(shortlist)
-        # shortlist = shortlist['entity_ids']
-        # shortlist_embeddings = embedded_dropout(
-        #     embed=self._entity_embedder,
-        #     words=shortlist,
-        #     dropout=self._dropoute if self.training else 0)
-
+        encoded = self._encode_source(source)  # shape: (batch_size, sequence_length, embedding_dim)
 
         # Predict whether or not the next token will be an entity mention, and if so which type.
         mode_loss = self._mode_loss(encoded, mode, target_mask)
@@ -417,11 +466,20 @@ class Kglm(Model):
                                                 shortlist,
                                                 target_mask)
 
+        # For derived mentions, first predict which parent(s) to expand...
+        parent_loss = self._parent_loss(encoded,
+                                        entity_ids,
+                                        parent_ids,
+                                        target_mask)
+
+        #...and which relations to pick.
+        # relation_loss = self._relation_loss
+
         # Predict generation-mode scores. Start by concatenating predicted entity embeddings with
         # the encoder output - then feed through a linear layer.
         # concatenated = torch.cat((encoded, entity_embeddings), dim=-1)
         # condensed = self._fc_condense(concatenated)
-        generate_scores = self._fc_generate(encoded)
+        generate_scores = self._generate_scores(encoded, entity_ids)
 
         # Predict copy-mode scores.
         alias_tokens, alias_inds = alias_database.lookup(entity_ids)
@@ -434,11 +492,10 @@ class Kglm(Model):
                                       alias_copy_inds,
                                       target_mask,
                                       alias_inds,
-                                      alias_tokens,
                                       entity_ids.gt(0))
 
         # Compute total loss
-        loss = vocab_loss + mode_loss + new_entity_loss
+        loss = vocab_loss + mode_loss + new_entity_loss + parent_loss
 
         # Activation regularization
         # if self._alpha:
