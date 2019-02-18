@@ -205,11 +205,11 @@ class EnhancedWikitextKglmReader(DatasetReader):
                     entity_ids[i] = entity_id
                     if new_entity:
                         mode[i] = 1
+                        shortlist_inds[i] = shortlist_ind
                     else:
                         mode[i] = 2
                         relations[i] = relation
                         parent_ids[i] = parent_id
-                    shortlist_inds[i] = shortlist_ind
                     alias_copy_inds[i] = self._alias_database.token_to_uid(entity_id, tokens[i+1])
 
             # Convert to fields
