@@ -8,9 +8,9 @@ from allennlp.models import Model
 from allennlp.nn import InitializerApplicator
 from allennlp.nn.util import (
     get_text_field_mask, masked_log_softmax, sequence_cross_entropy_with_logits)
+from allennlp.training.metrics import Average
 from overrides import overrides
 import torch
-import torch.nn.functional as F
 
 from kglm.data import AliasDatabase
 from kglm.modules import (
@@ -137,6 +137,10 @@ class Kglm(Model):
         self._upp = Ppl()
         self._kg_ppl = Ppl()  # Knowledge-graph ppl
         self._bg_ppl = Ppl()  # Background ppl
+        self._avg_mode_loss = Average()
+        self._avg_new_entity_loss = Average()
+        self._avg_knowledge_graph_entity_loss = Average()
+        self._avg_vocab_loss = Average()
 
         initializer(self)
 
@@ -218,10 +222,13 @@ class Kglm(Model):
             current_input = dropped_output
         encoded = current_input
 
+        alpha_loss = dropped_output.pow(2).mean()
+        beta_loss = (output[:, 1:] - output[:, :-1]).pow(2).mean()
+
         # Update state.
         self._state = {'layer_%i' % i: h for i, h in enumerate(hidden_states)}
 
-        return encoded
+        return encoded, alpha_loss, beta_loss
 
     def _mode_loss(self,
                    encoded: torch.Tensor,
@@ -266,11 +273,10 @@ class Kglm(Model):
         # Return the token-wise average loss
         return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
 
-    def _parent_loss(self,
-                     encoded: torch.Tensor,
-                     entity_ids: torch.Tensor,
-                     parent_ids: torch.Tensor,
-                     target_mask: torch.Tensor) -> torch.Tensor:
+    def _parent_log_probs(self,
+                          encoded: torch.Tensor,
+                          entity_ids: torch.Tensor,
+                          parent_ids: torch.Tensor) -> torch.Tensor:
         # Lookup recent entities (which are candidates for parents) and get their embeddings.
         candidate_ids, candidate_mask = self._recent_entities(entity_ids)
         candidate_embeddings = embedded_dropout(self._entity_embedder,
@@ -284,6 +290,8 @@ class Kglm(Model):
         selection_logits = torch.bmm(projected_encodings, candidate_embeddings.transpose(1, 2))
 
         # Get log probabilities using masked softmax (need to double check mask works properly).
+
+        # shape: (batch_size, sequence_length, num_candidates)
         log_probs = masked_log_softmax(selection_logits, candidate_mask)
 
         # Now for the tricky part. We need to convert the parent ids to a mask that selects the
@@ -291,29 +299,36 @@ class Kglm(Model):
         # the parent ids, which can be achieved by an element-wise equality comparison. We also
         # need to ensure that null parents are not selected.
 
-        # shape: (batch_size, sequence_length, 1, num_parents)
-        _parent_ids = parent_ids.unsqueeze(2)
+        # shape: (batch_size, sequence_length, num_parents, 1)
+        _parent_ids = parent_ids.unsqueeze(-1)
 
         batch_size, num_candidates = candidate_ids.shape
         # shape: (batch_size, 1, 1, num_candidates)
-        _candidate_ids = candidate_ids.view(batch_size, 1, num_candidates, 1)
+        _candidate_ids = candidate_ids.view(batch_size, 1, 1, num_candidates)
 
-        # shape: (batch_size, sequence_length, num_candidates)
-        aligned = _parent_ids.eq(_candidate_ids).any(-1)  # `any` reduces the num_parents dimension
-        # shape: (batch_size, 1, num_candidates)
-        nonzero = ~candidate_ids.eq(0).unsqueeze(1)
-        selection_mask = aligned & nonzero
+        # shape: (batch_size, sequence_length, num_parents, num_candidates)
+        is_parent = _parent_ids.eq(_candidate_ids)
+        # shape: (batch_size, 1, 1, num_candidates)
+        non_null = ~_candidate_ids.eq(0)
 
-        target_log_probs = log_probs.masked_select(selection_mask)
+        # Since multiplication is addition in log-space, we can apply mask by adding its log (+
+        # some small constant for numerical stability).
+        mask = is_parent & non_null
+        masked_log_probs = log_probs.unsqueeze(2) + (mask.float() + 1e-45).log()
 
-        return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
+        # Lastly, we need to get rid of the num_candidates dimension. The easy way to do this would
+        # be to marginalize it out. However, since our data is sparse (the last two dims are
+        # essentially a delta function) this would add a lot of unneccesary terms to the computation graph.
+        # To get around this we are going to try to use a gather.
+        _, index = torch.max(mask, dim=-1, keepdim=True)
+        target_log_probs = torch.gather(masked_log_probs, dim=-1, index=index).squeeze(-1)
 
-    def _relation_loss(self,
-                       encoded: torch.Tensor,
-                       entity_ids: torch.Tensor,
-                       parent_ids: torch.Tensor,
-                       # relations: torch.Tensor,
-                       target_mask: torch.Tensor) -> torch.Tensor:
+        return target_log_probs
+
+    def _relation_log_probs(self,
+                            encoded: torch.Tensor,
+                            entity_ids: torch.Tensor,
+                            parent_ids: torch.Tensor) -> torch.Tensor:
         # Lookup edges out of parents
         relations, tail_ids = self._knowledge_graph_lookup(parent_ids)
         # Embed relations
@@ -330,13 +345,42 @@ class Kglm(Model):
         # correctness at the cost of some efficiency.
         logits = torch.einsum('bspre,bse->bspr', relation_embeddings, projected_encodings)
         mask = ~relations.eq(0)
+
+        # shape: (batch_size, sequence_length, num_parents, num_relations)
         log_probs = masked_log_softmax(logits, mask)
 
-        # Lastly we need to match tail_ids with the correct entity ids
-        _entity_ids = entity_ids.view(*entity_ids.shape, 1, 1)
-        selection_mask = tail_ids.eq(_entity_ids) & ~_entity_ids.eq(0)
-        target_log_probs = log_probs.masked_select(selection_mask)
+        # Create a mask which is 1 only if an relation has the target entity as a tail and is
+        # non-null.
 
+        # shape(batch_size, sequence_length, 1, 1)
+        _entity_ids = entity_ids.view(*entity_ids.shape, 1, 1)
+        correct_tail = tail_ids.eq(_entity_ids)
+        non_null = ~_entity_ids.eq(0)
+
+        # Since multiplication is addition in log-space, we can apply mask by adding its log (+
+        # some small constant for numerical stability).
+        mask = correct_tail & non_null
+        masked_log_probs = log_probs + (mask.float() + 1e-45).log()
+
+        # Lastly we marginalize over the number of relations
+        target_log_probs = torch.logsumexp(masked_log_probs, dim=-1)
+
+        return target_log_probs
+
+    def _knowledge_graph_entity_loss(self,
+                                     encoded: torch.Tensor,
+                                     entity_ids: torch.Tensor,
+                                     parent_ids: torch.Tensor,
+                                     target_mask: torch.Tensor) -> torch.Tensor:
+        # First get the log probabilities of the parents and relations that lead to the current
+        # entity.
+        parent_log_probs = self._parent_log_probs(encoded, entity_ids, parent_ids)
+        relation_log_probs = self._relation_log_probs(encoded, entity_ids, parent_ids)
+        # Next take their product
+        combined_log_probs = parent_log_probs + relation_log_probs
+        # And marginalize over all parents
+        target_log_probs = torch.logsumexp(combined_log_probs, dim=-1)
+        # Lastly return the tokenwise average loss
         return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
 
     def _generate_scores(self,
@@ -488,10 +532,12 @@ class Kglm(Model):
         parent_ids = parent_ids['entity_ids']
 
         # Embed source tokens.
-        encoded = self._encode_source(source)  # shape: (batch_size, sequence_length, embedding_dim)
+        # shape: (batch_size, sequence_length, embedding_dim)
+        encoded, alpha_loss, beta_loss = self._encode_source(source)
 
         # Predict whether or not the next token will be an entity mention, and if so which type.
         mode_loss = self._mode_loss(encoded, mode, target_mask)
+        self._avg_mode_loss(float(mode_loss))
 
         # For new mentions, predict which entity (among those in the supplied shortlist) will be
         # mentioned.
@@ -499,19 +545,14 @@ class Kglm(Model):
                                                 shortlist_inds,
                                                 shortlist,
                                                 target_mask)
+        self._avg_new_entity_loss(float(new_entity_loss))
 
         # For derived mentions, first predict which parent(s) to expand...
-        parent_loss = self._parent_loss(encoded,
-                                        entity_ids,
-                                        parent_ids,
-                                        target_mask)
-
-        #...and which relations to pick.
-        relation_loss = self._relation_loss(encoded,
-                                            entity_ids,
-                                            parent_ids,
-                                            # relations,
-                                            target_mask)
+        knowledge_graph_entity_loss = self._knowledge_graph_entity_loss(encoded,
+                                                                        entity_ids,
+                                                                        parent_ids,
+                                                                        target_mask)
+        self._avg_knowledge_graph_entity_loss(float(knowledge_graph_entity_loss))
 
         # Predict generation-mode scores. Start by concatenating predicted entity embeddings with
         # the encoder output - then feed through a linear layer.
@@ -531,16 +572,17 @@ class Kglm(Model):
                                       target_mask,
                                       alias_inds,
                                       entity_ids.gt(0))
+        self._avg_vocab_loss(float(vocab_loss))
 
         # Compute total loss
-        loss = vocab_loss + mode_loss + new_entity_loss + parent_loss + relation_loss
+        loss = vocab_loss + mode_loss + new_entity_loss + knowledge_graph_entity_loss
 
         # Activation regularization
-        # if self._alpha:
-        #     loss = loss + self._alpha * dropped_output.pow(2).mean()
+        if self._alpha:
+            loss = loss + self._alpha * alpha_loss
         # Temporal activation regularization (slowness)
-        # if self._beta:
-        #     loss = loss + self._beta * (output[:, 1:] - output[:, :-1]).pow(2).mean()
+        if self._beta:
+            loss = loss + self._beta * beta_loss
 
         return {'loss': loss}
 
@@ -564,5 +606,9 @@ class Kglm(Model):
             'ppl': self._ppl.get_metric(reset),
             'upp': self._upp.get_metric(reset),
             'kg_ppl': self._kg_ppl.get_metric(reset),
-            'bg_ppl': self._bg_ppl.get_metric(reset)
+            'bg_ppl': self._bg_ppl.get_metric(reset),
+            'mode': self._avg_mode_loss.get_metric(reset),
+            'new': self._avg_new_entity_loss.get_metric(reset),
+            'kg': self._avg_knowledge_graph_entity_loss.get_metric(reset),
+            'vocab': self._avg_vocab_loss.get_metric(reset),
         }
