@@ -116,6 +116,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
 
     def __init__(self,
                  alias_database_path: str,
+                 mode: str = "generative",
                  token_indexers: Dict[str, TokenIndexer] = None,
                  entity_indexers: Dict[str, TokenIndexer] = None,
                  lazy: bool = False) -> None:
@@ -124,8 +125,17 @@ class EnhancedWikitextKglmReader(DatasetReader):
         ----------
         alias_database_path : str
             Path to the alias database.
+        mode : str, optional (default="generative")
+            One of "discriminative" or "generative", indicating whether generated
+            instances are suitable for the discriminative or generative version of
+            the model.
         """
         super().__init__(lazy)
+        if mode not in {"discriminative", "generative"}:
+            raise ConfigurationError("Got mode {}, expected one of 'generative'"
+                                     "or 'discriminative'".format(mode))
+        self._mode = mode
+
         self._token_indexers = token_indexers or {'tokens': SingleIdTokenIndexer()}
         self._entity_indexers = entity_indexers or {'entity_ids': SingleIdTokenIndexer(namespace='entity_ids')}
         if 'tokens' not in self._token_indexers or \
@@ -152,10 +162,14 @@ class EnhancedWikitextKglmReader(DatasetReader):
         tokens = ['@@START@@', *tokens, '@@END@@']
         source = [Token(x) for x in tokens[:-1]]
         target = [Token(x) for x in tokens[1:]]
+        assert len(source) == len(target)
         fields = {
-            'source': TextField(source, self._token_indexers),
-            'target': TextField(target, self._token_indexers)
+            'source': TextField(source, self._token_indexers)
         }
+
+        if self._mode == "generative":
+            fields["target"] = TextField(target, self._token_indexers)
+
         meta_fields = {
             'tokens': tokens,
             'alias_database': self._alias_database
@@ -194,16 +208,19 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 shortlist_ind = reverse_shortlist[entity_id]
 
                 # Update the outputs
+                # Offset is 0 in generative case, since each timestep is for predicting
+                # attributes of the next token. In the discriminative case, each timestep
+                # is for predicting attributes of the current token.
+                offset = 0 if self._mode == "generative" else 1
                 for i in range(*annotation['span']):
-                    # Note: +1 offset to account for start token.
-                    entity_ids[i] = entity_id
+                    entity_ids[i+offset] = entity_id
                     if new_entity:
-                        new_entity_mask[i] = 1
+                        new_entity_mask[i+offset] = 1
                     else:
-                        relations[i] = relation
-                        parent_ids[i] = parent_id
-                    shortlist_inds[i] = shortlist_ind
-                    alias_copy_inds[i] = self._alias_database.token_to_uid(entity_id, tokens[i+1])
+                        relations[i+offset] = relation
+                        parent_ids[i+offset] = parent_id
+                    shortlist_inds[i+offset] = shortlist_ind
+                    alias_copy_inds[i+offset] = self._alias_database.token_to_uid(entity_id, tokens[i+1])
 
             # Convert to fields
             fields['entity_ids'] = TextField(
