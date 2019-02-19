@@ -34,12 +34,12 @@ class KnowledgeGraphLookup:
             try:
                 edges = knowledge_graph[entity_id]
             except KeyError:
-                relations = torch.LongTensor([])
-                tail_ids = torch.LongTensor([])
+                relations = None
+                tail_ids = None
             else:
                 if edges == []:
-                    relations = torch.LongTensor([])
-                    tail_ids = torch.LongTensor([])
+                    relations = None
+                    tail_ids = None
                 else:
                     # Get the relation and tail id tokens
                     relation_tokens, tail_id_tokens = zip(*knowledge_graph[entity_id])
@@ -84,23 +84,26 @@ class KnowledgeGraphLookup:
         tail_ids_list: List[torch.LongTensor] = []
         for *inds, parent_id in nested_enumerate(parent_ids):
             # Retrieve data
-            relations = self._relations[parent_id][:MAX_RELATIONS]
-            tail_ids = self._tail_ids[parent_id][:MAX_RELATIONS]
+            relations = self._relations[parent_id]
+            tail_ids = self._tail_ids[parent_id]
+            if relations is None:
+                continue
             # Update output size
             K = max(K, len(relations))
             # Add to lists
-            indices.append(inds)
-            relations_list.append(relations)
-            tail_ids_list.append(tail_ids)
+            indices.append(tuple(inds))
+            relations_list.append(relations.to(device=parent_ids.device))
+            tail_ids_list.append(tail_ids.to(device=parent_ids.device))
 
         # Construct the output tensors
-        relations = parent_ids.new_zeros(size=(*parent_ids.shape, K))
-        tail_ids = parent_ids.new_zeros(size=(*parent_ids.shape, K))
-        for inds, _relations, _tail_ids in zip(indices, relations_list, tail_ids_list):
-            _slice = slice(None, min(len(_relations), MAX_RELATIONS))
-            index = (*inds, _slice)
-            relations[index] = _relations[_slice]
-            tail_ids[index] = _tail_ids[_slice]
+        # relations = parent_ids.new_zeros(size=(*parent_ids.shape, K))
+        # tail_ids = parent_ids.new_zeros(size=(*parent_ids.shape, K))
+        # for inds, _relations, _tail_ids in zip(indices, relations_list, tail_ids_list):
+        #     _slice = slice(None, len(_relations))  # min(len(_relations), MAX_RELATIONS))
+        #     index = (*inds, _slice)
+        #     relations[index] = _relations[_slice]
+        #     tail_ids[index] = _tail_ids[_slice]
+        # logger.debug('Num relations: %i', K)
+        # logger.debug('Padding density: %i / %i', relations.eq(0).sum(), torch.numel(relations))
 
-        return relations, tail_ids
-
+        return indices, K, relations_list, tail_ids_list

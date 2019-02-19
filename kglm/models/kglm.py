@@ -11,6 +11,7 @@ from allennlp.nn.util import (
 from allennlp.training.metrics import Average
 from overrides import overrides
 import torch
+import torch.nn.functional as F
 
 from kglm.data import AliasDatabase
 from kglm.modules import (
@@ -330,42 +331,34 @@ class Kglm(Model):
                             encoded: torch.Tensor,
                             entity_ids: torch.Tensor,
                             parent_ids: torch.Tensor) -> torch.Tensor:
+
         # Lookup edges out of parents
-        relations, tail_ids = self._knowledge_graph_lookup(parent_ids)
-        logger.debug('KG lookup shape: %s', relations.shape)
+        indices, K, relations_list, tail_ids_list = self._knowledge_graph_lookup(parent_ids)
+
         # Embed relations
-        relation_embeddings = embedded_dropout(self._relation_embedder,
-                                               words=relations,
-                                               dropout=self._dropoute if self.training else 0)
+        relation_embeddings = [self._relation_embedder(r) for r in relations_list]
 
         # Logits are computed using a general bilinear form that measures the similarity between
         # the projected hidden state and the embeddings of relations
         projected_encodings = self._fc_relation(encoded)
         projected_encodings = self._locked_dropout(projected_encodings, self._dropout)
 
-        # Since there are a lot of dimensions to keep track of we'll use einsum to ensure
-        # correctness at the cost of some efficiency.
-        logits = torch.einsum('bspre,bse->bspr', relation_embeddings, projected_encodings)
-        mask = ~relations.eq(0)
-
+        # This is a little funky, but to avoid massive amounts of padding we are going to just
+        # iterate over the relation and tail_id vectors one-by-one.
         # shape: (batch_size, sequence_length, num_parents, num_relations)
-        log_probs = masked_log_softmax(logits, mask)
+        target_log_probs = projected_encodings.new_empty(*parent_ids.shape).fill_(math.log(1e-45))
+        for index, relation_embedding, tail_id in zip(indices, relation_embeddings, tail_ids_list):
+            # First we compute the score for each relation w.r.t the current encoding, and convert
+            # the scores to log-probabilities
+            logits = torch.mv(relation_embedding, projected_encodings[index[:-1]])
+            log_probs = F.log_softmax(logits)
 
-        # Create a mask which is 1 only if an relation has the target entity as a tail and is
-        # non-null.
+            # Next we gather the log probs for edges with the correct tail entity and sum them up
+            target_id = entity_ids[index[:-1]]
+            relevant_log_probs = log_probs.masked_select(tail_id.eq(target_id))
+            target_log_prob = torch.logsumexp(relevant_log_probs, dim=0)
 
-        # shape(batch_size, sequence_length, 1, 1)
-        _entity_ids = entity_ids.view(*entity_ids.shape, 1, 1)
-        correct_tail = tail_ids.eq(_entity_ids)
-        non_null = ~_entity_ids.eq(0)
-
-        # Since multiplication is addition in log-space, we can apply mask by adding its log (+
-        # some small constant for numerical stability).
-        mask = correct_tail & non_null
-        masked_log_probs = log_probs + (mask.float() + 1e-45).log()
-
-        # Lastly we marginalize over the number of relations
-        target_log_probs = torch.logsumexp(masked_log_probs, dim=-1)
+            target_log_probs[index] = target_log_prob
 
         return target_log_probs
 

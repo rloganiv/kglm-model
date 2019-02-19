@@ -21,7 +21,7 @@ from kglm.data.fields import SequentialArrayField
 
 logger = logging.getLogger(__name__)
 
-MAX_PARENTS = 5
+MAX_PARENTS = 9999999999999999
 
 
 def _flatten(nested: Iterable[str]):
