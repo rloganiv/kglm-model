@@ -119,6 +119,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
                  mode: str = "generative",
                  token_indexers: Dict[str, TokenIndexer] = None,
                  entity_indexers: Dict[str, TokenIndexer] = None,
+                 relation_indexers: Dict[str, TokenIndexer] = None,
                  lazy: bool = False) -> None:
         """
         Parameters
@@ -138,6 +139,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
 
         self._token_indexers = token_indexers or {'tokens': SingleIdTokenIndexer()}
         self._entity_indexers = entity_indexers or {'entity_ids': SingleIdTokenIndexer(namespace='entity_ids')}
+        self._relation_indexers = relation_indexers or {'relations': SingleIdTokenIndexer(namespace='relations')}
         if 'tokens' not in self._token_indexers or \
                 not isinstance(self._token_indexers['tokens'], SingleIdTokenIndexer):
             raise ConfigurationError("EnhancedWikitextReader expects 'token_indexers' to contain "
@@ -145,6 +147,10 @@ class EnhancedWikitextKglmReader(DatasetReader):
         if 'entity_ids' not in self._entity_indexers or \
                 not isinstance(self._entity_indexers['entity_ids'], SingleIdTokenIndexer):
             raise ConfigurationError("EnhancedWikitextReader expects 'entity_indexers' to contain "
+                                     "a 'single_id' token indexer called 'entities'.")
+        if 'relations' not in self._relation_indexers or \
+                not isinstance(self._relation_indexers['relations'], SingleIdTokenIndexer):
+            raise ConfigurationError("EnhancedWikitextReader expects 'relation_indexers' to contain "
                                      "a 'single_id' token indexer called 'entities'.")
         self._alias_database = AliasDatabase.load(path=alias_database_path)
 
@@ -189,7 +195,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
             parent_ids = [[DEFAULT_PADDING_TOKEN]] * len(target)
             shortlist_inds = np.zeros(shape=(len(target),))
             alias_copy_inds = np.zeros(shape=(len(target),))
-            new_entity_mask = np.zeros(shape=(len(target),))
+            mention_type = np.zeros(shape=(len(target),))
 
             # Process annotations
             for annotation in data['annotations']:
@@ -215,11 +221,12 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 for i in range(*annotation['span']):
                     entity_ids[i+offset] = entity_id
                     if new_entity:
-                        new_entity_mask[i+offset] = 1
+                        mention_type[i+offset] = 1
+                        shortlist_inds[i+offset] = shortlist_ind
                     else:
+                        mention_type[i+offset] = 2
                         relations[i+offset] = relation
                         parent_ids[i+offset] = parent_id
-                    shortlist_inds[i+offset] = shortlist_ind
                     alias_copy_inds[i+offset] = self._alias_database.token_to_uid(entity_id, tokens[i+1])
 
             # Convert to fields
@@ -228,24 +235,18 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 token_indexers=self._entity_indexers)
             fields['relations'] = ListField([
                 TextField([Token(x) for x in sublist],
-                          token_indexers=self._entity_indexers)
+                          token_indexers=self._relation_indexers)
                 for sublist in relations])
             fields['parent_ids'] = ListField([
                 TextField([Token(x) for x in sublist],
                           token_indexers=self._entity_indexers)
                 for sublist in parent_ids])
-            fields['new_entity_mask'] = SequentialArrayField(
-                new_entity_mask,
-                dtype=np.uint8)
-            fields['alias_copy_inds'] = SequentialArrayField(
-                alias_copy_inds,
-                dtype=np.int64)
+            fields['mention_type'] = SequentialArrayField(mention_type, dtype=np.int64)
+            fields['alias_copy_inds'] = SequentialArrayField(alias_copy_inds, dtype=np.int64)
             fields['shortlist'] = TextField(
                 [Token(x) for x in shortlist],
                 token_indexers=self._entity_indexers)
-            fields['shortlist_inds'] = SequentialArrayField(
-                shortlist_inds,
-                dtype=np.int64)
+            fields['shortlist_inds'] = SequentialArrayField(shortlist_inds, dtype=np.int64)
 
         fields['metadata'] = MetadataField(meta_fields)
 

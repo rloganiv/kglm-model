@@ -13,28 +13,23 @@ class RecentEntities:
 
     Parameters
     ----------
-    entity_embedder : ``TokenEmbedder``
-        Lookup the embeddings of recent entities
     cutoff : ``int``
         Number of time steps that an entity is considered 'recent'.
     """
     def __init__(self,
-                 entity_embedder: TokenEmbedder,
                  cutoff: int) -> None:
-        self._entity_embedder = entity_embedder
         self._cutoff = cutoff
         self._remaining: List[Dict[int, int]] = []
 
     def __call__(self,
-                 parent_ids: torch.LongTensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                 entity_ids: torch.LongTensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Computes the log-probability of selecting the provided of entity ids conditioned on the
-        current hidden state, as well as updates the ``RecentEntities`` hidden state.
+        Returns the set of valid parent entities for a given mention.
 
         Parameters
         ----------
-        parent_ids : ``torch.LongTensor``
-            A tensor of shape ``(batch_size, sequence_length)`` whose elements are the parent ids
+        entity_ids : ``torch.LongTensor``
+            A tensor of shape ``(batch_size, sequence_length)`` whose elements are the ids
             of the corresponding token in the ``target`` sequence.
 
         Returns
@@ -47,14 +42,14 @@ class RecentEntities:
             A tensor of shape ``(batch_size, sequence_length, n_candidates)`` defining which
             subset of candidates can be selected at the given point in the sequence.
         """
-        batch_size, sequence_length = parent_ids.shape[:2]
+        batch_size, sequence_length = entity_ids.shape[:2]
 
         # TODO: See if we can get away without nested loops / cast to CPU.
-        candidate_ids = self._get_candidates(parent_ids)
+        candidate_ids = self._get_candidates(entity_ids)
         candidate_lookup = [{parent_id: j for j, parent_id in enumerate(l)} for l in candidate_ids.tolist()]
 
         # Create mask
-        candidate_mask = parent_ids.new_zeros(size=(batch_size, sequence_length, candidate_ids.shape[-1]),
+        candidate_mask = entity_ids.new_zeros(size=(batch_size, sequence_length, candidate_ids.shape[-1]),
                                               dtype=torch.uint8)
 
         # Start by accounting for unfinished masks that remain from the last batch
@@ -68,7 +63,7 @@ class RecentEntities:
                 lookup[parent_id] -= sequence_length
 
         # Cast to list so we can use elements as keys (not possible for tensors)
-        parent_id_list = parent_ids.tolist()
+        parent_id_list = entity_ids.tolist()
         for i, j, *_, parent_id in nested_enumerate(parent_id_list):
             if parent_id == 0:
                 continue
@@ -88,43 +83,41 @@ class RecentEntities:
 
     # pylint: disable=redefined-builtin
     def _get_candidates(self,
-                        parent_ids: torch.LongTensor) -> torch.LongTensor:
+                        entity_ids: torch.LongTensor) -> torch.LongTensor:
         """
         Combines the unique ids from the current batch with the previous set of ids to form the
-        collection of **all** relevant parent entities.
+        collection of **all** relevant ids.
 
         Parameters
         ----------
-        parent_ids : ``torch.LongTensor``
-            A tensor of shape ``(batch_size, seq_length, num_parents)`` containing the ids of all
-            possible parents of the corresponding mention.
-        sorted : ``bool`` (default=``False``)
-            Whether or not to sort the parent ids.
+        entity_ids : ``torch.LongTensor``
+            A tensor of shape ``(batch_size, sequence_length)`` whose elements are the ids
+            of the corresponding token in the ``target`` sequence.
 
         Returns
         -------
-        unique_parent_ids : ``torch.LongTensor``
+        unique_entity_ids : ``torch.LongTensor``
             A tensor of shape ``(batch_size, max_num_parents)`` containing all of the unique
-            candidate parent ids.
+            candidate ids.
         """
         # Get the tensors of unique ids for each batch element and store them in a list
         all_unique: List[torch.LongTensor] = []
-        for i, ids in enumerate(parent_ids):
+        for i, ids in enumerate(entity_ids):
             if self._remaining[i] is not None:
                 previous_ids = list(self._remaining[i].keys())
-                previous_ids = parent_ids.new_tensor(previous_ids)
+                previous_ids = entity_ids.new_tensor(previous_ids)
                 ids = torch.cat((ids.view(-1), previous_ids), dim=0)
             unique = torch.unique(ids, sorted=True)
             all_unique.append(unique)
 
         # Convert the list to a tensor by adding adequete padding.
-        batch_size = parent_ids.shape[0]
+        batch_size = entity_ids.shape[0]
         max_num_parents = max(unique.shape[0] for unique in all_unique)
-        unique_parent_ids = parent_ids.new_zeros(size=(batch_size, max_num_parents))
+        unique_entity_ids = entity_ids.new_zeros(size=(batch_size, max_num_parents))
         for i, unique in enumerate(all_unique):
-            unique_parent_ids[i, :unique.shape[0]] = unique
+            unique_entity_ids[i, :unique.shape[0]] = unique
 
-        return unique_parent_ids
+        return unique_entity_ids
 
     def reset(self, reset: torch.ByteTensor) -> None:
         """

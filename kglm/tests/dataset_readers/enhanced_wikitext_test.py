@@ -55,17 +55,14 @@ class TestEnhancedWikitextKglmReader:
             assert first_instance_target_tokens[:5] == ['State', 'Route', '127', '(', 'SR']
             assert first_instance_target_tokens[-5:] == ['Elmer', 'Huntley', 'Bridge', '.', '@@END@@']
 
-        # Test new entity mask is being generated properly
+        # Test mention type
         # Non-mention tokens are not new entities
-        first_instance_new_entity_mask = instances[0]['new_entity_mask'].array
-        assert first_instance_new_entity_mask[0] == 0
+        first_instance_mention_type = instances[0]['mention_type'].array
+        assert first_instance_mention_type[0 + offset] == 0
         # "state highway" is a new entity mention
-        assert first_instance_source_tokens[17:18+1] == ['state', 'highway']
-        np.testing.assert_allclose(first_instance_new_entity_mask[16+offset:17+offset+1],
-                                   [1, 1])
-        # "Washington" is not since it has parents in the KG
-        assert first_instance_source_tokens[28] == 'Washington'
-        assert first_instance_new_entity_mask[27+offset] == 0
+        assert first_instance_mention_type[16 + offset] == 1
+        # "Washington" is a derived entity mention
+        assert first_instance_mention_type[27 + offset] == 2
 
         # Test entity id
         first_instance_entity_ids = [x.text for x in instances[0]['entity_ids'].tokens]

@@ -11,17 +11,17 @@ from kglm.nn.util import nested_enumerate
 logger = logging.getLogger(__name__)
 
 
-class KnowledgeGraphLookup(object):
+class KnowledgeGraphLookup:
     def __init__(self,
-                 kg_path: str,
+                 knowledge_graph_path: str,
                  vocab: Vocabulary) -> None:
-        self._kg_path = kg_path
+        self._knowledge_graph_path = knowledge_graph_path
         self._vocab = vocab
-        self._relations, self._tail_ids = self.load_kg(kg_path)
+        self._relations, self._tail_ids = self.load_edges(knowledge_graph_path)
 
-    def load_kg(self, kg_path: str) -> Tuple[List[torch.LongTensor], List[torch.LongTensor]]:
-        logger.info('Loading knowledge graph from: %s', kg_path)
-        with open(kg_path, 'rb') as f:
+    def load_edges(self, knowledge_graph_path: str) -> Tuple[List[torch.LongTensor], List[torch.LongTensor]]:
+        logger.info('Loading knowledge graph from: %s', knowledge_graph_path)
+        with open(knowledge_graph_path, 'rb') as f:
             knowledge_graph = pickle.load(f)
 
         entity_idx_to_token = self._vocab.get_index_to_token_vocabulary('entity_ids')
