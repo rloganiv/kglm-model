@@ -49,7 +49,7 @@
     },
     "iterator": {
         "type": "fancy",
-        "batch_size": 80,
+        "batch_size": 30,
         "split_size": 70,
         "splitting_keys": [
                 "source",
@@ -75,7 +75,7 @@
         "type": "lm",
         "num_epochs": 500,
         "cuda_device": 0,
-        "grad_clipping": 0.25,
+        "grad_clipping": 0.025,
         "optimizer": {
             "type": "nt-asgd",
             "lr": 30,

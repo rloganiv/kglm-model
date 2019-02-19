@@ -10,6 +10,8 @@ from kglm.nn.util import nested_enumerate
 
 logger = logging.getLogger(__name__)
 
+MAX_RELATIONS = 10
+
 
 class KnowledgeGraphLookup:
     def __init__(self,
@@ -30,17 +32,23 @@ class KnowledgeGraphLookup:
         for i in tqdm(range(len(entity_idx_to_token))):
             entity_id = entity_idx_to_token[i]
             try:
-                # Get the relation and tail id tokens
-                relation_tokens, tail_id_tokens = zip(*knowledge_graph[entity_id])
-                # Index tokens
-                relations = [self._vocab.get_token_index(t, 'relations') for t in relation_tokens]
-                tail_ids = [self._vocab.get_token_index(t, 'entity_ids') for t in tail_id_tokens]
-                # Convert to tensors
-                relations = torch.LongTensor(relations)
-                tail_ids = torch.LongTensor(tail_ids)
+                edges = knowledge_graph[entity_id]
             except KeyError:
                 relations = torch.LongTensor([])
                 tail_ids = torch.LongTensor([])
+            else:
+                if edges == []:
+                    relations = torch.LongTensor([])
+                    tail_ids = torch.LongTensor([])
+                else:
+                    # Get the relation and tail id tokens
+                    relation_tokens, tail_id_tokens = zip(*knowledge_graph[entity_id])
+                    # Index tokens
+                    relations = [self._vocab.get_token_index(t, 'relations') for t in relation_tokens]
+                    tail_ids = [self._vocab.get_token_index(t, 'entity_ids') for t in tail_id_tokens]
+                    # Convert to tensors
+                    relations = torch.LongTensor(relations)
+                    tail_ids = torch.LongTensor(tail_ids)
             all_relations.append(relations)
             all_tail_ids.append(tail_ids)
         return all_relations, all_tail_ids
@@ -76,21 +84,23 @@ class KnowledgeGraphLookup:
         tail_ids_list: List[torch.LongTensor] = []
         for *inds, parent_id in nested_enumerate(parent_ids):
             # Retrieve data
-            relations = self._relations[parent_id]
-            tail_ids = self._tail_ids[parent_id]
+            relations = self._relations[parent_id][:MAX_RELATIONS]
+            tail_ids = self._tail_ids[parent_id][:MAX_RELATIONS]
             # Update output size
             K = max(K, len(relations))
             # Add to lists
             indices.append(inds)
-            relations_list.append(self._relations[parent_id])
-            tail_ids_list.append(self._tail_ids[parent_id])
+            relations_list.append(relations)
+            tail_ids_list.append(tail_ids)
 
         # Construct the output tensors
         relations = parent_ids.new_zeros(size=(*parent_ids.shape, K))
         tail_ids = parent_ids.new_zeros(size=(*parent_ids.shape, K))
         for inds, _relations, _tail_ids in zip(indices, relations_list, tail_ids_list):
-            index = (*inds, slice(None, len(_relations)))
-            relations[index] = _relations
-            tail_ids[index] = _tail_ids
+            _slice = slice(None, min(len(_relations), MAX_RELATIONS))
+            index = (*inds, _slice)
+            relations[index] = _relations[_slice]
+            tail_ids[index] = _tail_ids[_slice]
 
         return relations, tail_ids
+

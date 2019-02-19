@@ -142,3 +142,4 @@ class RecentEntities:
             for i, should_reset in enumerate(reset):
                 if should_reset:
                     self._remaining[i] = {}
+

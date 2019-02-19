@@ -21,6 +21,8 @@ from kglm.data.fields import SequentialArrayField
 
 logger = logging.getLogger(__name__)
 
+MAX_PARENTS = 5
+
 
 def _flatten(nested: Iterable[str]):
     return [x for seq in nested for x in seq]
@@ -225,8 +227,8 @@ class EnhancedWikitextKglmReader(DatasetReader):
                         shortlist_inds[i+offset] = shortlist_ind
                     else:
                         mention_type[i+offset] = 2
-                        relations[i+offset] = relation
-                        parent_ids[i+offset] = parent_id
+                        relations[i+offset] = relation[:MAX_PARENTS]
+                        parent_ids[i+offset] = parent_id[:MAX_PARENTS]
                     alias_copy_inds[i+offset] = self._alias_database.token_to_uid(entity_id, tokens[i+1])
 
             # Convert to fields
