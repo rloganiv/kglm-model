@@ -333,7 +333,7 @@ class Kglm(Model):
                             parent_ids: torch.Tensor) -> torch.Tensor:
 
         # Lookup edges out of parents
-        indices, K, relations_list, tail_ids_list = self._knowledge_graph_lookup(parent_ids)
+        indices, relations_list, tail_ids_list = self._knowledge_graph_lookup(parent_ids)
 
         # Embed relations
         relation_embeddings = [self._relation_embedder(r) for r in relations_list]

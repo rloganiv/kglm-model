@@ -10,8 +10,6 @@ from kglm.nn.util import nested_enumerate
 
 logger = logging.getLogger(__name__)
 
-MAX_RELATIONS = 10
-
 
 class KnowledgeGraphLookup:
     def __init__(self,
@@ -78,7 +76,6 @@ class KnowledgeGraphLookup:
             A tensor of shape `(N, *, K)` containing the corresponding tail ids.
         """
         # Collect the information to load into the output tensors.
-        K = 0
         indices: List[Tuple[int, ...]] = []
         relations_list: List[torch.LongTensor] = []
         tail_ids_list: List[torch.LongTensor] = []
@@ -88,22 +85,9 @@ class KnowledgeGraphLookup:
             tail_ids = self._tail_ids[parent_id]
             if relations is None:
                 continue
-            # Update output size
-            K = max(K, len(relations))
             # Add to lists
             indices.append(tuple(inds))
             relations_list.append(relations.to(device=parent_ids.device))
             tail_ids_list.append(tail_ids.to(device=parent_ids.device))
 
-        # Construct the output tensors
-        # relations = parent_ids.new_zeros(size=(*parent_ids.shape, K))
-        # tail_ids = parent_ids.new_zeros(size=(*parent_ids.shape, K))
-        # for inds, _relations, _tail_ids in zip(indices, relations_list, tail_ids_list):
-        #     _slice = slice(None, len(_relations))  # min(len(_relations), MAX_RELATIONS))
-        #     index = (*inds, _slice)
-        #     relations[index] = _relations[_slice]
-        #     tail_ids[index] = _tail_ids[_slice]
-        # logger.debug('Num relations: %i', K)
-        # logger.debug('Padding density: %i / %i', relations.eq(0).sum(), torch.numel(relations))
-
-        return indices, K, relations_list, tail_ids_list
+        return indices, relations_list, tail_ids_list

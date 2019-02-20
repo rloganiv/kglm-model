@@ -57,7 +57,7 @@ class KnowledgeGraphLookupTest(AllenNlpTestCase):
             self.vocab.get_token_index('E3', 'entity_ids')  # Should work, even though E3 not in the KG
         ]
         parent_ids = torch.LongTensor(parent_ids)
-        relations, tail_ids = self.knowledge_graph_lookup(parent_ids)
+        indices, relations, tail_ids = self.knowledge_graph_lookup(parent_ids)
 
         # Lookup indices of tokens expected to be in the output
         e2 = self.vocab.get_token_index('E2', 'entity_ids')
@@ -66,8 +66,19 @@ class KnowledgeGraphLookupTest(AllenNlpTestCase):
         r2 = self.vocab.get_token_index('R2', 'relations')
 
         # Expected outputs (these are directly transcribed from the KG)
-        expected_relations = torch.LongTensor([[r1, r2], [r1, 0], [0, 0]])
-        expected_tail_ids = torch.LongTensor([[e2, e3], [e3, 0], [0, 0]])
+        expected_indices = [(0,), (1,)]
+        expected_relations = [
+            torch.LongTensor([r1, r2]),
+            torch.LongTensor([r1])
+        ]
+        expected_tail_ids = [
+            torch.LongTensor([e2, e3]),
+            torch.LongTensor([e3])
+        ]
 
-        assert relations.equal(expected_relations)
-        assert tail_ids.equal(expected_tail_ids)
+        # Check expectations are met
+        assert indices == expected_indices
+        for observed, expected in zip(relations, expected_relations):
+            assert observed.equal(expected)
+        for observed, expected in zip(tail_ids, expected_tail_ids):
+            assert observed.equal(expected)
