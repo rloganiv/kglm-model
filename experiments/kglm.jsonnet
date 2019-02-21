@@ -2,14 +2,14 @@
     "vocabulary": {
         "type": "extended",
         "extend": false,
-        "directory_path": "data/enhanced-wikitext-2-vocab"
+        "directory_path": "data/enhanced-wikitext-2/vocab"
     },
     "dataset_reader": {
         "type": "enhanced-wikitext-kglm",
-        "alias_database_path": "./data/enhanced-wikitext-2.alias.pkl"
+        "alias_database_path": "data/enhanced-wikitext-2/alias.pkl"
     },
-    "train_data_path": "./data/enhanced-wikitext-2.train.jsonl",
-    "validation_data_path": "./data/enhanced-wikitext.valid.jsonl",
+    "train_data_path": "data/enhanced-wikitext-2/train.jsonl",
+    "validation_data_path": "data/enhanced-wikitext-2/valid.jsonl",
     "model": {
         "type": "kglm",
         "token_embedder": {
@@ -25,8 +25,8 @@
             "token_embedders": {
                 "entity_ids": {
                     "type": "embedding",
-                    "pretrained_file": "data/enhanced-wikitext-2.entities.txt",
-                    "embedding_dim": 400,
+                    "pretrained_file": "data/enhanced-wikitext-2/embeddings.entities.txt",
+                    "embedding_dim": 256,
                     "trainable": false,
                     "vocab_namespace": "entity_ids"
                 }
@@ -36,8 +36,10 @@
             "token_embedders": {
                 "relations": {
                     "type": "embedding",
-                    "embedding_dim": 400,
-                    "trainable": true
+                    "pretrained_file": "data/enhanced-wikitext-2/embeddings.relations.txt",
+                    "embedding_dim": 256,
+                    "trainable": false,
+                    "vocab_namespace": "relations"
                 }
             }
         },
@@ -46,7 +48,7 @@
             "input_size": 400,
             "hidden_size": 400
         },
-        "knowledge_graph_path": "data/enhanced-wikitext-2.knowledge-graph.pkl",
+        "knowledge_graph_path": "data/enhanced-wikitext-2/knowledge_graph.pkl",
         "hidden_size": 1150,
         "num_layers": 3,
         "cutoff": 30,
@@ -58,12 +60,13 @@
     },
     "iterator": {
         "type": "fancy",
-        "batch_size": 60,
+        "batch_size": 30,
         "split_size": 70,
         "splitting_keys": [
                 "source",
                 "target",
                 "mention_type",
+                "raw_entity_ids",
                 "entity_ids",
                 "parent_ids",
                 "relations",

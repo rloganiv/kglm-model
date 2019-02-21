@@ -79,9 +79,9 @@ class Kglm(Model):
 
         # RNN Encoders.
         entity_embedding_dim = entity_embedder.get_output_dim()
-        token_embedding_dim = entity_embedder.get_output_dim()
-        assert entity_embedding_dim == token_embedding_dim
-        embedding_dim = token_embedding_dim
+        token_embedding_dim = token_embedder.get_output_dim()
+        self.entity_embedding_dim = entity_embedding_dim
+        self.token_embedding_dim = token_embedding_dim
 
         rnns: List[torch.nn.Module] = []
         for i in range(num_layers):
@@ -89,8 +89,8 @@ class Kglm(Model):
                 input_size = token_embedding_dim
             else:
                 input_size = hidden_size
-            if (i == num_layers - 1) and tie_weights:
-                output_size = token_embedding_dim * 2
+            if (i == num_layers - 1):
+                output_size = token_embedding_dim + 2 * entity_embedding_dim
             else:
                 output_size = hidden_size
             rnns.append(torch.nn.LSTM(input_size, output_size, batch_first=True))
@@ -99,32 +99,20 @@ class Kglm(Model):
 
         # Various linear transformations.
         self._fc_mention_type = torch.nn.Linear(
-            in_features=embedding_dim,
+            in_features=token_embedding_dim,
             out_features=3)
 
-        self._fc_new_entity = torch.nn.Linear(
-            in_features=embedding_dim,
-            out_features=embedding_dim)
-
-        self._fc_parent = torch.nn.Linear(
-            in_features=embedding_dim,
-            out_features=embedding_dim)
-
-        self._fc_relation = torch.nn.Linear(
-            in_features=embedding_dim,
-            out_features=embedding_dim)
-
         self._fc_condense = torch.nn.Linear(
-            in_features=2 * embedding_dim,
-            out_features=embedding_dim)
+            in_features=token_embedding_dim + entity_embedding_dim,
+            out_features=token_embedding_dim)
 
         self._fc_generate = torch.nn.Linear(
-            in_features=embedding_dim,
+            in_features=token_embedding_dim,
             out_features=vocab.get_vocab_size('tokens'))
 
         self._fc_copy = torch.nn.Linear(
-            in_features=embedding_dim,
-            out_features=embedding_dim)
+            in_features=token_embedding_dim,
+            out_features=token_embedding_dim)
 
         if tie_weights:
             self._fc_generate.weight = self._token_embedder.weight
@@ -152,6 +140,7 @@ class Kglm(Model):
                 reset: torch.Tensor,
                 metadata: List[Dict[str, Any]],
                 mention_type: torch.Tensor = None,
+                raw_entity_ids: Dict[str, torch.Tensor] = None,
                 entity_ids: Dict[str, torch.Tensor] = None,
                 parent_ids: Dict[str, torch.Tensor] = None,
                 relations: Dict[str, torch.Tensor] = None,
@@ -178,6 +167,7 @@ class Kglm(Model):
                 target=target,
                 alias_database=alias_database,
                 mention_type=mention_type,
+                raw_entity_ids=raw_entity_ids,
                 entity_ids=entity_ids,
                 parent_ids=parent_ids,
                 relations=relations,
@@ -257,11 +247,10 @@ class Kglm(Model):
             words=shortlist['entity_ids'],
             dropout=self._dropoute if self.training else 0)
 
-        # Logits are computed using a general bilinear form that measures the similarity between
-        # the projected hidden state and the embeddings of entities in the shortlist
-        projected_encodings = self._fc_new_entity(encoded)
-        projected_encodings = self._locked_dropout(projected_encodings, self._dropout)
-        logits = torch.bmm(projected_encodings, shortlist_embeddings.transpose(1, 2))
+        # Logits are computed using the inner product that between the predicted entity embedding
+        # and the embeddings of entities in the shortlist
+        encodings = self._locked_dropout(encoded, self._dropout)
+        logits = torch.bmm(encodings, shortlist_embeddings.transpose(1, 2))
 
         # Take masked softmax to get log probabilties and gather the targets.
         log_probs = masked_log_softmax(logits, shortlist_mask)
@@ -275,7 +264,7 @@ class Kglm(Model):
         return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
 
     def _parent_log_probs(self,
-                          encoded: torch.Tensor,
+                          encoded_head: torch.Tensor,
                           entity_ids: torch.Tensor,
                           parent_ids: torch.Tensor) -> torch.Tensor:
         # Lookup recent entities (which are candidates for parents) and get their embeddings.
@@ -287,9 +276,8 @@ class Kglm(Model):
 
         # Logits are computed using a general bilinear form that measures the similarity between
         # the projected hidden state and the embeddings of candidate entities
-        projected_encodings = self._fc_parent(encoded)
-        projected_encodings = self._locked_dropout(projected_encodings, self._dropout)
-        selection_logits = torch.bmm(projected_encodings, candidate_embeddings.transpose(1, 2))
+        encoded = self._locked_dropout(encoded_head, self._dropout)
+        selection_logits = torch.bmm(encoded, candidate_embeddings.transpose(1, 2))
 
         # Get log probabilities using masked softmax (need to double check mask works properly).
 
@@ -317,6 +305,7 @@ class Kglm(Model):
         # some small constant for numerical stability).
         mask = is_parent & non_null
         masked_log_probs = log_probs.unsqueeze(2) + (mask.float() + 1e-45).log()
+        logger.debug('Masked log probs shape: %s', masked_log_probs.shape)
 
         # Lastly, we need to get rid of the num_candidates dimension. The easy way to do this would
         # be to marginalize it out. However, since our data is sparse (the last two dims are
@@ -328,8 +317,8 @@ class Kglm(Model):
         return target_log_probs
 
     def _relation_log_probs(self,
-                            encoded: torch.Tensor,
-                            entity_ids: torch.Tensor,
+                            encoded_relation: torch.Tensor,
+                            raw_entity_ids: torch.Tensor,
                             parent_ids: torch.Tensor) -> torch.Tensor:
 
         # Lookup edges out of parents
@@ -340,21 +329,21 @@ class Kglm(Model):
 
         # Logits are computed using a general bilinear form that measures the similarity between
         # the projected hidden state and the embeddings of relations
-        projected_encodings = self._fc_relation(encoded)
-        projected_encodings = self._locked_dropout(projected_encodings, self._dropout)
+        encoded = self._locked_dropout(encoded_relation, self._dropout)
 
         # This is a little funky, but to avoid massive amounts of padding we are going to just
         # iterate over the relation and tail_id vectors one-by-one.
         # shape: (batch_size, sequence_length, num_parents, num_relations)
-        target_log_probs = projected_encodings.new_empty(*parent_ids.shape).fill_(math.log(1e-45))
+        target_log_probs = encoded.new_empty(*parent_ids.shape).fill_(math.log(1e-45))
         for index, relation_embedding, tail_id in zip(indices, relation_embeddings, tail_ids_list):
             # First we compute the score for each relation w.r.t the current encoding, and convert
             # the scores to log-probabilities
-            logits = torch.mv(relation_embedding, projected_encodings[index[:-1]])
-            log_probs = F.log_softmax(logits)
+            logits = torch.mv(relation_embedding, encoded[index[:-1]])
+            logger.debug('Relation logits shape: %s', logits.shape)
+            log_probs = F.log_softmax(logits, dim=-1)
 
             # Next we gather the log probs for edges with the correct tail entity and sum them up
-            target_id = entity_ids[index[:-1]]
+            target_id = raw_entity_ids[index[:-1]]
             relevant_log_probs = log_probs.masked_select(tail_id.eq(target_id))
             target_log_prob = torch.logsumexp(relevant_log_probs, dim=0)
 
@@ -363,21 +352,22 @@ class Kglm(Model):
         return target_log_probs
 
     def _knowledge_graph_entity_loss(self,
-                                     encoded: torch.Tensor,
+                                     encoded_head: torch.Tensor,
+                                     encoded_relation: torch.Tensor,
+                                     raw_entity_ids: torch.Tensor,
                                      entity_ids: torch.Tensor,
                                      parent_ids: torch.Tensor,
                                      target_mask: torch.Tensor) -> torch.Tensor:
         # First get the log probabilities of the parents and relations that lead to the current
         # entity.
-        parent_log_probs = self._parent_log_probs(encoded, entity_ids, parent_ids)
-        relation_log_probs = self._relation_log_probs(encoded, entity_ids, parent_ids)
+        parent_log_probs = self._parent_log_probs(encoded_head, entity_ids, parent_ids)
+        relation_log_probs = self._relation_log_probs(encoded_relation, raw_entity_ids, parent_ids)
         # Next take their product + marginalize
         combined_log_probs = parent_log_probs + relation_log_probs
         target_log_probs = torch.logsumexp(combined_log_probs, dim=-1)
         # Lastly, zero out any non-kg predictions
         mask = ~parent_ids.eq(0).all(dim=-1)
         target_log_probs = target_log_probs * mask.float()
-        # And marginalize over all parents
         # Lastly return the tokenwise average loss
         return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
 
@@ -514,6 +504,7 @@ class Kglm(Model):
                       target: Dict[str, torch.Tensor],
                       alias_database: AliasDatabase,
                       mention_type: torch.Tensor,
+                      raw_entity_ids: Dict[str, torch.Tensor],
                       entity_ids: Dict[str, torch.Tensor],
                       parent_ids: Dict[str, torch.Tensor],
                       relations: Dict[str, torch.Tensor],
@@ -526,9 +517,10 @@ class Kglm(Model):
         target_mask = get_text_field_mask(target)
         source = source['tokens']
         target = target['tokens']
+        raw_entity_ids = raw_entity_ids['raw_entity_ids']
         entity_ids = entity_ids['entity_ids']
         relations = relations['relations']
-        parent_ids = parent_ids['entity_ids']
+        parent_ids = parent_ids['raw_entity_ids']
 
         logger.debug('Source & Target shape: %s', source.shape)
         logger.debug('Entity ids shape: %s', entity_ids.shape)
@@ -537,36 +529,36 @@ class Kglm(Model):
         # Embed source tokens.
         # shape: (batch_size, sequence_length, embedding_dim)
         encoded, alpha_loss, beta_loss = self._encode_source(source)
-        encoded_kg, encoded_vocab = encoded.chunk(2, dim=-1)
+        splits = [self.token_embedding_dim, self.entity_embedding_dim, self.entity_embedding_dim]
+        encoded_token, encoded_head, encoded_relation = encoded.split(splits, dim=-1)
 
         # Predict whether or not the next token will be an entity mention, and if so which type.
-        mention_type_loss = self._mention_type_loss(encoded_kg, mention_type, target_mask)
+        mention_type_loss = self._mention_type_loss(encoded_token, mention_type, target_mask)
         self._avg_mention_type_loss(float(mention_type_loss))
 
         # For new mentions, predict which entity (among those in the supplied shortlist) will be
         # mentioned.
-        new_entity_loss = self._new_entity_loss(encoded_kg,
+        new_entity_loss = self._new_entity_loss(encoded_head + encoded_relation,
                                                 shortlist_inds,
                                                 shortlist,
                                                 target_mask)
         self._avg_new_entity_loss(float(new_entity_loss))
 
         # For derived mentions, first predict which parent(s) to expand...
-        knowledge_graph_entity_loss = self._knowledge_graph_entity_loss(encoded_kg,
+        knowledge_graph_entity_loss = self._knowledge_graph_entity_loss(encoded_head,
+                                                                        encoded_relation,
+                                                                        raw_entity_ids,
                                                                         entity_ids,
                                                                         parent_ids,
                                                                         target_mask)
         self._avg_knowledge_graph_entity_loss(float(knowledge_graph_entity_loss))
 
-        # Predict generation-mode scores. Start by concatenating predicted entity embeddings with
-        # the encoder output - then feed through a linear layer.
-        # concatenated = torch.cat((encoded, entity_embeddings), dim=-1)
-        # condensed = self._fc_condense(concatenated)
-        generate_scores = self._generate_scores(encoded_vocab, entity_ids)
+        # Predict generation-mode scores. Note: these are W.R.T to entity_ids since we need the embedding.
+        generate_scores = self._generate_scores(encoded_token, entity_ids)
 
-        # Predict copy-mode scores.
-        alias_tokens, alias_inds = alias_database.lookup(entity_ids)
-        copy_scores = self._copy_scores(encoded_vocab, alias_tokens)
+        # Predict copy-mode scores. Note: these are W.R.T raw_entity_ids since we need to look up aliases.
+        alias_tokens, alias_inds = alias_database.lookup(raw_entity_ids)
+        copy_scores = self._copy_scores(encoded_token, alias_tokens)
 
         # Combine scores to get vocab loss
         vocab_loss = self._vocab_loss(generate_scores,
