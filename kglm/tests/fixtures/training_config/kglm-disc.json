@@ -1,0 +1,73 @@
+{
+    "dataset_reader": {
+        "type": "enhanced-wikitext-kglm",
+        "alias_database_path": "kglm/tests/fixtures/mini.alias.pkl",
+        "mode": "discriminative"
+    },
+    "train_data_path": "kglm/tests/fixtures/enhanced-wikitext.jsonl",
+    "validation_data_path": "kglm/tests/fixtures/enhanced-wikitext.jsonl",
+    "model": {
+        "type": "kglm-disc",
+        "token_embedder": {
+            "token_embedders": {
+                "tokens": {
+                    "type": "embedding",
+                    "embedding_dim": 10,
+                    "trainable": true
+                }
+            }
+        },
+        "entity_embedder": {
+            "token_embedders": {
+                "entity_ids": {
+                    "type": "embedding",
+                    "embedding_dim": 10,
+                    "trainable": true
+                }
+            }
+        },
+        "relation_embedder": {
+            "token_embedders": {
+                "relations": {
+                    "type": "embedding",
+                    "embedding_dim": 10,
+                    "trainable": true
+                }
+            }
+        },
+        "use_shortlist": true,
+        "knowledge_graph_path": "kglm/tests/fixtures/mini.relation.pkl",
+        "hidden_size": 10,
+        "num_layers": 3,
+        "cutoff": 30,
+        "tie_weights": true
+    },
+    "iterator": {
+        "type": "fancy",
+        "batch_size": 3,
+        "split_size": 30,
+        "splitting_keys": [
+                "source",
+                "mention_type",
+                "raw_entity_ids",
+                "entity_ids",
+                "parent_ids",
+                "relations",
+                "shortlist_inds"
+        ]
+    },
+    "trainer": {
+        "type": "lm",
+        "num_epochs": 2,
+        "grad_clipping": 0.25,
+        "optimizer": {
+            "type": "nt-asgd",
+            "lr": 30,
+            "weight_decay": 1.2e-6
+        },
+        "learning_rate_scheduler": {
+            "type": "nt-asgd",
+            "non_monotone_interval": 5
+        }
+    }
+}
