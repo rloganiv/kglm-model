@@ -12,7 +12,8 @@
                 "tokens": {
                     "type": "embedding",
                     "embedding_dim": 10,
-                    "trainable": true
+                    "trainable": true,
+                    "vocab_namespace": "tokens"
                 }
             }
         },
@@ -21,7 +22,8 @@
                 "entity_ids": {
                     "type": "embedding",
                     "embedding_dim": 10,
-                    "trainable": true
+                    "trainable": true,
+                    "vocab_namespace": "entity_ids"
                 }
             }
         },
@@ -30,7 +32,8 @@
                 "relations": {
                     "type": "embedding",
                     "embedding_dim": 10,
-                    "trainable": true
+                    "trainable": true,
+                    "vocab_namespace": "relations"
                 }
             }
         },
@@ -39,7 +42,7 @@
             "input_size": 10,
             "hidden_size": 10
         },
-        "use_shortlist": true,
+        "use_shortlist": false,
         "knowledge_graph_path": "kglm/tests/fixtures/mini.relation.pkl",
         "hidden_size": 10,
         "num_layers": 3,
