@@ -10,3 +10,4 @@ class LockedDropout(torch.nn.Module):
         mask = mask / (1 - dropout)
         mask = mask.expand_as(x)
         return mask * x
+

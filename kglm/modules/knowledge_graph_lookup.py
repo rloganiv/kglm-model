@@ -24,7 +24,7 @@ class KnowledgeGraphLookup:
         with open(knowledge_graph_path, 'rb') as f:
             knowledge_graph = pickle.load(f)
 
-        entity_idx_to_token = self._vocab.get_index_to_token_vocabulary('raw_entity_ids')
+        entity_idx_to_token = self._vocab.get_index_to_token_vocabulary('entity_ids')
         all_relations: List[torch.Tensor] = []
         all_tail_ids: List[torch.Tensor] = []
         for i in tqdm(range(len(entity_idx_to_token))):
@@ -77,6 +77,7 @@ class KnowledgeGraphLookup:
         """
         # Collect the information to load into the output tensors.
         indices: List[Tuple[int, ...]] = []
+        parent_ids_list: List[torch.LongTensor] = []
         relations_list: List[torch.LongTensor] = []
         tail_ids_list: List[torch.LongTensor] = []
         for *inds, parent_id in nested_enumerate(parent_ids):
@@ -87,7 +88,9 @@ class KnowledgeGraphLookup:
                 continue
             # Add to lists
             indices.append(tuple(inds))
+            parent_ids_list.append(parent_id)
             relations_list.append(relations.to(device=parent_ids.device))
             tail_ids_list.append(tail_ids.to(device=parent_ids.device))
 
-        return indices, relations_list, tail_ids_list
+        return indices, parent_ids_list, relations_list, tail_ids_list
+
