@@ -113,6 +113,18 @@ class EnhancedWikitextEntityNlmReader(DatasetReader):
         return Instance(fields)
 
 
+def normalize_entity_id(raw_entity_id: str) -> str:
+    if raw_entity_id[0] == 'T':
+        entity_id = '@@DATE@@'
+    elif raw_entity_id[0] == 'V':
+        entity_id = '@@QUANTITY@@'
+    elif raw_entity_id[0] in ['P', 'Q']:
+        entity_id = raw_entity_id
+    else:
+        entity_id = None
+    return entity_id
+
+
 @DatasetReader.register('enhanced-wikitext-kglm')
 class EnhancedWikitextKglmReader(DatasetReader):
 
@@ -211,16 +223,13 @@ class EnhancedWikitextKglmReader(DatasetReader):
 
                 # Obtain the entity identifier for the annotated span
                 raw_entity_id = annotation['id']
-                if raw_entity_id[0] == 'T':
-                    entity_id = '@@DATE@@'
-                elif raw_entity_id[0] == 'V':
-                    entity_id = '@@QUANTITY@@'
-                elif raw_entity_id[0] == 'Q':
-                    entity_id = raw_entity_id
-                else:
+                raw_parent_id = annotation['parent_id']
+                entity_id = normalize_entity_id(raw_entity_id)
+                if entity_id is None:
                     continue
+                parent_id = [normalize_entity_id(x) for x in raw_parent_id]
+                assert len(parent_id) == len(raw_parent_id)
                 relation = annotation['relation']
-                parent_id = annotation['parent_id']
                 new_entity = relation == ['@@NEW@@']
 
                 # If neccessary, update the shortlist. Obtain the index of the entity identifier in
@@ -254,14 +263,14 @@ class EnhancedWikitextKglmReader(DatasetReader):
             fields['entity_ids'] = TextField(
                 [Token(x) for x in entity_ids],
                 token_indexers=self._entity_indexers)
+            fields['parent_ids'] = ListField([
+                TextField([Token(x) for x in sublist],
+                          token_indexers=self._entity_indexers)
+                for sublist in parent_ids])
             fields['relations'] = ListField([
                 TextField([Token(x) for x in sublist],
                           token_indexers=self._relation_indexers)
                 for sublist in relations])
-            fields['parent_ids'] = ListField([
-                TextField([Token(x) for x in sublist],
-                          token_indexers=self._raw_entity_indexers)
-                for sublist in parent_ids])
             fields['mention_type'] = SequentialArrayField(mention_type, dtype=np.int64)
             fields['alias_copy_inds'] = SequentialArrayField(alias_copy_inds, dtype=np.int64)
             fields['shortlist'] = TextField(

@@ -8,7 +8,7 @@ from allennlp.models import Model
 from allennlp.nn import InitializerApplicator
 from allennlp.nn.util import (
     get_text_field_mask, masked_log_softmax, sequence_cross_entropy_with_logits)
-from allennlp.training.metrics import Average
+from allennlp.training.metrics import Average, CategoricalAccuracy, F1Measure, SequenceAccuracy
 from overrides import overrides
 import torch
 import torch.nn.functional as F
@@ -140,6 +140,12 @@ class Kglm(Model):
         self._avg_new_entity_loss = Average()
         self._avg_knowledge_graph_entity_loss = Average()
         self._avg_vocab_loss = Average()
+        self._new_mention_f1 =  F1Measure(positive_label=1)
+        self._kg_mention_f1 = F1Measure(positive_label=2)
+        self._new_entity_accuracy = CategoricalAccuracy()
+        self._new_entity_accuracy20 = CategoricalAccuracy(top_k=20)
+        self._parent_ppl = Ppl()
+        self._relation_ppl = Ppl()
 
         initializer(self)
 
@@ -242,6 +248,14 @@ class Kglm(Model):
         logits = self._fc_mention_type(encoded)
         mention_type_loss = sequence_cross_entropy_with_logits(logits, mention_type, mask,
                                                                average='token')
+        # if not self.training:
+        self._new_mention_f1(predictions=logits,
+                             gold_labels=mention_type,
+                             mask=mask)
+        self._kg_mention_f1(predictions=logits,
+                            gold_labels=mention_type,
+                            mask=mask)
+
         return mention_type_loss
 
     def _new_entity_loss(self,
@@ -274,19 +288,36 @@ class Kglm(Model):
             target_log_probs = torch.gather(log_probs, -1, target_inds.unsqueeze(-1)).squeeze(-1)
 
             # If not generating a new mention, the action is deterministic - so the loss is 0 for these tokens.
-            mask = target_inds.eq(0)
-            target_log_probs[mask] = 0
+            mask = ~target_inds.eq(0)
+            target_log_probs[~mask] = 0
+
+            # if not self.training:
+            self._new_entity_accuracy(predictions=log_probs[mask],
+                                      gold_labels=target_inds[mask])
+            self._new_entity_accuracy20(predictions=log_probs[mask],
+                                        gold_labels=target_inds[mask])
 
             # Return the token-wise average loss
             return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
 
         else:
             logits = self._fc_new_entity(encoded)
-            loss = sequence_cross_entropy_with_logits(logits, target_inds, target_mask,
-                                                      average="token")
-            return loss
+            log_probs = F.log_softmax(logits, dim=-1)
 
+            num_categories = log_probs.shape[-1]
+            flat_log_probs = log_probs.view(-1, num_categories)
+            flat_target_inds = target_inds.view(-1)
+            target_log_probs = torch.gather(flat_log_probs, -1, flat_target_inds.unsqueeze(-1)).squeeze(-1)
 
+            mask = ~flat_target_inds.eq(0)
+            target_log_probs[~mask] = 0
+
+            self._new_entity_accuracy(predictions=flat_log_probs[mask],
+                                      gold_labels=flat_target_inds[mask])
+            self._new_entity_accuracy20(predictions=flat_log_probs[mask],
+                                        gold_labels=flat_target_inds[mask])
+
+            return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
 
     def _parent_log_probs(self,
                           encoded_head: torch.Tensor,
@@ -347,7 +378,7 @@ class Kglm(Model):
                             parent_ids: torch.Tensor) -> torch.Tensor:
 
         # Lookup edges out of parents
-        indices, relations_list, tail_ids_list = self._knowledge_graph_lookup(parent_ids)
+        indices, parent_ids_list, relations_list, tail_ids_list = self._knowledge_graph_lookup(parent_ids)
 
         # Embed relations
         relation_embeddings = [self._relation_embedder(r) for r in relations_list]
@@ -360,7 +391,7 @@ class Kglm(Model):
         # iterate over the relation and tail_id vectors one-by-one.
         # shape: (batch_size, sequence_length, num_parents, num_relations)
         target_log_probs = encoded.new_empty(*parent_ids.shape).fill_(math.log(1e-45))
-        for index, relation_embedding, tail_id in zip(indices, relation_embeddings, tail_ids_list):
+        for index, parent_id, relation_embedding, tail_id in zip(indices, parent_ids_list, relation_embeddings, tail_ids_list):
             # First we compute the score for each relation w.r.t the current encoding, and convert
             # the scores to log-probabilities
             logits = torch.mv(relation_embedding, encoded[index[:-1]])
@@ -369,9 +400,11 @@ class Kglm(Model):
 
             # Next we gather the log probs for edges with the correct tail entity and sum them up
             target_id = raw_entity_ids[index[:-1]]
+            mask = tail_id.eq(target_id)
+            if ~mask.any():
+                import pdb; pdb.set_trace()
             relevant_log_probs = log_probs.masked_select(tail_id.eq(target_id))
             target_log_prob = torch.logsumexp(relevant_log_probs, dim=0)
-
             target_log_probs[index] = target_log_prob
 
         return target_log_probs
@@ -390,9 +423,13 @@ class Kglm(Model):
         # Next take their product + marginalize
         combined_log_probs = parent_log_probs + relation_log_probs
         target_log_probs = torch.logsumexp(combined_log_probs, dim=-1)
-        # Lastly, zero out any non-kg predictions
+        # Zero out any non-kg predictions
         mask = ~parent_ids.eq(0).all(dim=-1)
         target_log_probs = target_log_probs * mask.float()
+        # If validating, measure ppl of the predictions:
+        # if not self.training:
+        self._parent_ppl(-torch.logsumexp(parent_log_probs, dim=-1)[mask].sum(), mask.float().sum())
+        self._relation_ppl(-torch.logsumexp(relation_log_probs, dim=-1)[mask].sum(), mask.float().sum())
         # Lastly return the tokenwise average loss
         return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
 
@@ -536,7 +573,6 @@ class Kglm(Model):
                       shortlist: Dict[str, torch.Tensor],
                       shortlist_inds: torch.Tensor,
                       alias_copy_inds: torch.Tensor) -> Dict[str, torch.Tensor]:
-
         # Get the token mask and extract indexed text fields.
         # shape: (batch_size, sequence_length)
         target_mask = get_text_field_mask(target)
@@ -544,8 +580,8 @@ class Kglm(Model):
         target = target['tokens']
         raw_entity_ids = raw_entity_ids['raw_entity_ids']
         entity_ids = entity_ids['entity_ids']
+        parent_ids = parent_ids['entity_ids']
         relations = relations['relations']
-        parent_ids = parent_ids['raw_entity_ids']
 
         logger.debug('Source & Target shape: %s', source.shape)
         logger.debug('Entity ids shape: %s', entity_ids.shape)
@@ -554,7 +590,7 @@ class Kglm(Model):
         # Embed source tokens.
         # shape: (batch_size, sequence_length, embedding_dim)
         encoded, alpha_loss, beta_loss = self._encode_source(source)
-        splits = [self.token_embedding_dim, self.entity_embedding_dim, self.entity_embedding_dim]
+        splits = [self.token_embedding_dim] + [self.entity_embedding_dim] * 2
         encoded_token, encoded_head, encoded_relation = encoded.split(splits, dim=-1)
 
         # Predict whether or not the next token will be an entity mention, and if so which type.
@@ -630,7 +666,7 @@ class Kglm(Model):
         self._state = None
 
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
-        return {
+        out =  {
             'ppl': self._ppl.get_metric(reset),
             'upp': self._upp.get_metric(reset),
             'kg_ppl': self._kg_ppl.get_metric(reset),
@@ -640,3 +676,18 @@ class Kglm(Model):
             'kg': self._avg_knowledge_graph_entity_loss.get_metric(reset),
             'vocab': self._avg_vocab_loss.get_metric(reset),
         }
+        # if not self.training:
+        p, r, f  = self._new_mention_f1.get_metric(reset)
+        out['new_p'] = p
+        out['new_r'] = r
+        out['new_f1'] = f
+        p, r, f  = self._kg_mention_f1.get_metric(reset)
+        out['kg_p'] = p
+        out['kg_r'] = r
+        out['kg_f1'] = f
+        out['new_ent_acc'] = self._new_entity_accuracy.get_metric(reset)
+        out['new_ent_acc_20'] = self._new_entity_accuracy20.get_metric(reset)
+        out['parent_ppl'] = self._parent_ppl.get_metric(reset)
+        out['relation_ppl'] = self._relation_ppl.get_metric(reset)
+        return out
+

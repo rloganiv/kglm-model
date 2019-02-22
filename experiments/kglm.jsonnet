@@ -38,7 +38,7 @@
                     "type": "embedding",
                     "pretrained_file": "data/enhanced-wikitext-2/embeddings.relations.txt",
                     "embedding_dim": 256,
-                    "trainable": false,
+                    "trainable": true,
                     "vocab_namespace": "relations"
                 }
             }
@@ -79,7 +79,7 @@
         "type": "lm",
         "num_epochs": 500,
         "cuda_device": 0,
-        "grad_clipping": 0.25,
+        // "grad_clipping": 0.25,
         // "optimizer": {
         //     "type": "nt-asgd",
         //     "lr": 22.5,

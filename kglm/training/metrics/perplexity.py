@@ -149,7 +149,10 @@ class Ppl(Metric):
     @overrides
     def get_metric(self, reset: bool):
         ratio = float(self.numerator) / (float(self.denominator) + 1e-13)
-        ppl = math.exp(ratio)
+        if ratio > 20:
+            ppl = float('inf')
+        else:
+            ppl = math.exp(ratio)
         if reset:
             self.reset()
         return ppl
