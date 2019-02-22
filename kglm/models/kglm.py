@@ -38,6 +38,7 @@ class Kglm(Model):
                  relation_embedder: TextFieldEmbedder,
                  alias_encoder: Seq2SeqEncoder,
                  knowledge_graph_path: str,
+                 use_shortlist: bool,
                  hidden_size: int,
                  num_layers: int,
                  cutoff: int = 30,
@@ -60,6 +61,7 @@ class Kglm(Model):
         self._alias_encoder = alias_encoder
         self._recent_entities = RecentEntities(cutoff=cutoff)
         self._knowledge_graph_lookup = KnowledgeGraphLookup(knowledge_graph_path, vocab=vocab)
+        self._use_shortlist = use_shortlist
         self._hidden_size = hidden_size
         self._num_layers = num_layers
         self._cutoff = cutoff
@@ -101,6 +103,14 @@ class Kglm(Model):
         self._fc_mention_type = torch.nn.Linear(
             in_features=token_embedding_dim,
             out_features=3)
+
+        if not use_shortlist:
+            self._fc_new_entity = torch.nn.Linear(
+                in_features=entity_embedding_dim,
+                out_features=vocab.get_vocab_size('entity_ids'))
+
+            if tie_weights:
+                self._fc_new_entity.weight = self._entity_embedder.weight
 
         self._fc_condense = torch.nn.Linear(
             in_features=token_embedding_dim + entity_embedding_dim,
@@ -236,32 +246,47 @@ class Kglm(Model):
 
     def _new_entity_loss(self,
                          encoded: torch.Tensor,
-                         shortlist_inds: torch.Tensor,
+                         target_inds: torch.Tensor,
                          shortlist: torch.Tensor,
                          target_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters
+        ==========
+        target_inds : ``torch.Tensor``
+            Either the shortlist inds if using shortlist, otherwise the target entity ids.
+        """
+        if self._use_shortlist:
 
-        # First we embed the shortlist entries
-        shortlist_mask = get_text_field_mask(shortlist)
-        shortlist_embeddings = embedded_dropout(
-            embed=self._entity_embedder,
-            words=shortlist['entity_ids'],
-            dropout=self._dropoute if self.training else 0)
+            # First we embed the shortlist entries
+            shortlist_mask = get_text_field_mask(shortlist)
+            shortlist_embeddings = embedded_dropout(
+                embed=self._entity_embedder,
+                words=shortlist['entity_ids'],
+                dropout=self._dropoute if self.training else 0)
 
-        # Logits are computed using the inner product that between the predicted entity embedding
-        # and the embeddings of entities in the shortlist
-        encodings = self._locked_dropout(encoded, self._dropout)
-        logits = torch.bmm(encodings, shortlist_embeddings.transpose(1, 2))
+            # Logits are computed using the inner product that between the predicted entity embedding
+            # and the embeddings of entities in the shortlist
+            encodings = self._locked_dropout(encoded, self._dropout)
+            logits = torch.bmm(encodings, shortlist_embeddings.transpose(1, 2))
 
-        # Take masked softmax to get log probabilties and gather the targets.
-        log_probs = masked_log_softmax(logits, shortlist_mask)
-        target_log_probs = torch.gather(log_probs, -1, shortlist_inds.unsqueeze(-1)).squeeze(-1)
+            # Take masked softmax to get log probabilties and gather the targets.
+            log_probs = masked_log_softmax(logits, shortlist_mask)
+            target_log_probs = torch.gather(log_probs, -1, target_inds.unsqueeze(-1)).squeeze(-1)
 
-        # If not generating a new mention, the action is deterministic - so the loss is 0 for these tokens.
-        mask = shortlist_inds.eq(0)
-        target_log_probs[mask] = 0
+            # If not generating a new mention, the action is deterministic - so the loss is 0 for these tokens.
+            mask = target_inds.eq(0)
+            target_log_probs[mask] = 0
 
-        # Return the token-wise average loss
-        return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
+            # Return the token-wise average loss
+            return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
+
+        else:
+            logits = self._fc_new_entity(encoded)
+            loss = sequence_cross_entropy_with_logits(logits, target_inds, target_mask,
+                                                      average="token")
+            return loss
+
+
 
     def _parent_log_probs(self,
                           encoded_head: torch.Tensor,
@@ -538,10 +563,17 @@ class Kglm(Model):
 
         # For new mentions, predict which entity (among those in the supplied shortlist) will be
         # mentioned.
-        new_entity_loss = self._new_entity_loss(encoded_head + encoded_relation,
-                                                shortlist_inds,
-                                                shortlist,
-                                                target_mask)
+        if self._use_shortlist:
+            new_entity_loss = self._new_entity_loss(encoded_head + encoded_relation,
+                                                    shortlist_inds,
+                                                    shortlist,
+                                                    target_mask)
+        else:
+            new_entity_loss = self._new_entity_loss(encoded_head + encoded_relation,
+                                                    entity_ids,
+                                                    None,
+                                                    target_mask)
+
         self._avg_new_entity_loss(float(new_entity_loss))
 
         # For derived mentions, first predict which parent(s) to expand...

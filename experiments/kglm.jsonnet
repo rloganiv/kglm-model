@@ -49,6 +49,7 @@
             "hidden_size": 400
         },
         "knowledge_graph_path": "data/enhanced-wikitext-2/knowledge_graph.pkl",
+        "use_shortlist": false,
         "hidden_size": 1150,
         "num_layers": 3,
         "cutoff": 30,
@@ -60,7 +61,7 @@
     },
     "iterator": {
         "type": "fancy",
-        "batch_size": 30,
+        "batch_size": 60,
         "split_size": 70,
         "splitting_keys": [
                 "source",
