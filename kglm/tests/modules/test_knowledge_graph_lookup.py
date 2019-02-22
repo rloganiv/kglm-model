@@ -22,9 +22,9 @@ class KnowledgeGraphLookupTest(AllenNlpTestCase):
 
         # We need a vocab to track the unique entity ids and relations
         self.vocab = Vocabulary()
-        self.vocab.add_token_to_namespace('E1', 'entity_ids')
-        self.vocab.add_token_to_namespace('E2', 'entity_ids')
-        self.vocab.add_token_to_namespace('E3', 'entity_ids')
+        self.vocab.add_token_to_namespace('E1', 'raw_entity_ids')
+        self.vocab.add_token_to_namespace('E2', 'raw_entity_ids')
+        self.vocab.add_token_to_namespace('E3', 'raw_entity_ids')
         self.vocab.add_token_to_namespace('R1', 'relations')
         self.vocab.add_token_to_namespace('R2', 'relations')
 
@@ -41,33 +41,44 @@ class KnowledgeGraphLookupTest(AllenNlpTestCase):
         # expected tensors from our inputs...
         expected_relations, expected_tail_ids = zip(*self.temp_knowledge_graph['E1'])
         expected_relations = [self.vocab.get_token_index(t, 'relations') for t in expected_relations]
-        expected_tail_ids = [self.vocab.get_token_index(t, 'entity_ids') for t in expected_tail_ids]
+        expected_tail_ids = [self.vocab.get_token_index(t, 'raw_entity_ids') for t in expected_tail_ids]
         expected_relations = torch.LongTensor(expected_relations)
         expected_tail_ids = torch.LongTensor(expected_tail_ids)
         # ...then checking whether the corresponding elements in the lists are correct.
-        index = self.vocab.get_token_index('E1', 'entity_ids')
+        index = self.vocab.get_token_index('E1', 'raw_entity_ids')
         assert relations[index].equal(expected_relations)
         assert tail_ids[index].equal(expected_tail_ids)
 
     def test_lookup(self):
         # Check that the output of the lookup matches our expectations.
         parent_ids = [
-            self.vocab.get_token_index('E1', 'entity_ids'),
-            self.vocab.get_token_index('E2', 'entity_ids'),
-            self.vocab.get_token_index('E3', 'entity_ids')  # Should work, even though E3 not in the KG
+            self.vocab.get_token_index('E1', 'raw_entity_ids'),
+            self.vocab.get_token_index('E2', 'raw_entity_ids'),
+            self.vocab.get_token_index('E3', 'raw_entity_ids')  # Should work, even though E3 not in the KG
         ]
         parent_ids = torch.LongTensor(parent_ids)
-        relations, tail_ids = self.knowledge_graph_lookup(parent_ids)
+        indices, relations, tail_ids = self.knowledge_graph_lookup(parent_ids)
 
         # Lookup indices of tokens expected to be in the output
-        e2 = self.vocab.get_token_index('E2', 'entity_ids')
-        e3 = self.vocab.get_token_index('E3', 'entity_ids')
+        e2 = self.vocab.get_token_index('E2', 'raw_entity_ids')
+        e3 = self.vocab.get_token_index('E3', 'raw_entity_ids')
         r1 = self.vocab.get_token_index('R1', 'relations')
         r2 = self.vocab.get_token_index('R2', 'relations')
 
         # Expected outputs (these are directly transcribed from the KG)
-        expected_relations = torch.LongTensor([[r1, r2], [r1, 0], [0, 0]])
-        expected_tail_ids = torch.LongTensor([[e2, e3], [e3, 0], [0, 0]])
+        expected_indices = [(0,), (1,)]
+        expected_relations = [
+            torch.LongTensor([r1, r2]),
+            torch.LongTensor([r1])
+        ]
+        expected_tail_ids = [
+            torch.LongTensor([e2, e3]),
+            torch.LongTensor([e3])
+        ]
 
-        assert relations.equal(expected_relations)
-        assert tail_ids.equal(expected_tail_ids)
+        # Check expectations are met
+        assert indices == expected_indices
+        for observed, expected in zip(relations, expected_relations):
+            assert observed.equal(expected)
+        for observed, expected in zip(tail_ids, expected_tail_ids):
+            assert observed.equal(expected)

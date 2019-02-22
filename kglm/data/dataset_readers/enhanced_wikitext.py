@@ -21,6 +21,8 @@ from kglm.data.fields import SequentialArrayField
 
 logger = logging.getLogger(__name__)
 
+MAX_PARENTS = 10
+
 
 def _flatten(nested: Iterable[str]):
     return [x for seq in nested for x in seq]
@@ -119,6 +121,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
                  mode: str = "generative",
                  token_indexers: Dict[str, TokenIndexer] = None,
                  entity_indexers: Dict[str, TokenIndexer] = None,
+                 raw_entity_indexers: Dict[str, TokenIndexer] = None,
                  relation_indexers: Dict[str, TokenIndexer] = None,
                  lazy: bool = False) -> None:
         """
@@ -139,6 +142,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
 
         self._token_indexers = token_indexers or {'tokens': SingleIdTokenIndexer()}
         self._entity_indexers = entity_indexers or {'entity_ids': SingleIdTokenIndexer(namespace='entity_ids')}
+        self._raw_entity_indexers = raw_entity_indexers or {'raw_entity_ids': SingleIdTokenIndexer(namespace='raw_entity_ids')}
         self._relation_indexers = relation_indexers or {'relations': SingleIdTokenIndexer(namespace='relations')}
         if 'tokens' not in self._token_indexers or \
                 not isinstance(self._token_indexers['tokens'], SingleIdTokenIndexer):
@@ -147,11 +151,15 @@ class EnhancedWikitextKglmReader(DatasetReader):
         if 'entity_ids' not in self._entity_indexers or \
                 not isinstance(self._entity_indexers['entity_ids'], SingleIdTokenIndexer):
             raise ConfigurationError("EnhancedWikitextReader expects 'entity_indexers' to contain "
-                                     "a 'single_id' token indexer called 'entities'.")
+                                     "a 'single_id' token indexer called 'entity_ids'.")
+        if 'raw_entity_ids' not in self._raw_entity_indexers or \
+                not isinstance(self._raw_entity_indexers['raw_entity_ids'], SingleIdTokenIndexer):
+            raise ConfigurationError("EnhancedWikitextReader expects 'raw_entity_indexers' to contain "
+                                     "a 'single_id' token indexer called 'raw_entity_ids'.")
         if 'relations' not in self._relation_indexers or \
                 not isinstance(self._relation_indexers['relations'], SingleIdTokenIndexer):
             raise ConfigurationError("EnhancedWikitextReader expects 'relation_indexers' to contain "
-                                     "a 'single_id' token indexer called 'entities'.")
+                                     "a 'single_id' token indexer called 'relations'.")
         self._alias_database = AliasDatabase.load(path=alias_database_path)
 
     @overrides
@@ -190,6 +198,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
             shortlist = [DEFAULT_PADDING_TOKEN]
             reverse_shortlist = {DEFAULT_PADDING_TOKEN: 0}
 
+            raw_entity_ids = [DEFAULT_PADDING_TOKEN] * len(target)
             entity_ids = [DEFAULT_PADDING_TOKEN] * len(target)
             relations = [[DEFAULT_PADDING_TOKEN]] * len(target)
             parent_ids = [[DEFAULT_PADDING_TOKEN]] * len(target)
@@ -201,7 +210,15 @@ class EnhancedWikitextKglmReader(DatasetReader):
             for annotation in data['annotations']:
 
                 # Obtain the entity identifier for the annotated span
-                entity_id = annotation['id']
+                raw_entity_id = annotation['id']
+                if raw_entity_id[0] == 'T':
+                    entity_id = '@@DATE@@'
+                elif raw_entity_id[0] == 'V':
+                    entity_id = '@@QUANTITY@@'
+                elif raw_entity_id[0] == 'Q':
+                    entity_id = raw_entity_id
+                else:
+                    continue
                 relation = annotation['relation']
                 parent_id = annotation['parent_id']
                 new_entity = relation == ['@@NEW@@']
@@ -219,17 +236,21 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 # is for predicting attributes of the current token.
                 offset = 0 if self._mode == "generative" else 1
                 for i in range(*annotation['span']):
+                    raw_entity_ids[i+offset] = raw_entity_id
                     entity_ids[i+offset] = entity_id
                     if new_entity:
                         mention_type[i+offset] = 1
                         shortlist_inds[i+offset] = shortlist_ind
                     else:
                         mention_type[i+offset] = 2
-                        relations[i+offset] = relation
-                        parent_ids[i+offset] = parent_id
-                    alias_copy_inds[i+offset] = self._alias_database.token_to_uid(entity_id, tokens[i+1])
+                        relations[i+offset] = relation[:MAX_PARENTS]
+                        parent_ids[i+offset] = parent_id[:MAX_PARENTS]
+                    alias_copy_inds[i+offset] = self._alias_database.token_to_uid(raw_entity_id, tokens[i+1])
 
             # Convert to fields
+            fields['raw_entity_ids'] = TextField(
+                [Token(x) for x in raw_entity_ids],
+                token_indexers=self._raw_entity_indexers)
             fields['entity_ids'] = TextField(
                 [Token(x) for x in entity_ids],
                 token_indexers=self._entity_indexers)
@@ -239,7 +260,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 for sublist in relations])
             fields['parent_ids'] = ListField([
                 TextField([Token(x) for x in sublist],
-                          token_indexers=self._entity_indexers)
+                          token_indexers=self._raw_entity_indexers)
                 for sublist in parent_ids])
             fields['mention_type'] = SequentialArrayField(mention_type, dtype=np.int64)
             fields['alias_copy_inds'] = SequentialArrayField(alias_copy_inds, dtype=np.int64)

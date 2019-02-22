@@ -24,23 +24,29 @@ class KnowledgeGraphLookup:
         with open(knowledge_graph_path, 'rb') as f:
             knowledge_graph = pickle.load(f)
 
-        entity_idx_to_token = self._vocab.get_index_to_token_vocabulary('entity_ids')
+        entity_idx_to_token = self._vocab.get_index_to_token_vocabulary('raw_entity_ids')
         all_relations: List[torch.Tensor] = []
         all_tail_ids: List[torch.Tensor] = []
         for i in tqdm(range(len(entity_idx_to_token))):
             entity_id = entity_idx_to_token[i]
             try:
-                # Get the relation and tail id tokens
-                relation_tokens, tail_id_tokens = zip(*knowledge_graph[entity_id])
-                # Index tokens
-                relations = [self._vocab.get_token_index(t, 'relations') for t in relation_tokens]
-                tail_ids = [self._vocab.get_token_index(t, 'entity_ids') for t in tail_id_tokens]
-                # Convert to tensors
-                relations = torch.LongTensor(relations)
-                tail_ids = torch.LongTensor(tail_ids)
+                edges = knowledge_graph[entity_id]
             except KeyError:
-                relations = torch.LongTensor([])
-                tail_ids = torch.LongTensor([])
+                relations = None
+                tail_ids = None
+            else:
+                if edges == []:
+                    relations = None
+                    tail_ids = None
+                else:
+                    # Get the relation and tail id tokens
+                    relation_tokens, tail_id_tokens = zip(*knowledge_graph[entity_id])
+                    # Index tokens
+                    relations = [self._vocab.get_token_index(t, 'relations') for t in relation_tokens]
+                    tail_ids = [self._vocab.get_token_index(t, 'raw_entity_ids') for t in tail_id_tokens]
+                    # Convert to tensors
+                    relations = torch.LongTensor(relations)
+                    tail_ids = torch.LongTensor(tail_ids)
             all_relations.append(relations)
             all_tail_ids.append(tail_ids)
         return all_relations, all_tail_ids
@@ -70,7 +76,6 @@ class KnowledgeGraphLookup:
             A tensor of shape `(N, *, K)` containing the corresponding tail ids.
         """
         # Collect the information to load into the output tensors.
-        K = 0
         indices: List[Tuple[int, ...]] = []
         relations_list: List[torch.LongTensor] = []
         tail_ids_list: List[torch.LongTensor] = []
@@ -78,19 +83,11 @@ class KnowledgeGraphLookup:
             # Retrieve data
             relations = self._relations[parent_id]
             tail_ids = self._tail_ids[parent_id]
-            # Update output size
-            K = max(K, len(relations))
+            if relations is None:
+                continue
             # Add to lists
-            indices.append(inds)
-            relations_list.append(self._relations[parent_id])
-            tail_ids_list.append(self._tail_ids[parent_id])
+            indices.append(tuple(inds))
+            relations_list.append(relations.to(device=parent_ids.device))
+            tail_ids_list.append(tail_ids.to(device=parent_ids.device))
 
-        # Construct the output tensors
-        relations = parent_ids.new_zeros(size=(*parent_ids.shape, K))
-        tail_ids = parent_ids.new_zeros(size=(*parent_ids.shape, K))
-        for inds, _relations, _tail_ids in zip(indices, relations_list, tail_ids_list):
-            index = (*inds, slice(None, len(_relations)))
-            relations[index] = _relations
-            tail_ids[index] = _tail_ids
-
-        return relations, tail_ids
+        return indices, relations_list, tail_ids_list

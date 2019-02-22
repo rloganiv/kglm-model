@@ -53,6 +53,7 @@
                 "source",
                 "target",
                 "mention_type",
+                "raw_entity_ids",
                 "entity_ids",
                 "parent_ids",
                 "relations",

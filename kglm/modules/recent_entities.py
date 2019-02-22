@@ -70,10 +70,10 @@ class RecentEntities:
             else:
                 # Fill in mask
                 k = candidate_lookup[i][parent_id]
-                candidate_mask[i, j:j + self._cutoff, k] = 1
+                candidate_mask[i, j + 1:j + self._cutoff + 1, k] = 1
                 # Track how many sequence elements remain
-                remainder = sequence_length - (j + self._cutoff)
-                self._remaining[i][parent_id] = (j + self._cutoff) - sequence_length
+                remainder = sequence_length - (j + self._cutoff + 1)
+                self._remaining[i][parent_id] = (j + self._cutoff + 1) - sequence_length
 
         # Remove any ids for non-recent parents (e.g. those without remaining mask)
         for i, lookup in enumerate(self._remaining):
@@ -142,3 +142,4 @@ class RecentEntities:
             for i, should_reset in enumerate(reset):
                 if should_reset:
                     self._remaining[i] = {}
+

@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 
 
 AliasList = List[List[str]]
-MAX_ALIASES = 5
-MAX_TOKENS = 10
+MAX_ALIASES = 4
+MAX_TOKENS = 8
 
 
 def tokenize_to_string(text: str, tokenizer: Tokenizer) -> List[str]:
@@ -99,7 +99,7 @@ class AliasDatabase:
         if self.is_tensorized:
             return
 
-        entity_idx_to_token = vocab.get_index_to_token_vocabulary('entity_ids')
+        entity_idx_to_token = vocab.get_index_to_token_vocabulary('raw_entity_ids')
         for i in range(len(entity_idx_to_token)):  # pylint: disable=C0200
             entity = entity_idx_to_token[i]
             try:
