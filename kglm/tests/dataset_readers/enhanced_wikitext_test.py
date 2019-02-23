@@ -50,10 +50,13 @@ class TestEnhancedWikitextKglmReader:
 
         if mode == "discriminative":
             assert "target" not in instances[0]
+            assert "alias_copy_inds" not in instances[0]
         else:
+            # Test target tokens
             first_instance_target_tokens = [x.text for x in instances[0]['target'].tokens]
             assert first_instance_target_tokens[:5] == ['State', 'Route', '127', '(', 'SR']
             assert first_instance_target_tokens[-5:] == ['Elmer', 'Huntley', 'Bridge', '.', '@@END@@']
+
 
         # Test mention type
         # Non-mention tokens are not new entities
@@ -72,6 +75,15 @@ class TestEnhancedWikitextKglmReader:
         # Mentions are the WikiData id
         assert first_instance_entity_ids[16+offset:18+offset] == ['Q831285', 'Q831285']
 
+        if mode == "generative":
+            # Test that copy indices properly match tokens to their place in aliases
+            alias_database = instances[0]['metadata']['alias_database']
+            first_instance_alias_copy_inds = instances[0]['alias_copy_inds'].array
+            entity_id = first_instance_entity_ids[16+offset]
+            first_mention_token = first_instance_source_tokens[17]
+            uid = alias_database.token_to_uid(entity_id, first_mention_token)
+            assert uid == first_instance_alias_copy_inds[16+offset]
+
         # Test parent ids and relations
         first_instance_parent_ids = [[x.text for x in y.tokens] for y in instances[0]['parent_ids']]
         first_instance_relations = [[x.text for x in y.tokens] for y in instances[0]['relations']]
@@ -82,13 +94,6 @@ class TestEnhancedWikitextKglmReader:
         assert first_instance_parent_ids[27+offset] == ['Q831285', 'Q3046581']
         assert first_instance_relations[27+offset] == ['P131', 'P131']
 
-        # Test that copy indices properly match tokens to their place in aliases
-        alias_database = instances[0]['metadata']['alias_database']
-        first_instance_alias_copy_inds = instances[0]['alias_copy_inds'].array
-        entity_id = first_instance_entity_ids[16+offset]
-        first_mention_token = first_instance_source_tokens[17]
-        uid = alias_database.token_to_uid(entity_id, first_mention_token)
-        assert uid == first_instance_alias_copy_inds[16+offset]
 
         # Test that shortlist is being properly generated
         first_instance_shortlist = [x.text for x in instances[0]['shortlist'].tokens]

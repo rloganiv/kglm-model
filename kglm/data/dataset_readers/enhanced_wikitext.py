@@ -215,8 +215,10 @@ class EnhancedWikitextKglmReader(DatasetReader):
             relations = [[DEFAULT_PADDING_TOKEN]] * len(target)
             parent_ids = [[DEFAULT_PADDING_TOKEN]] * len(target)
             shortlist_inds = np.zeros(shape=(len(target),))
-            alias_copy_inds = np.zeros(shape=(len(target),))
             mention_type = np.zeros(shape=(len(target),))
+
+            if self._mode == "generative":
+                alias_copy_inds = np.zeros(shape=(len(target),))
 
             # Process annotations
             for annotation in data['annotations']:
@@ -254,7 +256,9 @@ class EnhancedWikitextKglmReader(DatasetReader):
                         mention_type[i+offset] = 2
                         relations[i+offset] = relation[:MAX_PARENTS]
                         parent_ids[i+offset] = parent_id[:MAX_PARENTS]
-                    alias_copy_inds[i+offset] = self._alias_database.token_to_uid(raw_entity_id, tokens[i+1])
+                    if self._mode == "generative":
+                        alias_copy_inds[i+offset] = self._alias_database.token_to_uid(raw_entity_id,
+                                                                                      tokens[i+1])
 
             # Convert to fields
             fields['raw_entity_ids'] = TextField(
@@ -272,11 +276,12 @@ class EnhancedWikitextKglmReader(DatasetReader):
                           token_indexers=self._relation_indexers)
                 for sublist in relations])
             fields['mention_type'] = SequentialArrayField(mention_type, dtype=np.int64)
-            fields['alias_copy_inds'] = SequentialArrayField(alias_copy_inds, dtype=np.int64)
             fields['shortlist'] = TextField(
                 [Token(x) for x in shortlist],
                 token_indexers=self._entity_indexers)
             fields['shortlist_inds'] = SequentialArrayField(shortlist_inds, dtype=np.int64)
+            if self._mode == "generative":
+                fields['alias_copy_inds'] = SequentialArrayField(alias_copy_inds, dtype=np.int64)
 
         fields['metadata'] = MetadataField(meta_fields)
 
