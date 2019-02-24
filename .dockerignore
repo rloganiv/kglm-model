@@ -1,11 +1,12 @@
-build_tools
+build_tools/
 codecov.yml
-data
+data/
 Dockerfile
-.git
+old-results/
+.git/
 .gitignore
 .mypy_cache
-.pytest_cache
+.pytest_cache/
 results
 scripts
 .travis.yml
