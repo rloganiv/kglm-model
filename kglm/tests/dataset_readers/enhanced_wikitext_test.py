@@ -14,7 +14,7 @@ class TestEnhancedWikitextEntityNLMReader:
         fixture_path = 'kglm/tests/fixtures/enhanced-wikitext.jsonl'
         instances = ensure_list(reader.read(fixture_path))
 
-        first_instance_tokens = [x.text for x in instances[0]["tokens"].tokens]
+        first_instance_tokens = [x.text for x in instances[0]["source"].tokens]
         assert first_instance_tokens[:5] == ['@@START@@', 'State', 'Route', '127', '(']
         assert first_instance_tokens[-5:] == ['Elmer', 'Huntley', 'Bridge', '.', '@@END@@']
         second_instance_entity_types = instances[1]["entity_types"].array

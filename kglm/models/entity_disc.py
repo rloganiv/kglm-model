@@ -16,7 +16,7 @@ from overrides import overrides
 import torch
 import torch.nn.functional as F
 
-from kglm.modules import DynamicEmbedding
+from kglm.modules import DynamicEmbedding,  WeightDrop
 from kglm.nn.util import sample_from_logp
 
 logger = logging.getLogger(__name__)
@@ -57,8 +57,9 @@ class EntityNLMDiscriminator(Model):
     def __init__(self,
                  vocab: Vocabulary,
                  text_field_embedder: TextFieldEmbedder,
-                 encoder: Seq2SeqEncoder,
                  embedding_dim: int,
+                 hidden_size: int,
+                 num_layers: int,
                  max_mention_length: int,
                  max_embeddings: int,
                  variational_dropout_rate: float = 0.0,
@@ -67,10 +68,26 @@ class EntityNLMDiscriminator(Model):
         super(EntityNLMDiscriminator, self).__init__(vocab)
 
         self._text_field_embedder = text_field_embedder
-        self._encoder = encoder
         self._embedding_dim = embedding_dim
+        self._hidden_size = hidden_size
+        self._num_layers = num_layers
         self._max_mention_length = max_mention_length
         self._max_embeddings = max_embeddings
+
+        #  Rnn Encoders.
+        rnns: List[torch.nn.Module] = []
+        for i in range(num_layers):
+            if i == 0:
+                input_size = embedding_dim
+            else:
+                input_size = hidden_size
+            if (i == num_layers - 1):
+                output_size = embedding_dim
+            else:
+                output_size = hidden_size
+            rnns.append(torch.nn.LSTM(input_size, output_size, batch_first=True))
+        rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=variational_dropout_rate) for rnn in rnns]
+        self.rnns = torch.nn.ModuleList(rnns)
 
         self._state: Optional[StateDict] = None
 
@@ -97,7 +114,7 @@ class EntityNLMDiscriminator(Model):
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
-                tokens: Dict[str, torch.Tensor],
+                source: Dict[str, torch.Tensor],
                 entity_types: Optional[torch.Tensor] = None,
                 entity_ids: Optional[torch.Tensor] = None,
                 mention_lengths: Optional[torch.Tensor] = None,
@@ -129,12 +146,11 @@ class EntityNLMDiscriminator(Model):
         loss : ``torch.Tensor``
             The combined loss.
         """
+        tokens = source  # MONKEY PATCH
         batch_size = tokens['tokens'].shape[0]
 
-        if reset:
-            self.reset_states(batch_size)
-        else:
-            self.detach_states()
+        if reset is not None:
+            self.reset_states(reset)
 
         if entity_types is not None:
             output_dict = self._forward_loop(tokens=tokens,
@@ -143,6 +159,8 @@ class EntityNLMDiscriminator(Model):
                                              mention_lengths=mention_lengths)
         else:
             output_dict = {}
+
+        self.detach_states()
 
         return output_dict
 
@@ -180,13 +198,28 @@ class EntityNLMDiscriminator(Model):
         # We will use a standard iterator during evaluation instead of a split iterator. Otherwise
         # it will be a pain to handle generating multiple samples for a sequence since there's no
         # way to get back to the first split.
-        self.reset_states(batch_size)
+        self.reset_states(tokens['tokens'].ones_like(batch_size, dtype=torch.uint8))
 
         # Embed tokens and get RNN hidden state.
         mask = get_text_field_mask(tokens)
         embeddings = self._text_field_embedder(tokens)
         hidden = self._encoder(embeddings, mask)
-        prev_mention_lengths = tokens['tokens'].new_ones(batch_size)
+        current_input = embeddings
+        hidden_list = []
+        for layer, rnn in enumerate(self.rnns):
+            # Retrieve previous hidden state for layer.
+            if self._state is not None:
+                prev_hidden = self._state['layer_%i' % layer]
+            else:
+                prev_hidden = None
+            # Forward-pass.
+            output, hidden = rnn(current_input, prev_hidden)
+            output = output.contiguous()
+            # Update hidden state for layer.
+            hidden = tuple(h.detach() for h in hidden)
+            hidden_list.append(hidden)
+            current_input = output
+        hidden = current_input
 
         # Initialize outputs
         logp = hidden.new_zeros(batch_size) # Track total logp for **each** generated sample
@@ -320,7 +353,24 @@ class EntityNLMDiscriminator(Model):
         mask = get_text_field_mask(tokens)
         embeddings = self._text_field_embedder(tokens)
         embeddings = self._variational_dropout(embeddings)
-        hidden = self._encoder(embeddings, mask)
+        current_input = embeddings
+        hidden_list = []
+        for layer, rnn in enumerate(self.rnns):
+            # Retrieve previous hidden state for layer.
+            if self._state is not None:
+                prev_hidden = self._state['layer_%i' % layer]
+            else:
+                prev_hidden = None
+            # Forward-pass.
+            output, hidden = rnn(current_input, prev_hidden)
+            output = output.contiguous()
+            # Update hidden state for layer.
+            hidden = tuple(h.detach() for h in hidden)
+            hidden_list.append(hidden)
+            current_input = output
+        hidden = current_input
+
+        self._state = {'layer_%i' % i: h for i, h in enumerate(hidden_list)}
 
         # Initialize losses
         entity_type_loss = torch.tensor(0.0, requires_grad=True, device=hidden.device)
@@ -406,17 +456,25 @@ class EntityNLMDiscriminator(Model):
         }
 
         # Update state
-        self._state = {
-                'prev_mention_lengths': prev_mention_lengths.detach()
-        }
+        # Update the model state
+        self._state['prev_mention_lengths'] = mention_lengths[:, -1].detach()
 
         return output_dict
 
-    def reset_states(self, batch_size: int) -> None:
+    def reset_states(self, reset: torch.ByteTensor) -> None:
         """Resets the model's internals. Should be called at the start of a new batch."""
-        self._encoder.reset_states()
-        self._dynamic_embeddings.reset_states(batch_size)
-        self._state = None
+        if reset.any() and (self._state is not None):
+            # Zero out any previous elements
+            self._state['prev_mention_lengths'][reset].zero_()
+            # Zero out the hidden state
+            for layer in range(self._num_layers):
+                h, c = self._state['layer_%i' % layer]
+                h[:, reset, :] = torch.zeros_like(h[:, reset, :])
+                c[:, reset, :] = torch.zeros_like(c[:, reset, :])
+                self._state['layer_%i' % layer] = (h, c)
+
+        # Reset the dynamic embeddings
+        self._dynamic_embeddings.reset_states(reset)
 
     def detach_states(self):
         """Detaches the model's state to enforce truncated backpropagation."""
@@ -429,3 +487,4 @@ class EntityNLMDiscriminator(Model):
                 'eid_acc': self._entity_id_accuracy.get_metric(reset),
                 'ml_acc': self._mention_length_accuracy.get_metric(reset)
         }
+

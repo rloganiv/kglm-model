@@ -27,7 +27,9 @@ class TestDynamicEmbedding(TestCase):
         self.assertIsNone(dynamic_embedding.last_seen)
 
         batch_size = 2
-        dynamic_embedding.reset_states(batch_size)
+
+        reset = torch.ones(batch_size, dtype=torch.uint8)
+        dynamic_embedding.reset_states(reset)
 
         self.assertIsNotNone(dynamic_embedding.embeddings)
         self.assertIsNotNone(dynamic_embedding.num_embeddings)
@@ -45,7 +47,8 @@ class TestDynamicEmbedding(TestCase):
         batch_size = 2
 
         dynamic_embedding = DynamicEmbedding(embedding_dim, max_embeddings)
-        dynamic_embedding.reset_states(batch_size)
+        reset = torch.ones(batch_size, dtype=torch.uint8)
+        dynamic_embedding.reset_states(reset)
 
         timestep = 1
         mask = torch.tensor([0, 1], dtype=torch.uint8)  # pylint: disable=E1102
@@ -71,7 +74,8 @@ class TestDynamicEmbedding(TestCase):
         batch_size = 1
 
         dynamic_embedding = DynamicEmbedding(embedding_dim, max_embeddings)
-        dynamic_embedding.reset_states(batch_size)
+        reset = torch.ones(batch_size, dtype=torch.uint8)
+        dynamic_embedding.reset_states(reset)
 
         hidden = torch.randn((batch_size, embedding_dim), requires_grad=True)
         update_indices = torch.tensor([0])  # pylint: disable=E1102

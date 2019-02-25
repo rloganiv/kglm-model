@@ -81,7 +81,7 @@ class EnhancedWikitextEntityNlmReader(DatasetReader):
         tokens = _flatten(data['tokens'])
         tokens = ['@@START@@', *tokens, '@@END@@']
         tokens = [Token(x) for x in tokens]
-        fields = {'tokens': TextField(tokens, self._token_indexers)}
+        fields = {'source': TextField(tokens, self._token_indexers)}  # MONKEY PATCH
 
         # If annotations are provided, process them into arrays.
         if 'annotations' in data:
