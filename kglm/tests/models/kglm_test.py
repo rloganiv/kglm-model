@@ -40,6 +40,16 @@ class KglmDiscTest(KglmModelTestCase):
     def test_model_can_train_save_and_load(self):
         self.ensure_model_can_train_save_and_load(self.param_file)
 
+    def test_sample(self):
+        params = Params.from_file(self.param_file)
+        iterator = DataIterator.from_params(params['iterator'])
+        iterator.index_with(self.model.vocab)
+        batch, _ = next(iterator(self.instances, shuffle=False))
+        self.model.sample(source=batch['source'],
+                          reset=batch['reset'],
+                          shortlist=batch['shortlist'])
+
+
 class KglmDiscNoShortlistTest(KglmModelTestCase):
 
     def setUp(self):

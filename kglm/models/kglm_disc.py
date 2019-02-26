@@ -14,9 +14,9 @@ import torch
 import torch.nn.functional as F
 
 from kglm.data import AliasDatabase
-from kglm.modules import (
-    embedded_dropout, LockedDropout, WeightDrop, KnowledgeGraphLookup, RecentEntities)
-from kglm.nn.util import parallel_sample
+from kglm.modules import (embedded_dropout, LockedDropout, WeightDrop, KnowledgeGraphLookup,
+    RecentEntities)
+from kglm.nn.util import nested_enumerate, parallel_sample
 from kglm.training.metrics import Ppl
 
 logger = logging.getLogger(__name__)
@@ -158,47 +158,110 @@ class KglmDisc(Model):
         # Compute entity logits
         new_entity_logits = self._new_entity_logits(encoded_head + encoded_relation, shortlist)
         if self._use_shortlist:
+            # If using shortlist, then samples are indexed w.r.t the shortlist and entity_ids must be looked up
             shortlist_mask = get_text_field_mask(shortlist)
+            shortlist = shortlist['entity_ids']
             new_entity_probs = masked_softmax(new_entity_logits, shortlist_mask)
+            shortlist_inds = parallel_sample(new_entity_probs)
+            new_entity_samples = shortlist.gather(1, shortlist_inds)
         else:
+            # If not using shortlist, then samples are indexed w.r.t to the global vocab
             new_entity_probs = F.softmax(new_entity_logits, dim=-1)
-        new_entity_samples = parallel_sample(new_entity_probs)
+            new_entity_samples = parallel_sample(new_entity_probs)
+            shortlist_inds = None
 
         # Start filling in the entity ids
         entity_ids = torch.zeros_like(source)
         entity_ids[mention_type.eq(1)] = new_entity_samples[mention_type.eq(1)]
 
+        # ...UGH... we also need the raw ids - remapping time
+        raw_entity_ids = torch.zeros_like(source)
+        for *index, entity_id in nested_enumerate(entity_ids.tolist()):
+            token = self.vocab.get_token_from_index(entity_id, 'entity_ids')
+            raw_entity_id = self.vocab.get_token_index(token, 'raw_entity_ids')
+            raw_entity_ids[tuple(index)] = raw_entity_id
+
         # Derived mentions need to be computed sequentially.
+        parent_ids = torch.zeros_like(source).unsqueeze(-1)
+        is_derived = mention_type.eq(2)
+
         sequence_length = source.shape[1]
         for i in range(sequence_length):
-            import pdb; pdb.set_trace()
+
 
             ## SAMPLE PARENTS ##
 
             # Update recent entities with **current** entity only
             current_entity_id = entity_ids[:, i].unsqueeze(1)
             candidate_ids, candidate_mask = self._recent_entities(current_entity_id)
+
+            # If no mentions are derived, there is no point continuing after entities have been updated.
+            if not is_derived[:, i].any():
+                continue
+
+            # Otherwise we proceed
             candidate_embeddings = self._entity_embedder(candidate_ids)
 
             # Compute logits w.r.t **current** hidden state only
-            current_encoding = encoded_head[:, i].unsqueeze(1)
-            selection_logits = torch.bmm(current_encoding, candidate_embeddings.transpose(1, 2))
+            current_head_encoding = encoded_head[:, i].unsqueeze(1)
+            selection_logits = torch.bmm(current_head_encoding, candidate_embeddings.transpose(1, 2))
             selection_probs = masked_softmax(selection_logits, candidate_mask)
 
             # Only sample if the is at least one viable candidate (e.g. if a sampling distribution
             # has no probability mass we cannot sample from it). Return zero as the parent for
             # non-viable distributions.
             viable_candidate = candidate_mask.any(-1).squeeze()
-            parent_ids = torch.zeros_like(current_entity_id)
+            _parent_ids = torch.zeros_like(current_entity_id)
             if viable_candidate.any():
                 viable_candidate_ids = candidate_ids[viable_candidate]
                 viable_parent_samples = parallel_sample(selection_probs[viable_candidate])
                 viable_parent_ids = viable_candidate_ids.gather(1, viable_parent_samples)
-                parent_ids[viable_candidate] = viable_parent_ids
+                _parent_ids[viable_candidate] = viable_parent_ids
+
+            parent_ids[is_derived[:, i], i] = _parent_ids[is_derived[:, i]]  # TODO: Double-check
 
             ## SAMPLE RELATIONS ##
 
-            # NOTE: WATCH OUT FOR RAW_ENTITY_IDS! WILL NEED TO REMAP!
+            # Lookup sampled parent ids in the knowledge graph
+            indices, parent_ids_list, relations_list, tail_ids_list = self._knowledge_graph_lookup(_parent_ids)
+            relation_embeddings = [self._relation_embedder(r) for r in relations_list]
+
+            # Sample tail ids
+            current_relation_encoding = encoded_relation[:, i].unsqueeze(1)
+            _raw_tail_ids = torch.zeros_like(_parent_ids).squeeze()
+            _tail_ids = torch.zeros_like(_parent_ids).squeeze()
+            for index, relation_embedding, tail_id_lookup in zip(indices, relation_embeddings, tail_ids_list):
+                # Compute the score for each relation w.r.t the current encoding. NOTE: In the loss
+                # code index has a slice. We don't need that here since there is always a
+                # **single** parent.
+                logits = torch.mv(relation_embedding, current_relation_encoding[index])
+                # Convert to probability
+                tail_probs = F.softmax(logits, dim=-1)
+                # Sample and map back to raw id
+                tail_sample = torch.multinomial(tail_probs, 1)
+                raw_tail_id = tail_id_lookup[tail_sample]
+                # Convert raw id to id
+                tail_id_string = self.vocab.get_token_from_index(raw_tail_id.item(), 'raw_entity_ids')
+                tail_id = self.vocab.get_token_index(tail_id_string, 'entity_ids')
+
+                _raw_tail_ids[index[:-1]] = raw_tail_id
+                _tail_ids[index[:-1]] = tail_id
+
+            raw_entity_ids[is_derived[:, i], i] = _raw_tail_ids[is_derived[:, i]]  # TODO: Double-check
+            entity_ids[is_derived[:, i], i] = _tail_ids[is_derived[:, i]]  # TODO: Double-check
+
+            self._recent_entities.insert(_tail_ids, is_derived[:,i])
+
+        output = {
+            'source': source,
+            'mention_type': mention_type,
+            'raw_entity_ids': raw_entity_ids,
+            'entity_ids': entity_ids,
+            'parent_ids': parent_ids,
+            'relations': None,  # We aren't using them - eventually should remove entirely
+            'shortlist': shortlist,
+            'shortlist_inds': shortlist_inds
+        }
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
@@ -553,11 +616,11 @@ class KglmDisc(Model):
             'kg': self._avg_knowledge_graph_entity_loss.get_metric(reset),
         }
         # if not self.training:
-        p, r, f  = self._new_mention_f1.get_metric(reset)
+        p, r, f = self._new_mention_f1.get_metric(reset)
         out['new_p'] = p
         out['new_r'] = r
         out['new_f1'] = f
-        p, r, f  = self._kg_mention_f1.get_metric(reset)
+        p, r, f = self._kg_mention_f1.get_metric(reset)
         out['kg_p'] = p
         out['kg_r'] = r
         out['kg_f1'] = f
@@ -566,4 +629,3 @@ class KglmDisc(Model):
         out['parent_ppl'] = self._parent_ppl.get_metric(reset)
         out['relation_ppl'] = self._relation_ppl.get_metric(reset)
         return out
-

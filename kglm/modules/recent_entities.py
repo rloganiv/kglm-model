@@ -143,3 +143,12 @@ class RecentEntities:
                 if should_reset:
                     self._remaining[i] = {}
 
+    # TODO: Check
+    def insert(self, values: torch.LongTensor, mask: torch.ByteTensor) -> None:
+        """
+        To deal with case in sampling where tail ids are only known after __call__
+        """
+        batch_size = values.shape[0]
+        for i in range(batch_size):
+            if mask[i]:
+                self._remaining[i][values[i].item()] = self._cutoff + 1
