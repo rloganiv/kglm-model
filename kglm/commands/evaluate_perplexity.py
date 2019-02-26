@@ -56,22 +56,24 @@ class EvaluatePerplexity(Subcommand):
                                help='If non-empty, name of metric used to weight the loss on a per-batch basis.')
         subparser.set_defaults(func=evaluate_from_args)
 
+        subparser.add_argument('--num-samples',
+                               type=int,
+                               default=100,
+                               help='Number of importance samples to draw.')
+        subparser.set_defaults(func=evaluate_from_args)
+
         return subparser
 
 
 def evaluate_perplexity(model: Model,
                         sampler: Model,
+                        num_samples: int,
                         instances: Iterator[Instance],
                         data_iterator: DataIterator,
                         cuda_device: int) -> Dict[str, Any]:
     check_for_gpu(cuda_device)
 
-    num_samples = 100 # TODO: Make this something you can specify
-
     with torch.no_grad():
-        model.eval()
-        sampler.eval()
-
         iterator = data_iterator(instances, num_epochs=1, shuffle=False)
         logger.info('Iterating over dataset')
         generator_tqdm = Tqdm.tqdm(iterator, total=data_iterator.get_num_batches(instances))
@@ -79,29 +81,38 @@ def evaluate_perplexity(model: Model,
         total_cross_entropy = 0.0
         batch_count = 0
 
-        for batch in generator_tqdm:
-            batch_count += 1
-            batch = util.move_to_device(batch, cuda_device)
+        for _ in range(num_samples):
 
-            # Draw a sample
-            sampler_output = sampler.sample(batch['tokens'])
-            sample_logp = sampler_output['logp']
-            sample = sampler_output['sample']
-            sample['reset'] = True
-            sample['tokens'] = batch['tokens']  # Add tokens to batch
+            for batch in generator_tqdm:
+                import pdb; pdb.set_trace()
 
-            # logp of the model is the loss; we multiply by sequence length to go from token-level
-            # to sequence-level probabilities.
-            model_logp = model(**sample).get('logp')
-            log_summands = model_logp - sample_logp
+                # Get an instance (batch size is 1!)
+                batch_count += 1
+                batch = util.move_to_device(batch, cuda_device)
 
-            # This is the log probability of the entire sentence
-            logp = torch.logsumexp(log_summands, dim=0) - math.log(num_samples)
+                # Be super careful about resets
+                model.eval()
+                sampler.eval()
+                batch['reset']
 
-            # We care about per-token cross entropy
-            per_word_cross_entropy = -logp / sequence_length
-            print(math.exp(per_word_cross_entropy))
-            total_cross_entropy += per_word_cross_entropy
+                # Draw a sample
+                sampler_output = sampler.sample(**batch)
+                sample_logp = sampler_output['logp']
+                sample = sampler_output['sample']
+                sample['tokens'] = batch['tokens']  # Add tokens to batch
+
+                # logp of the model is the loss; we multiply by sequence length to go from token-level
+                # to sequence-level probabilities.
+                model_logp = model(**sample).get('logp')
+                log_summands = model_logp - sample_logp
+
+                # This is the log probability of the entire sentence
+                logp = torch.logsumexp(log_summands, dim=0)
+
+                # We care about per-token cross entropy
+                per_word_cross_entropy = -logp / sequence_length
+                print(math.exp(per_word_cross_entropy))
+                total_cross_entropy += per_word_cross_entropy
 
         # Aggregate metrics
         avg_per_word_cross_entropy = total_cross_entropy / batch_count
@@ -129,7 +140,7 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     sampler = sampler_archive.model
     sampler.eval()
 
-    # Load the evaluation data
+    # Load the evaluation data. NOTE: We are using the model's reader!
     validation_dataset_reader_params = config.pop('validation_dataset_reader', None)
     if validation_dataset_reader_params is not None:
         dataset_reader = DatasetReader.from_params(validation_dataset_reader_params)
@@ -143,7 +154,7 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     # generate samples for entire sequences.
     iterator = BasicIterator(batch_size=1)
     iterator.index_with(model.vocab)
-    metrics = evaluate_perplexity(model, sampler, instances, iterator, args.cuda_device)
+    metrics = evaluate_perplexity(model, sampler, args.num_samples, instances, iterator, args.cuda_device)
 
     logger.info('Finished evaluating.')
     logger.info('Metrics:')

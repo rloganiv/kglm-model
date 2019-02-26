@@ -55,7 +55,6 @@ class KglmDiscTest(KglmModelTestCase):
         self.model.sample(**batch)
 
 
-
 class KglmDiscNoShortlistTest(KglmModelTestCase):
 
     def setUp(self):
