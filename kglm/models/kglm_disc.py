@@ -131,7 +131,7 @@ class KglmDisc(Model):
     def sample(self,
                source: Dict[str, torch.Tensor],
                reset: torch.Tensor,
-               shortlist: Dict[str, torch.Tensor] = None):
+               shortlist: Dict[str, torch.Tensor] = None) -> Dict[str, Any]:
 
         # Reset the model if needed
         if reset.any() and (self._state is not None):
@@ -142,6 +142,7 @@ class KglmDisc(Model):
                 self._state['layer_%i' % layer] = (h, c)
         self._recent_entities.reset(reset)
 
+        logp = 0.0
         mask = get_text_field_mask(source)
         source = source['tokens']
 
@@ -154,8 +155,10 @@ class KglmDisc(Model):
         mention_logits = self._fc_mention_type(encoded_token)
         mention_probs = F.softmax(mention_logits, dim=-1)
         mention_type = parallel_sample(mention_probs)
+        mention_logp = mention_probs.gather(-1, mention_type.unsqueeze(-1)).log().sum()
 
         # Compute entity logits
+        new_entity_mask = mention_type.eq(1)
         new_entity_logits = self._new_entity_logits(encoded_head + encoded_relation, shortlist)
         if self._use_shortlist:
             # If using shortlist, then samples are indexed w.r.t the shortlist and entity_ids must be looked up
@@ -163,16 +166,19 @@ class KglmDisc(Model):
             shortlist = shortlist['entity_ids']
             new_entity_probs = masked_softmax(new_entity_logits, shortlist_mask)
             shortlist_inds = parallel_sample(new_entity_probs)
+            _new_entity_logp = new_entity_probs.gather(-1, shortlist_inds.unsqueeze(-1)).log()
             new_entity_samples = shortlist.gather(1, shortlist_inds)
         else:
             # If not using shortlist, then samples are indexed w.r.t to the global vocab
             new_entity_probs = F.softmax(new_entity_logits, dim=-1)
             new_entity_samples = parallel_sample(new_entity_probs)
+            _new_entity_logp = new_entity_probs.gather(-1, new_entity_samples.unsqueeze(-1)).log()
             shortlist_inds = None
+        new_entity_logp = _new_entity_logp[new_entity_mask].sum()
 
         # Start filling in the entity ids
         entity_ids = torch.zeros_like(source)
-        entity_ids[mention_type.eq(1)] = new_entity_samples[mention_type.eq(1)]
+        entity_ids[new_entity_mask] = new_entity_samples[new_entity_mask]
 
         # ...UGH... we also need the raw ids - remapping time
         raw_entity_ids = torch.zeros_like(source)
@@ -183,11 +189,13 @@ class KglmDisc(Model):
 
         # Derived mentions need to be computed sequentially.
         parent_ids = torch.zeros_like(source).unsqueeze(-1)
-        is_derived = mention_type.eq(2)
+        derived_entity_mask = mention_type.eq(2)
+        derived_entity_logp = 0.0
 
         sequence_length = source.shape[1]
         for i in range(sequence_length):
 
+            current_mask = derived_entity_mask[:, i]
 
             ## SAMPLE PARENTS ##
 
@@ -196,7 +204,7 @@ class KglmDisc(Model):
             candidate_ids, candidate_mask = self._recent_entities(current_entity_id)
 
             # If no mentions are derived, there is no point continuing after entities have been updated.
-            if not is_derived[:, i].any():
+            if not current_mask.any():
                 continue
 
             # Otherwise we proceed
@@ -210,15 +218,20 @@ class KglmDisc(Model):
             # Only sample if the is at least one viable candidate (e.g. if a sampling distribution
             # has no probability mass we cannot sample from it). Return zero as the parent for
             # non-viable distributions.
-            viable_candidate = candidate_mask.any(-1).squeeze()
+            viable_candidate_mask = candidate_mask.any(-1).squeeze()
             _parent_ids = torch.zeros_like(current_entity_id)
-            if viable_candidate.any():
-                viable_candidate_ids = candidate_ids[viable_candidate]
-                viable_parent_samples = parallel_sample(selection_probs[viable_candidate])
+            parent_logp = torch.zeros_like(current_entity_id, dtype=torch.float32)
+            if viable_candidate_mask.any():
+                viable_candidate_ids = candidate_ids[viable_candidate_mask]
+                viable_candidate_probs = selection_probs[viable_candidate_mask]
+                viable_parent_samples = parallel_sample(viable_candidate_probs)
+                viable_logp = viable_candidate_probs.gather(-1, viable_parent_samples.unsqueeze(-1)).log()
                 viable_parent_ids = viable_candidate_ids.gather(1, viable_parent_samples)
-                _parent_ids[viable_candidate] = viable_parent_ids
+                _parent_ids[viable_candidate_mask] = viable_parent_ids
+                parent_logp[viable_candidate_mask] = viable_logp.squeeze(-1)
 
-            parent_ids[is_derived[:, i], i] = _parent_ids[is_derived[:, i]]  # TODO: Double-check
+            parent_ids[current_mask, i] = _parent_ids[current_mask]  # TODO: Double-check
+            derived_entity_logp += parent_logp[current_mask].sum()
 
             ## SAMPLE RELATIONS ##
 
@@ -237,8 +250,13 @@ class KglmDisc(Model):
                 logits = torch.mv(relation_embedding, current_relation_encoding[index])
                 # Convert to probability
                 tail_probs = F.softmax(logits, dim=-1)
-                # Sample and map back to raw id
+                # Sample
                 tail_sample = torch.multinomial(tail_probs, 1)
+                # Get logp. Ignoring the current_mask here is **super** dodgy, but since we forced
+                # null parents to zero we shouldn't be accumulating probabilities for unused predictions.
+                tail_logp = tail_probs.gather(-1, tail_sample).log()
+                derived_entity_logp += tail_logp.sum()  # Sum is redundant, just need it to make logp a scalar
+                # Map back to raw id
                 raw_tail_id = tail_id_lookup[tail_sample]
                 # Convert raw id to id
                 tail_id_string = self.vocab.get_token_from_index(raw_tail_id.item(), 'raw_entity_ids')
@@ -247,12 +265,12 @@ class KglmDisc(Model):
                 _raw_tail_ids[index[:-1]] = raw_tail_id
                 _tail_ids[index[:-1]] = tail_id
 
-            raw_entity_ids[is_derived[:, i], i] = _raw_tail_ids[is_derived[:, i]]  # TODO: Double-check
-            entity_ids[is_derived[:, i], i] = _tail_ids[is_derived[:, i]]  # TODO: Double-check
+            raw_entity_ids[derived_entity_mask[:, i], i] = _raw_tail_ids[derived_entity_mask[:, i]]  # TODO: Double-check
+            entity_ids[derived_entity_mask[:, i], i] = _tail_ids[derived_entity_mask[:, i]]  # TODO: Double-check
 
-            self._recent_entities.insert(_tail_ids, is_derived[:,i])
+            self._recent_entities.insert(_tail_ids, derived_entity_mask[:, i])
 
-        output = {
+        sample = {
             'source': source,
             'mention_type': mention_type,
             'raw_entity_ids': raw_entity_ids,
@@ -262,6 +280,8 @@ class KglmDisc(Model):
             'shortlist': shortlist,
             'shortlist_inds': shortlist_inds
         }
+        logp = mention_logp + new_entity_logp + derived_entity_logp
+        return {'sample': sample, 'logp': logp}
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
