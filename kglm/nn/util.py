@@ -32,6 +32,10 @@ def log_torch_garbage(verbose=False):
         obj_type, is_cuda = key
         logger.debug('type: %s, is_cuda: %s, count: %i', obj_type, is_cuda, count)
 
+def parallel_sample(probs: torch.FloatTensor) -> torch.LongTensor:
+    *output_shape, n_categories = probs.shape
+    samples = torch.multinomial(probs.view(-1, n_categories), num_samples=1, replacement=True)
+    return samples.view(*output_shape)
 
 def sample_from_logp(logp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """

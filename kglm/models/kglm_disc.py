@@ -6,8 +6,8 @@ from allennlp.data.vocabulary import Vocabulary, DEFAULT_OOV_TOKEN
 from allennlp.modules import TextFieldEmbedder, Seq2SeqEncoder
 from allennlp.models import Model
 from allennlp.nn import InitializerApplicator
-from allennlp.nn.util import (
-    get_text_field_mask, masked_log_softmax, sequence_cross_entropy_with_logits)
+from allennlp.nn.util import (get_text_field_mask, masked_log_softmax, masked_softmax,
+    sequence_cross_entropy_with_logits)
 from allennlp.training.metrics import Average, CategoricalAccuracy, F1Measure, SequenceAccuracy
 from overrides import overrides
 import torch
@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from kglm.data import AliasDatabase
 from kglm.modules import (
     embedded_dropout, LockedDropout, WeightDrop, KnowledgeGraphLookup, RecentEntities)
+from kglm.nn.util import parallel_sample
 from kglm.training.metrics import Ppl
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,78 @@ class KglmDisc(Model):
 
         initializer(self)
 
+    def sample(self,
+               source: Dict[str, torch.Tensor],
+               reset: torch.Tensor,
+               shortlist: Dict[str, torch.Tensor] = None):
+
+        # Reset the model if needed
+        if reset.any() and (self._state is not None):
+            for layer in range(self._num_layers):
+                h, c = self._state['layer_%i' % layer]
+                h[:, reset, :] = torch.zeros_like(h[:, reset, :])
+                c[:, reset, :] = torch.zeros_like(c[:, reset, :])
+                self._state['layer_%i' % layer] = (h, c)
+        self._recent_entities.reset(reset)
+
+        mask = get_text_field_mask(source)
+        source = source['tokens']
+
+        # Encode source
+        encoded, *_ = self._encode_source(source)
+        splits = [self.token_embedding_dim] + [self.entity_embedding_dim] * 2
+        encoded_token, encoded_head, encoded_relation = encoded.split(splits, dim=-1)
+
+        # Compute new mention logits
+        mention_logits = self._fc_mention_type(encoded_token)
+        mention_probs = F.softmax(mention_logits, dim=-1)
+        mention_type = parallel_sample(mention_probs)
+
+        # Compute entity logits
+        new_entity_logits = self._new_entity_logits(encoded_head + encoded_relation, shortlist)
+        if self._use_shortlist:
+            shortlist_mask = get_text_field_mask(shortlist)
+            new_entity_probs = masked_softmax(new_entity_logits, shortlist_mask)
+        else:
+            new_entity_probs = F.softmax(new_entity_logits, dim=-1)
+        new_entity_samples = parallel_sample(new_entity_probs)
+
+        # Start filling in the entity ids
+        entity_ids = torch.zeros_like(source)
+        entity_ids[mention_type.eq(1)] = new_entity_samples[mention_type.eq(1)]
+
+        # Derived mentions need to be computed sequentially.
+        sequence_length = source.shape[1]
+        for i in range(sequence_length):
+            import pdb; pdb.set_trace()
+
+            ## SAMPLE PARENTS ##
+
+            # Update recent entities with **current** entity only
+            current_entity_id = entity_ids[:, i].unsqueeze(1)
+            candidate_ids, candidate_mask = self._recent_entities(current_entity_id)
+            candidate_embeddings = self._entity_embedder(candidate_ids)
+
+            # Compute logits w.r.t **current** hidden state only
+            current_encoding = encoded_head[:, i].unsqueeze(1)
+            selection_logits = torch.bmm(current_encoding, candidate_embeddings.transpose(1, 2))
+            selection_probs = masked_softmax(selection_logits, candidate_mask)
+
+            # Only sample if the is at least one viable candidate (e.g. if a sampling distribution
+            # has no probability mass we cannot sample from it). Return zero as the parent for
+            # non-viable distributions.
+            viable_candidate = candidate_mask.any(-1).squeeze()
+            parent_ids = torch.zeros_like(current_entity_id)
+            if viable_candidate.any():
+                viable_candidate_ids = candidate_ids[viable_candidate]
+                viable_parent_samples = parallel_sample(selection_probs[viable_candidate])
+                viable_parent_ids = viable_candidate_ids.gather(1, viable_parent_samples)
+                parent_ids[viable_candidate] = viable_parent_ids
+
+            ## SAMPLE RELATIONS ##
+
+            # NOTE: WATCH OUT FOR RAW_ENTITY_IDS! WILL NEED TO REMAP!
+
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
                 source: Dict[str, torch.Tensor],
@@ -227,6 +300,24 @@ class KglmDisc(Model):
 
         return mention_type_loss
 
+
+    def _new_entity_logits(self,
+                           encoded: torch.Tensor,
+                           shortlist: torch.Tensor) -> torch.Tensor:
+        if self._use_shortlist:
+            # Embed the shortlist entries
+            shortlist_embeddings = embedded_dropout(
+                embed=self._entity_embedder,
+                words=shortlist['entity_ids'],
+                dropout=self._dropoute if self.training else 0)
+            # Compute logits using inner product between the predicted entity embedding and the
+            # embeddings of entities in the shortlist
+            encodings = self._locked_dropout(encoded, self._dropout)
+            logits = torch.bmm(encodings, shortlist_embeddings.transpose(1, 2))
+        else:
+            logits = self._fc_new_entity(encoded)
+        return logits
+
     def _new_entity_loss(self,
                          encoded: torch.Tensor,
                          target_inds: torch.Tensor,
@@ -238,55 +329,27 @@ class KglmDisc(Model):
         target_inds : ``torch.Tensor``
             Either the shortlist inds if using shortlist, otherwise the target entity ids.
         """
+        logits = self._new_entity_logits(encoded, shortlist)
         if self._use_shortlist:
-
-            # First we embed the shortlist entries
-            shortlist_mask = get_text_field_mask(shortlist)
-            shortlist_embeddings = embedded_dropout(
-                embed=self._entity_embedder,
-                words=shortlist['entity_ids'],
-                dropout=self._dropoute if self.training else 0)
-
-            # Logits are computed using the inner product that between the predicted entity embedding
-            # and the embeddings of entities in the shortlist
-            encodings = self._locked_dropout(encoded, self._dropout)
-            logits = torch.bmm(encodings, shortlist_embeddings.transpose(1, 2))
-
             # Take masked softmax to get log probabilties and gather the targets.
+            shortlist_mask = get_text_field_mask(shortlist)
             log_probs = masked_log_softmax(logits, shortlist_mask)
-            target_log_probs = torch.gather(log_probs, -1, target_inds.unsqueeze(-1)).squeeze(-1)
-
-            # If not generating a new mention, the action is deterministic - so the loss is 0 for these tokens.
-            mask = ~target_inds.eq(0)
-            target_log_probs[~mask] = 0
-
-            # if not self.training:
-            self._new_entity_accuracy(predictions=log_probs[mask],
-                                      gold_labels=target_inds[mask])
-            self._new_entity_accuracy20(predictions=log_probs[mask],
-                                        gold_labels=target_inds[mask])
-
-            # Return the token-wise average loss
-            return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
-
         else:
-            logits = self._fc_new_entity(encoded)
             log_probs = F.log_softmax(logits, dim=-1)
-
             num_categories = log_probs.shape[-1]
-            flat_log_probs = log_probs.view(-1, num_categories)
-            flat_target_inds = target_inds.view(-1)
-            target_log_probs = torch.gather(flat_log_probs, -1, flat_target_inds.unsqueeze(-1)).squeeze(-1)
+            log_probs = log_probs.view(-1, num_categories)
+            target_inds = target_inds.view(-1)
+        target_log_probs = torch.gather(log_probs, -1, target_inds.unsqueeze(-1)).squeeze(-1)
 
-            mask = ~flat_target_inds.eq(0)
-            target_log_probs[~mask] = 0
+        mask = ~target_inds.eq(0)
+        target_log_probs[~mask] = 0
 
-            self._new_entity_accuracy(predictions=flat_log_probs[mask],
-                                      gold_labels=flat_target_inds[mask])
-            self._new_entity_accuracy20(predictions=flat_log_probs[mask],
-                                        gold_labels=flat_target_inds[mask])
+        self._new_entity_accuracy(predictions=log_probs[mask],
+                                  gold_labels=target_inds[mask])
+        self._new_entity_accuracy20(predictions=log_probs[mask],
+                                    gold_labels=target_inds[mask])
 
-            return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
+        return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
 
     def _parent_log_probs(self,
                           encoded_head: torch.Tensor,
