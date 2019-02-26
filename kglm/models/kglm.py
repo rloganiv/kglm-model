@@ -638,8 +638,9 @@ class Kglm(Model):
                                       entity_ids.gt(0))
         self._avg_vocab_loss(float(vocab_loss))
 
-        # Compute total loss
+        # Compute total loss. Also compute logp (needed for importance sampling evaluation).
         loss = vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss
+        logp = -loss * target_mask.sum()
 
         # Activation regularization
         if self._alpha:
@@ -648,7 +649,7 @@ class Kglm(Model):
         if self._beta:
             loss = loss + self._beta * beta_loss
 
-        return {'loss': loss}
+        return {'loss': loss, 'logp': logp}
 
     @overrides
     def train(self, mode=True):

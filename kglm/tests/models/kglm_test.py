@@ -1,6 +1,6 @@
 # pylint: disable=protected-access,not-callable,unused-import
 from allennlp.common import Params
-from allennlp.data import DataIterator
+from allennlp.data import DataIterator, DatasetReader
 import numpy as np
 import torch
 
@@ -42,12 +42,18 @@ class KglmDiscTest(KglmModelTestCase):
 
     def test_sample(self):
         params = Params.from_file(self.param_file)
+        dataset_file = "kglm/tests/fixtures/enhanced-wikitext.jsonl"
+
+        # Need instances from 'generative' reader!
+        reader_params = params['dataset_reader']
+        reader_params['mode'] = 'generative'
+        reader = DatasetReader.from_params(reader_params)
+        instances = list(reader.read(dataset_file))
         iterator = DataIterator.from_params(params['iterator'])
         iterator.index_with(self.model.vocab)
-        batch, _ = next(iterator(self.instances, shuffle=False))
-        self.model.sample(source=batch['source'],
-                          reset=batch['reset'],
-                          shortlist=batch['shortlist'])
+        batch, _ = next(iterator(instances, shuffle=False))
+        self.model.sample(**batch)
+
 
 
 class KglmDiscNoShortlistTest(KglmModelTestCase):
@@ -62,9 +68,15 @@ class KglmDiscNoShortlistTest(KglmModelTestCase):
 
     def test_sample(self):
         params = Params.from_file(self.param_file)
+        dataset_file = "kglm/tests/fixtures/enhanced-wikitext.jsonl"
+
+        # Need instances from 'generative' reader!
+        reader_params = params['dataset_reader']
+        reader_params['mode'] = 'generative'
+        reader = DatasetReader.from_params(reader_params)
+        instances = list(reader.read(dataset_file))
+
         iterator = DataIterator.from_params(params['iterator'])
         iterator.index_with(self.model.vocab)
-        batch, _ = next(iterator(self.instances, shuffle=False))
-        self.model.sample(source=batch['source'],
-                          reset=batch['reset'],
-                          shortlist=batch['shortlist'])
+        batch, _ = next(iterator(instances, shuffle=False))
+        self.model.sample(**batch)

@@ -81,10 +81,7 @@ def evaluate_perplexity(model: Model,
 
         for batch in generator_tqdm:
             batch_count += 1
-            tokens = batch['tokens']
-            tokens['tokens'] = tokens['tokens'].repeat(num_samples, 1)
             batch = util.move_to_device(batch, cuda_device)
-            sequence_length = batch['tokens']['tokens'].shape[1]
 
             # Draw a sample
             sampler_output = sampler.sample(batch['tokens'])

@@ -130,8 +130,15 @@ class KglmDisc(Model):
 
     def sample(self,
                source: Dict[str, torch.Tensor],
+               target: Dict[str, torch.Tensor],
                reset: torch.Tensor,
-               shortlist: Dict[str, torch.Tensor] = None) -> Dict[str, Any]:
+               metadata: Dict[str, Any],
+               shortlist: Dict[str, torch.Tensor] = None,
+               **kwargs) -> Dict[str, Any]:  # **kwargs intended to eat the other fields if they are provided.
+        """
+        Sampling annotations for the generative model. Note that unlike forward, this function
+        expects inputs from a **generative** dataset reader, not a **discriminative** one.
+        """
 
         # Reset the model if needed
         if reset.any() and (self._state is not None):
@@ -143,11 +150,11 @@ class KglmDisc(Model):
         self._recent_entities.reset(reset)
 
         logp = 0.0
-        mask = get_text_field_mask(source)
-        source = source['tokens']
-
-        # Encode source
-        encoded, *_ = self._encode_source(source)
+        mask = get_text_field_mask(target)
+        # We encode the target tokens (**not** source) since the discriminitative model makes
+        # predictions on the current token, but the generative model expects labels for the
+        # **next** (e.g. target) token!
+        encoded, *_ = self._encode_source(target['tokens'])
         splits = [self.token_embedding_dim] + [self.entity_embedding_dim] * 2
         encoded_token, encoded_head, encoded_relation = encoded.split(splits, dim=-1)
 
@@ -177,22 +184,22 @@ class KglmDisc(Model):
         new_entity_logp = _new_entity_logp[new_entity_mask].sum()
 
         # Start filling in the entity ids
-        entity_ids = torch.zeros_like(source)
+        entity_ids = torch.zeros_like(target['tokens'])
         entity_ids[new_entity_mask] = new_entity_samples[new_entity_mask]
 
         # ...UGH... we also need the raw ids - remapping time
-        raw_entity_ids = torch.zeros_like(source)
+        raw_entity_ids = torch.zeros_like(target['tokens'])
         for *index, entity_id in nested_enumerate(entity_ids.tolist()):
             token = self.vocab.get_token_from_index(entity_id, 'entity_ids')
             raw_entity_id = self.vocab.get_token_index(token, 'raw_entity_ids')
             raw_entity_ids[tuple(index)] = raw_entity_id
 
         # Derived mentions need to be computed sequentially.
-        parent_ids = torch.zeros_like(source).unsqueeze(-1)
+        parent_ids = torch.zeros_like(target['tokens']).unsqueeze(-1)
         derived_entity_mask = mention_type.eq(2)
         derived_entity_logp = 0.0
 
-        sequence_length = source.shape[1]
+        sequence_length = target['tokens'].shape[1]
         for i in range(sequence_length):
 
             current_mask = derived_entity_mask[:, i]
@@ -270,14 +277,18 @@ class KglmDisc(Model):
 
             self._recent_entities.insert(_tail_ids, derived_entity_mask[:, i])
 
+        # Pass denotes fields that are passed directly from input to output.
         sample = {
-            'source': source,
+            'source': source,  # Pass
+            'target': target,  # Pass
+            'reset': reset,  # Pass
+            'metadata': metadata,  # Pass
             'mention_type': mention_type,
             'raw_entity_ids': raw_entity_ids,
             'entity_ids': entity_ids,
             'parent_ids': parent_ids,
             'relations': None,  # We aren't using them - eventually should remove entirely
-            'shortlist': shortlist,
+            'shortlist': shortlist,  # Pass
             'shortlist_inds': shortlist_inds
         }
         logp = mention_logp + new_entity_logp + derived_entity_logp
@@ -382,7 +393,6 @@ class KglmDisc(Model):
                             mask=mask)
 
         return mention_type_loss
-
 
     def _new_entity_logits(self,
                            encoded: torch.Tensor,
