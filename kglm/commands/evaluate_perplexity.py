@@ -73,54 +73,52 @@ def evaluate_perplexity(model: Model,
                         cuda_device: int) -> Dict[str, Any]:
     check_for_gpu(cuda_device)
 
+    logger.info('Iterating over dataset')
     with torch.no_grad():
-        iterator = data_iterator(instances, num_epochs=1, shuffle=False)
-        logger.info('Iterating over dataset')
-        generator_tqdm = Tqdm.tqdm(iterator, total=data_iterator.get_num_batches(instances))
 
-        total_cross_entropy = 0.0
-        batch_count = 0
+        summands = []
+        for i in range(num_samples):
+            iterator = data_iterator(instances, num_epochs=1, shuffle=False)
+            generator_tqdm = Tqdm.tqdm(iterator, total=0)
 
-        for _ in range(num_samples):
+            model.eval()
+            sampler.eval()
 
-            for batch in generator_tqdm:
-                import pdb; pdb.set_trace()
+            summand = 0.0
+            denom = 0
+            for batch, _ in generator_tqdm:
 
-                # Get an instance (batch size is 1!)
-                batch_count += 1
                 batch = util.move_to_device(batch, cuda_device)
 
-                # Be super careful about resets
-                model.eval()
-                sampler.eval()
-                batch['reset']
+                # We need sequence length to help compute perplexity
+                batch_size, sequence_length = batch['source']['tokens'].shape
 
                 # Draw a sample
                 sampler_output = sampler.sample(**batch)
                 sample_logp = sampler_output['logp']
                 sample = sampler_output['sample']
-                sample['tokens'] = batch['tokens']  # Add tokens to batch
 
                 # logp of the model is the loss; we multiply by sequence length to go from token-level
                 # to sequence-level probabilities.
                 model_logp = model(**sample).get('logp')
-                log_summands = model_logp - sample_logp
+                summand += (model_logp - sample_logp).item()
+                denom += batch_size * sequence_length
 
-                # This is the log probability of the entire sentence
-                logp = torch.logsumexp(log_summands, dim=0)
+            summands.append(summand)
+            print('summands: %s', summands)
+            t = torch.tensor(summands)
+            t_sum = torch.logsumexp(t, dim=0)
+            print('t_sum: %f' % t_sum)
+            sum_logp = (t_sum - math.log(i+1)).item()
+            print('Average sum_logp: %f' % sum_logp)
+            ppl = math.exp(-sum_logp / denom)
+            batch_ppl = math.exp(-summand / denom)
 
-                # We care about per-token cross entropy
-                per_word_cross_entropy = -logp / sequence_length
-                print(math.exp(per_word_cross_entropy))
-                total_cross_entropy += per_word_cross_entropy
+            print('Perplexity this batch: %f' % batch_ppl)
+            print('Perplexity so far: %f' % ppl)
 
-        # Aggregate metrics
-        avg_per_word_cross_entropy = total_cross_entropy / batch_count
-        perplexity = torch.exp(avg_per_word_cross_entropy)
-
-    metrics = {'perplexity': perplexity}
+    metrics = {'perplexity': ppl}
     return metrics
-
 
 def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     # Disable some of the more verbose logging statements
@@ -152,7 +150,8 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
 
     # To avoid hairy issues with splitting, we opt to use a basic iterator so that we can
     # generate samples for entire sequences.
-    iterator = BasicIterator(batch_size=1)
+    iterator_params = config.pop('iterator', 'None')
+    iterator = DataIterator.from_params(iterator_params)
     iterator.index_with(model.vocab)
     metrics = evaluate_perplexity(model, sampler, args.num_samples, instances, iterator, args.cuda_device)
 

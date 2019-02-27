@@ -41,15 +41,15 @@ class KglmDiscTest(KglmModelTestCase):
         self.ensure_model_can_train_save_and_load(self.param_file)
 
     def test_sample(self):
+        generator_params = Params.from_file("kglm/tests/fixtures/training_config/kglm.json")
         params = Params.from_file(self.param_file)
         dataset_file = "kglm/tests/fixtures/enhanced-wikitext.jsonl"
 
         # Need instances from 'generative' reader!
-        reader_params = params['dataset_reader']
-        reader_params['mode'] = 'generative'
+        reader_params = generator_params['dataset_reader']
         reader = DatasetReader.from_params(reader_params)
         instances = list(reader.read(dataset_file))
-        iterator = DataIterator.from_params(params['iterator'])
+        iterator = DataIterator.from_params(generator_params['iterator'])
         iterator.index_with(self.model.vocab)
         batch, _ = next(iterator(instances, shuffle=False))
         self.model.sample(**batch)
@@ -66,16 +66,33 @@ class KglmDiscNoShortlistTest(KglmModelTestCase):
         self.ensure_model_can_train_save_and_load(self.param_file)
 
     def test_sample(self):
+        generator_params = Params.from_file("kglm/tests/fixtures/training_config/kglm.no-shortlist.json")
         params = Params.from_file(self.param_file)
         dataset_file = "kglm/tests/fixtures/enhanced-wikitext.jsonl"
 
         # Need instances from 'generative' reader!
-        reader_params = params['dataset_reader']
+        reader_params = generator_params['dataset_reader']
         reader_params['mode'] = 'generative'
         reader = DatasetReader.from_params(reader_params)
         instances = list(reader.read(dataset_file))
 
-        iterator = DataIterator.from_params(params['iterator'])
+        iterator = DataIterator.from_params(generator_params['iterator'])
         iterator.index_with(self.model.vocab)
         batch, _ = next(iterator(instances, shuffle=False))
-        self.model.sample(**batch)
+
+        # Samples should match (we'll test by comparing logp)
+        torch.manual_seed(123)
+        logp1 = self.model.sample(**batch).get('logp', None)
+        torch.manual_seed(123)
+        logp2 = self.model.sample(**batch).get('logp', None)
+
+        # Furthermore, padding should not affect the outcome
+        source = batch['source']
+        padding = torch.zeros_like(source['tokens'])
+        new_batch = batch.copy()
+        new_batch['source'] = {'tokens': torch.cat((source['tokens'], padding), dim=-1)}
+        new_batch['target'] = {'tokens': torch.cat((batch['target']['tokens'], padding), dim=-1)}
+        new_batch['raw_entity_ids'] = {'raw_entity_ids': torch.cat((batch['raw_entity_ids']['raw_entity_ids'], padding), dim=-1)}
+        new_batch['alias_copy_inds'] = torch.cat((batch['alias_copy_inds'], padding), dim=-1)
+        torch.manual_seed(123)
+        logp3 = self.model.sample(**new_batch).get('logp', None)

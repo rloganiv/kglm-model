@@ -581,12 +581,7 @@ class Kglm(Model):
         raw_entity_ids = raw_entity_ids['raw_entity_ids']
         entity_ids = entity_ids['entity_ids']
         parent_ids = parent_ids['entity_ids']
-        relations = relations['relations']
 
-        logger.debug('Source & Target shape: %s', source.shape)
-        logger.debug('Entity ids shape: %s', entity_ids.shape)
-        logger.debug('Relations & Parent ids shape: %s', relations.shape)
-        logger.debug('Shortlist shape: %s', shortlist['entity_ids'].shape)
         # Embed source tokens.
         # shape: (batch_size, sequence_length, embedding_dim)
         encoded, alpha_loss, beta_loss = self._encode_source(source)

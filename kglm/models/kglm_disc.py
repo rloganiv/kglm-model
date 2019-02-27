@@ -133,6 +133,7 @@ class KglmDisc(Model):
                target: Dict[str, torch.Tensor],
                reset: torch.Tensor,
                metadata: Dict[str, Any],
+               alias_copy_inds: torch.Tensor,
                shortlist: Dict[str, torch.Tensor] = None,
                **kwargs) -> Dict[str, Any]:  # **kwargs intended to eat the other fields if they are provided.
         """
@@ -150,7 +151,7 @@ class KglmDisc(Model):
         self._recent_entities.reset(reset)
 
         logp = 0.0
-        mask = get_text_field_mask(target)
+        mask = get_text_field_mask(target).byte()
         # We encode the target tokens (**not** source) since the discriminitative model makes
         # predictions on the current token, but the generative model expects labels for the
         # **next** (e.g. target) token!
@@ -162,7 +163,9 @@ class KglmDisc(Model):
         mention_logits = self._fc_mention_type(encoded_token)
         mention_probs = F.softmax(mention_logits, dim=-1)
         mention_type = parallel_sample(mention_probs)
-        mention_logp = mention_probs.gather(-1, mention_type.unsqueeze(-1)).log().sum()
+        mention_logp = mention_probs.gather(-1, mention_type.unsqueeze(-1)).log()
+        mention_logp[~mask] = 0
+        mention_logp = mention_logp.sum()
 
         # Compute entity logits
         new_entity_mask = mention_type.eq(1)
@@ -170,17 +173,18 @@ class KglmDisc(Model):
         if self._use_shortlist:
             # If using shortlist, then samples are indexed w.r.t the shortlist and entity_ids must be looked up
             shortlist_mask = get_text_field_mask(shortlist)
-            shortlist = shortlist['entity_ids']
             new_entity_probs = masked_softmax(new_entity_logits, shortlist_mask)
             shortlist_inds = parallel_sample(new_entity_probs)
+            shortlist_inds[~new_entity_mask] = 0
             _new_entity_logp = new_entity_probs.gather(-1, shortlist_inds.unsqueeze(-1)).log()
-            new_entity_samples = shortlist.gather(1, shortlist_inds)
+            new_entity_samples = shortlist['entity_ids'].gather(1, shortlist_inds)
         else:
             # If not using shortlist, then samples are indexed w.r.t to the global vocab
             new_entity_probs = F.softmax(new_entity_logits, dim=-1)
             new_entity_samples = parallel_sample(new_entity_probs)
             _new_entity_logp = new_entity_probs.gather(-1, new_entity_samples.unsqueeze(-1)).log()
             shortlist_inds = None
+        _new_entity_logp[~mask] = 0
         new_entity_logp = _new_entity_logp[new_entity_mask].sum()
 
         # Start filling in the entity ids
@@ -202,7 +206,7 @@ class KglmDisc(Model):
         sequence_length = target['tokens'].shape[1]
         for i in range(sequence_length):
 
-            current_mask = derived_entity_mask[:, i]
+            current_mask = derived_entity_mask[:, i] & mask[:, i]
 
             ## SAMPLE PARENTS ##
 
@@ -233,7 +237,7 @@ class KglmDisc(Model):
                 viable_candidate_probs = selection_probs[viable_candidate_mask]
                 viable_parent_samples = parallel_sample(viable_candidate_probs)
                 viable_logp = viable_candidate_probs.gather(-1, viable_parent_samples.unsqueeze(-1)).log()
-                viable_parent_ids = viable_candidate_ids.gather(1, viable_parent_samples)
+                viable_parent_ids = viable_candidate_ids.gather(-1, viable_parent_samples)
                 _parent_ids[viable_candidate_mask] = viable_parent_ids
                 parent_logp[viable_candidate_mask] = viable_logp.squeeze(-1)
 
@@ -248,8 +252,8 @@ class KglmDisc(Model):
 
             # Sample tail ids
             current_relation_encoding = encoded_relation[:, i].unsqueeze(1)
-            _raw_tail_ids = torch.zeros_like(_parent_ids).squeeze()
-            _tail_ids = torch.zeros_like(_parent_ids).squeeze()
+            _raw_tail_ids = torch.zeros_like(_parent_ids).squeeze(-1)
+            _tail_ids = torch.zeros_like(_parent_ids).squeeze(-1)
             for index, relation_embedding, tail_id_lookup in zip(indices, relation_embeddings, tail_ids_list):
                 # Compute the score for each relation w.r.t the current encoding. NOTE: In the loss
                 # code index has a slice. We don't need that here since there is always a
@@ -272,10 +276,15 @@ class KglmDisc(Model):
                 _raw_tail_ids[index[:-1]] = raw_tail_id
                 _tail_ids[index[:-1]] = tail_id
 
-            raw_entity_ids[derived_entity_mask[:, i], i] = _raw_tail_ids[derived_entity_mask[:, i]]  # TODO: Double-check
-            entity_ids[derived_entity_mask[:, i], i] = _tail_ids[derived_entity_mask[:, i]]  # TODO: Double-check
+            raw_entity_ids[current_mask, i] = _raw_tail_ids[current_mask]  # TODO: Double-check
+            entity_ids[current_mask, i] = _tail_ids[current_mask]  # TODO: Double-check
 
-            self._recent_entities.insert(_tail_ids, derived_entity_mask[:, i])
+            self._recent_entities.insert(_tail_ids, current_mask)
+
+        # Lastly, because entities won't always match the true entity ids, we need to zero out any alias copy ids that won't be valid.
+        true_raw_entity_ids = kwargs['raw_entity_ids']['raw_entity_ids']
+        invalid_id_mask = ~true_raw_entity_ids.eq(raw_entity_ids)
+        alias_copy_inds[invalid_id_mask] = 0
 
         # Pass denotes fields that are passed directly from input to output.
         sample = {
@@ -284,12 +293,13 @@ class KglmDisc(Model):
             'reset': reset,  # Pass
             'metadata': metadata,  # Pass
             'mention_type': mention_type,
-            'raw_entity_ids': raw_entity_ids,
-            'entity_ids': entity_ids,
-            'parent_ids': parent_ids,
-            'relations': None,  # We aren't using them - eventually should remove entirely
+            'raw_entity_ids': {'raw_entity_ids': raw_entity_ids},
+            'entity_ids': {'entity_ids': entity_ids},
+            'parent_ids': {'entity_ids': parent_ids},
+            'relations': {'relations': None},  # We aren't using them - eventually should remove entirely
             'shortlist': shortlist,  # Pass
-            'shortlist_inds': shortlist_inds
+            'shortlist_inds': shortlist_inds,
+            'alias_copy_inds': alias_copy_inds
         }
         logp = mention_logp + new_entity_logp + derived_entity_logp
         return {'sample': sample, 'logp': logp}
@@ -306,6 +316,7 @@ class KglmDisc(Model):
                 relations: Dict[str, torch.Tensor] = None,
                 shortlist: Dict[str, torch.Tensor] = None,
                 shortlist_inds: torch.Tensor = None) -> Dict[str, torch.Tensor]:
+
 
         # Reset the model if needed
         if reset.any() and (self._state is not None):
