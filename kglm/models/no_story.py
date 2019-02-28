@@ -583,7 +583,7 @@ class NoStory(Model):
         self._state = None
 
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
-        out =  {
+        out = {
             'ppl': self._ppl.get_metric(reset),
             'upp': self._upp.get_metric(reset),
             'kg_ppl': self._kg_ppl.get_metric(reset),
@@ -593,7 +593,7 @@ class NoStory(Model):
             'vocab': self._avg_vocab_loss.get_metric(reset),
         }
         # if not self.training:
-        p, r, f  = self._new_mention_f1.get_metric(reset)
+        p, r, f = self._new_mention_f1.get_metric(reset)
         out['new_p'] = p
         out['new_r'] = r
         out['new_f1'] = f
