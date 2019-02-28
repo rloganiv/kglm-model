@@ -11,7 +11,7 @@ class TestEnhancedWikitextEntityNLMReader:
     @pytest.mark.parametrize('lazy', (True, False))
     def test_read_from_file(self, lazy):
         reader = EnhancedWikitextEntityNlmReader(lazy=lazy)
-        fixture_path = 'kglm/tests/fixtures/enhanced-wikitext.jsonl'
+        fixture_path = 'kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl'
         instances = ensure_list(reader.read(fixture_path))
 
         first_instance_tokens = [x.text for x in instances[0]["tokens"].tokens]
@@ -33,11 +33,11 @@ class TestEnhancedWikitextKglmReader:
     @pytest.mark.parametrize('mode', ("generative", "discriminative"))
     def test_read_from_file(self, lazy, mode):
         offset = 0 if mode == "generative" else 1
-        alias_database_path = 'kglm/tests/fixtures/mini.alias.pkl'
+        alias_database_path = 'kglm/tests/fixtures/enhanced-wikitext-test/alias.pkl'
         reader = EnhancedWikitextKglmReader(lazy=lazy,
                                             mode=mode,
                                             alias_database_path=alias_database_path)
-        fixture_path = 'kglm/tests/fixtures/enhanced-wikitext.jsonl'
+        fixture_path = 'kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl'
         instances = ensure_list(reader.read(fixture_path))
 
         # Test correct number of instances is being created
