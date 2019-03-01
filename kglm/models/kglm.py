@@ -481,8 +481,8 @@ class Kglm(Model):
         entity mention.
         """
         logits = self._fc_mention_type(encoded)
-        mention_type_loss = sequence_cross_entropy_with_logits(logits, mention_type, mask,
-                                                               average='token')
+        mention_loss = sequence_cross_entropy_with_logits(logits, mention_type, mask,
+                                                          average='token')
         # if not self.training:
         self._new_mention_f1(predictions=logits,
                              gold_labels=mention_type,
@@ -491,7 +491,7 @@ class Kglm(Model):
                             gold_labels=mention_type,
                             mask=mask)
 
-        return mention_type_loss
+        return mention_loss
 
     def _new_entity_logits(self,
                            encoded: torch.Tensor,
@@ -528,18 +528,16 @@ class Kglm(Model):
             log_probs = masked_log_softmax(logits, shortlist_mask)
         else:
             log_probs = F.log_softmax(logits, dim=-1)
-            num_categories = log_probs.shape[-1]
-            log_probs = log_probs.view(-1, num_categories)
-            target_inds = target_inds.view(-1)
         target_log_probs = torch.gather(log_probs, -1, target_inds.unsqueeze(-1)).squeeze(-1)
+        target_log_probs = target_log_probs * target_mask.float()
+        # Also don't predict on non-mentions
+        mentions = ~target_inds.eq(0)
+        target_log_probs = target_log_probs * mentions.float()
 
-        mask = ~target_inds.eq(0)
-        target_log_probs[~mask] = 0
-
-        self._new_entity_accuracy(predictions=log_probs[mask],
-                                  gold_labels=target_inds[mask])
-        self._new_entity_accuracy20(predictions=log_probs[mask],
-                                    gold_labels=target_inds[mask])
+        # self._new_entity_accuracy(predictions=log_probs[mask],
+        #                           gold_labels=target_inds[mask])
+        # self._new_entity_accuracy20(predictions=log_probs[mask],
+        #                             gold_labels=target_inds[mask])
 
         return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
 
@@ -549,7 +547,7 @@ class Kglm(Model):
                           parent_ids: torch.Tensor) -> torch.Tensor:
         # Lookup recent entities (which are candidates for parents) and get their embeddings.
         candidate_ids, candidate_mask = self._recent_entities(entity_ids)
-        logger.debug('Candidate ids shape: %s', candidate_ids.shape)
+        # logger.debug('Candidate ids shape: %s', candidate_ids.shape)
         candidate_embeddings = embedded_dropout(self._entity_embedder,
                                                 words=candidate_ids,
                                                 dropout=self._dropoute if self.training else 0)
@@ -585,7 +583,7 @@ class Kglm(Model):
         # some small constant for numerical stability).
         mask = is_parent & non_null
         masked_log_probs = log_probs.unsqueeze(2) + (mask.float() + 1e-45).log()
-        logger.debug('Masked log probs shape: %s', masked_log_probs.shape)
+        # logger.debug('Masked log probs shape: %s', masked_log_probs.shape)
 
         # Lastly, we need to get rid of the num_candidates dimension. The easy way to do this would
         # be to marginalize it out. However, since our data is sparse (the last two dims are
@@ -619,7 +617,7 @@ class Kglm(Model):
             # First we compute the score for each relation w.r.t the current encoding, and convert
             # the scores to log-probabilities
             logits = torch.mv(relation_embedding, encoded[index[:-1]])
-            logger.debug('Relation logits shape: %s', logits.shape)
+            # logger.debug('Relation logits shape: %s', logits.shape)
             log_probs = F.log_softmax(logits, dim=-1)
 
             # Next we gather the log probs for edges with the correct tail entity and sum them up

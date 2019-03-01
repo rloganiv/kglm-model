@@ -92,7 +92,8 @@ def evaluate_perplexity(model: Model,
                 batch = util.move_to_device(batch, cuda_device)
 
                 # We need sequence length to help compute perplexity
-                batch_size, sequence_length = batch['source']['tokens'].shape
+                n_tokens = util.get_text_field_mask(batch['source']).float().sum().item()
+                denom += n_tokens
 
                 # Draw a sample
                 sampler_output = sampler.sample(**batch)
@@ -101,7 +102,8 @@ def evaluate_perplexity(model: Model,
 
                 model_logp = model(**sample).get('logp')
                 summand += (model_logp - sample_logp).item()
-                denom += batch_size * sequence_length
+                batch_ppl = math.exp(-summand / denom)
+                print('Perplexity this batch: %f' % batch_ppl)
 
             summands.append(summand)
             print('summands: %s', summands)

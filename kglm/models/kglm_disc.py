@@ -174,7 +174,11 @@ class KglmDisc(Model):
             # If using shortlist, then samples are indexed w.r.t the shortlist and entity_ids must be looked up
             shortlist_mask = get_text_field_mask(shortlist)
             new_entity_probs = masked_softmax(new_entity_logits, shortlist_mask)
-            shortlist_inds = parallel_sample(new_entity_probs)
+            shortlist_inds = torch.zeros_like(mention_type)
+            # Some sequences may be full of padding in which case the shortlist
+            # is empty
+            not_just_padding = shortlist_mask.byte().any(-1)
+            shortlist_inds[not_just_padding] = parallel_sample(new_entity_probs[not_just_padding])
             shortlist_inds[~new_entity_mask] = 0
             _new_entity_logp = new_entity_probs.gather(-1, shortlist_inds.unsqueeze(-1)).log()
             new_entity_samples = shortlist['entity_ids'].gather(1, shortlist_inds)
