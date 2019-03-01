@@ -2,7 +2,8 @@ import json
 from typing import Tuple
 
 from allennlp.common.util import JsonDict
-from allennlp.data import Instance
+from allennlp.data import DatasetReader, Instance
+from allennlp.models import Model
 from allennlp.predictors import Predictor
 import numpy as np
 from overrides import overrides
@@ -12,6 +13,11 @@ from kglm.data import SequentialArrayField
 
 @Predictor.register('cloze')
 class ClozePredictor(Predictor):
+    def __init__(self, model: Model, sampler: Model, dataset_reader: DatasetReader):
+        self._model = model
+        self._sampler = sampler
+        self._dataset_reader = dataset_reader
+
     @overrides
     def _json_to_instance(self, json_dict: JsonDict) -> Instance:
         """
@@ -52,6 +58,7 @@ class ClozePredictor(Predictor):
 
     @overrides
     def predict_instance(self, instances: Tuple[Instance, Instance]) -> JsonDict:
+        import pdb; pdb.set_trace()
         conditioning_instance, generative_instance = instances
         # Seed the model with the conditioning instance
         self._model.forward_on_instance(conditioning_instance)
