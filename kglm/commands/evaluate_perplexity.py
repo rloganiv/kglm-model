@@ -83,6 +83,23 @@ def evaluate_perplexity(model: Model,
 
             model.eval()
             sampler.eval()
+            iterator.eval()
+
+            summand = 0.0
+            denom = 0
+            for batch, _ in generator_tqdm:
+
+                batch = util.move_to_device(batch, cuda_device)
+
+    with torch.no_grad():
+
+        summands = []
+        for i in range(num_samples):
+            iterator = data_iterator(instances, num_epochs=1, shuffle=False)
+            generator_tqdm = Tqdm.tqdm(iterator, total=0)
+
+            model.eval()
+            sampler.eval()
 
             summand = 0.0
             denom = 0

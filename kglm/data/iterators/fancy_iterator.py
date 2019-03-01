@@ -1,11 +1,12 @@
 from collections import deque
+from copy import deepcopy
 import logging
 import itertools
 import random
 from typing import Deque, Dict, Iterable, Iterator, List, Tuple, Union
 
 from allennlp.data.dataset import Batch
-from allennlp.data.fields import ListField, TextField
+from allennlp.data.fields import Field, ListField, MetadataField, TextField
 from allennlp.data.instance import Instance
 from allennlp.data.iterators.data_iterator import add_epoch_number, DataIterator
 import numpy as np
@@ -39,6 +40,10 @@ class FancyIterator(DataIterator):
                 maximum_samples_per_batch=maximum_samples_per_batch)
         self._splitting_keys = splitting_keys
         self._split_size = split_size
+        self._eval = False
+
+    def eval(self):
+        self._eval = True
 
     def __call__(self,
                  instances: Iterable[Instance],
@@ -74,7 +79,17 @@ class FancyIterator(DataIterator):
                 queues[destination].extend(chunks)
                 queue_lengths[destination] += length
 
-            for batch in self._generate_batches(queues):
+            # We need a NULL instance to replace the output of an exhausted queue if we are evaluating
+            prototype = deepcopy(chunks[-1])
+            new_fields: Dict[str, Field] = {}
+            for name, field in prototype.fields.items():
+                if isinstance(field, MetadataField):
+                    new_fields[name] = field
+                else:
+                    new_fields[name] = field.empty_field()
+            blank_instance = Instance(new_fields)
+
+            for batch in self._generate_batches(queues, blank_instance):
                 if self._track_epoch:
                     add_epoch_number(batch, epoch)
 
@@ -135,16 +150,26 @@ class FancyIterator(DataIterator):
 
         return chunks, padded_length
 
-    @staticmethod
-    def _generate_batches(queues: List[Deque[Instance]]) -> Iterator[Batch]:
-        while True:
-            try:
-                instances = [q.popleft() for q in queues]
-            except IndexError:
-                break
+    def _generate_batches(self,
+                          queues: List[Deque[Instance]],
+                          blank_instance: Instance) -> Iterator[Batch]:
+        num_iter = max(len(q) for q in queues)
+        for _ in range(num_iter):
+            instances: List[Instance] = []
+            for q in queues:
+                try:
+                    instance = q.popleft()
+                except IndexError:  # A queue is depleted
+                    # If we're training, we break to avoid densely padded inputs (since this biases
+                    # the model to overfit the longer sequences).
+                    if not self._eval:
+                        return
+                    # But if we're evaluating we do want the padding, so that we don't skip anything.
+                    else:
+                        instance = blank_instance
+                instances.append(instance)
             batch = Batch(instances)
             yield batch
 
     def get_num_batches(self, instances: Iterable[Instance]) -> float:
-        return 1
-
+        return 0
