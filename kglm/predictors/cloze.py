@@ -22,7 +22,7 @@ class ClozePredictor(Predictor):
         ### Conditioning Instance ###
 
         # Manually add the start token
-        tokens = [['@@START@@'], *json_dict['prefix']]
+        tokens = ['@@START@@', *json_dict['prefix']]
         # Also need to offset
         start, end = json_dict['entity_indices']
         span = [start + 1, end + 1]
@@ -33,10 +33,10 @@ class ClozePredictor(Predictor):
             'parent_id': [json_dict['entity_id']],
             'span': span
         }]
-        data = {'tokens': tokens, 'annotations': annotations}
+        data = {'tokens': [tokens], 'annotations': annotations}
         conditioning_instance = self._dataset_reader.text_to_instance(data)
         # Manually add the reset field here
-        reset = SequentialArrayField(np.array([1]), dtype=np.uint8)
+        reset = SequentialArrayField(np.array(1), dtype=np.uint8)
         conditioning_instance.add_field('reset', reset)
 
         ### Generative Instance ###
@@ -44,7 +44,7 @@ class ClozePredictor(Predictor):
         data = {'tokens': [[tokens[-1]]]}
         generative_instance = self._dataset_reader.text_to_instance(data)
         # Manually add the reset field here
-        reset = SequentialArrayField(np.array([0]), dtype=np.uint8)
+        reset = SequentialArrayField(np.array(0), dtype=np.uint8)
         generative_instance.add_field('reset', reset)
         generative_instance.add_field('shortlist', conditioning_instance.fields['shortlist'])
 

@@ -18,3 +18,4 @@ class ClozePredictorTest(AllenNlpTestCase):
         archive = load_archive('kglm/tests/fixtures/kglm.model.tar.gz')
         predictor = Predictor.from_archive(archive, 'cloze')
         predictor.predict_json(inputs)
+        predictor.predict_json(inputs)

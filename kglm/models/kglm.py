@@ -424,7 +424,7 @@ class Kglm(Model):
             pairs = list(word_probs.items())
             pairs.sort(key=lambda x: x[1], reverse=True)
             words, probs = zip(*pairs)
-            return {'words':  words, 'probs': probs}
+            return {'words': [words], 'probs': [probs]}
 
         return output
 
