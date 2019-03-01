@@ -46,6 +46,7 @@ class ClozePredictor(Predictor):
         # Manually add the reset field here
         reset = SequentialArrayField(np.array([0]), dtype=np.uint8)
         generative_instance.add_field('reset', reset)
+        generative_instance.add_field('shortlist', conditioning_instance.fields['shortlist'])
 
         return conditioning_instance, generative_instance
 
@@ -54,4 +55,4 @@ class ClozePredictor(Predictor):
         conditioning_instance, generative_instance = instances
         # Seed the model with the conditioning instance
         self._model.forward_on_instance(conditioning_instance)
-        self._model.forward_on_instance(generative_instance)
+        return self._model.forward_on_instance(generative_instance)

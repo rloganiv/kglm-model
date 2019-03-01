@@ -1,3 +1,4 @@
+from collections import defaultdict
 import logging
 import math
 from typing import Any, Dict, List, Optional
@@ -333,23 +334,24 @@ class Kglm(Model):
         # if derived_entity_mask.any():
 
         # Parent selection
-        import pdb; pdb.set_trace()
         candidate_ids, candidate_mask = self._recent_entities(entity_ids)
         candidate_embeddings = self._entity_embedder(candidate_ids)
         selection_logits = torch.bmm(encoded_head, candidate_embeddings.transpose(1, 2))
         selection_probs = masked_softmax(selection_logits, candidate_mask)
-        _, parent_ids = torch.max(selection_probs, dim=-1)
+        _, selection_ids = torch.max(selection_probs, dim=-1)
+        parent_ids = candidate_ids.gather(-1, selection_ids)
 
         # Relation selection
         indices, parent_ids_list, relations_list, tail_ids_list = self._knowledge_graph_lookup(parent_ids)
         relation_embeddings = [self._relation_embedder(r) for r in relations_list]
 
-        raw_tail_ids = torch.zeros_like(parent_ids).squeeze(-1)
-        tail_ids = torch.zeros_like(parent_ids).squeeze(-1)
+        raw_tail_ids = torch.zeros_like(parent_ids)
+        tail_ids = torch.zeros_like(parent_ids)
         for index, relation_embedding, tail_id_lookup in zip(indices, relation_embeddings, tail_ids_list):
             logits = torch.mv(relation_embedding, encoded_relation[index])
             _, selected_relation = torch.max(logits, dim=-1)
             raw_tail_id = tail_id_lookup[selected_relation]
+
             tail_id_string = self.vocab.get_token_from_index(raw_tail_id.item(), 'raw_entity_ids')
             tail_id = self.vocab.get_token_index(tail_id_string, 'entity_ids')
 
@@ -361,8 +363,70 @@ class Kglm(Model):
         entity_ids = tail_ids
 
         # Vocab stuff
+        vocab_size = self.vocab.get_vocab_size('tokens')
+        generate_scores = self._generate_scores(encoded_token, entity_ids)
+        alias_tokens, alias_indices = alias_database.lookup(raw_entity_ids)
+        copy_scores = self._copy_scores(encoded_token, alias_tokens)
+        copy_sequence_length = copy_scores.shape[-1]
+        concatenated_scores = torch.cat((generate_scores, copy_scores), dim=-1)
 
-        return None
+        # In order to obtain proper log probabilities we create a mask to omit padding alias tokens
+        # from the calculation.
+        score_mask = torch.ones_like(concatenated_scores)
+        alias_mask = alias_tokens.gt(0).view(1, 1, -1)
+        score_mask[:, :, vocab_size:] = alias_mask
+
+        # The log-probability distribution is then given by taking the masked log softmax.
+        word_probs = masked_softmax(concatenated_scores, score_mask)
+
+        word_probs = word_probs.squeeze()
+        raw_entity_id = raw_entity_ids.squeeze().item()
+        alias_indices = alias_indices.view(-1)
+
+        return {
+            'word_probs': word_probs,
+            'alias_indices': alias_indices,
+            'raw_entity_id': raw_entity_id,
+            'alias_database': alias_database}
+
+    def decode(self, output: Dict[str, Any]):
+        if 'word_probs' in output and 'raw_entity_id' in output:
+            word_probs = output['word_probs']
+            alias_indices = output['alias_indices']
+            raw_entity_id = output['raw_entity_id']
+            alias_database = output['alias_database']
+
+            # Seperate generate from copy probs
+            vocab_size = self.vocab.get_vocab_size('tokens')
+            generate_probs = word_probs[:vocab_size]
+            copy_probs = word_probs[vocab_size:]
+
+            # We'll use a dict to manage accumulating probabilities
+            word_probs = defaultdict(float)
+            for i, prob in enumerate(generate_probs.tolist()):
+                word = self.vocab.get_token_from_index(i, 'tokens')
+                word_probs[word] = prob
+
+            # For the copy tokens, we first need to make a reverse lookup.
+            entity = self.vocab.get_token_from_index(raw_entity_id, 'raw_entity_ids')
+            id_map = alias_database._id_map_lookup[entity]
+            reverse_id_map = {i: x for x, i in id_map.items()}
+
+            # Now we accumulate probabilities
+            for idx, prob in zip(alias_indices.tolist(), copy_probs.tolist()):
+                if idx == 0:
+                    continue
+                else:
+                    word = reverse_id_map[idx]
+                    word_probs[word] += prob
+
+            # Lastly sort words by prob
+            pairs = list(word_probs.items())
+            pairs.sort(key=lambda x: x[1], reverse=True)
+            words, probs = zip(*pairs)
+            return {'words':  words, 'probs': probs}
+
+        return output
 
     def _encode_source(self, source: Dict[str, torch.Tensor]) -> torch.Tensor:
 
@@ -557,8 +621,6 @@ class Kglm(Model):
             # Next we gather the log probs for edges with the correct tail entity and sum them up
             target_id = raw_entity_ids[index[:-1]]
             mask = tail_id.eq(target_id)
-            if ~mask.any():
-                import pdb; pdb.set_trace()
             relevant_log_probs = log_probs.masked_select(tail_id.eq(target_id))
             target_log_prob = torch.logsumexp(relevant_log_probs, dim=0)
             target_log_probs[index] = target_log_prob
