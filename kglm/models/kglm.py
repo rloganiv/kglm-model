@@ -142,7 +142,7 @@ class Kglm(Model):
         self._avg_new_entity_loss = Average()
         self._avg_knowledge_graph_entity_loss = Average()
         self._avg_vocab_loss = Average()
-        self._new_mention_f1 =  F1Measure(positive_label=1)
+        self._new_mention_f1 = F1Measure(positive_label=1)
         self._kg_mention_f1 = F1Measure(positive_label=2)
         self._new_entity_accuracy = CategoricalAccuracy()
         self._new_entity_accuracy20 = CategoricalAccuracy(top_k=20)
@@ -229,6 +229,7 @@ class Kglm(Model):
         # Predict whether or not the next token will be an entity mention, and if so which type.
         mention_type_loss = self._mention_type_loss(encoded_token, mention_type, target_mask)
         self._avg_mention_type_loss(float(mention_type_loss))
+        logger.debug('mention type loss: %0.4f', mention_type_loss)
 
         # For new mentions, predict which entity (among those in the supplied shortlist) will be
         # mentioned.
@@ -244,6 +245,7 @@ class Kglm(Model):
                                                     target_mask)
 
         self._avg_new_entity_loss(float(new_entity_loss))
+        logger.debug('new entity loss: %0.4f', new_entity_loss)
 
         # For derived mentions, first predict which parent(s) to expand...
         knowledge_graph_entity_loss = self._knowledge_graph_entity_loss(encoded_head,
@@ -253,6 +255,7 @@ class Kglm(Model):
                                                                         parent_ids,
                                                                         target_mask)
         self._avg_knowledge_graph_entity_loss(float(knowledge_graph_entity_loss))
+        logger.debug('kg entity loss: %0.4f', knowledge_graph_entity_loss)
 
         # Predict generation-mode scores. Note: these are W.R.T to entity_ids since we need the embedding.
         generate_scores = self._generate_scores(encoded_token, entity_ids)
@@ -270,6 +273,7 @@ class Kglm(Model):
                                       alias_inds,
                                       entity_ids.gt(0))
         self._avg_vocab_loss(float(vocab_loss))
+        logger.debug('vocab loss: %0.4f', vocab_loss)
 
         # Compute total loss. Also compute logp (needed for importance sampling evaluation).
         loss = vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss
@@ -747,6 +751,8 @@ class Kglm(Model):
                                                       dim=1)
         combined_log_probs_extended_vocab = torch.logsumexp(combined_log_probs_extended_vocab,
                                                             dim=1)
+        flattened_mask = flattened_mask.squeeze()
+        combined_log_probs_extended_vocab[~flattened_mask] = 0
         vocab_loss = -combined_log_probs_extended_vocab.sum() / (mask.sum() + 1e-13)
 
         # PERPLEXITY ###
@@ -757,6 +763,7 @@ class Kglm(Model):
                                                     dim=1)
         combined_log_probs_source_vocab = torch.logsumexp(combined_log_probs_source_vocab,
                                                           dim=1)
+        combined_log_probs_extended_vocab[~flattened_mask] = 0
 
         # For UPP we penalize **only** p(UNK); not the copy probabilities!
         penalized_log_probs_source_vocab = generate_log_probs_source_vocab - self._unk_penalty * unks.float()
@@ -765,9 +772,10 @@ class Kglm(Model):
                                                      dim=1)
         penalized_log_probs_source_vocab = torch.logsumexp(penalized_log_probs_source_vocab,
                                                            dim=1)
+        combined_log_probs_extended_vocab[~flattened_mask] = 0
 
-        kg_mask = (mention_mask * mask.byte()).view(-1)
-        bg_mask = ((1 - mention_mask) * mask.byte()).view(-1)
+        kg_mask = (mention_mask & mask.byte()).view(-1)
+        bg_mask = ((~mention_mask) & mask.byte()).view(-1)
         mask = (kg_mask | bg_mask)
 
         self._ppl(-combined_log_probs_source_vocab[mask].sum(), mask.float().sum() + 1e-13)

@@ -74,22 +74,6 @@ def evaluate_perplexity(model: Model,
     check_for_gpu(cuda_device)
 
     logger.info('Iterating over dataset')
-    with torch.no_grad():
-
-        summands = []
-        for i in range(num_samples):
-            iterator = data_iterator(instances, num_epochs=1, shuffle=False)
-            generator_tqdm = Tqdm.tqdm(iterator, total=0)
-
-            model.eval()
-            sampler.eval()
-            iterator.eval()
-
-            summand = 0.0
-            denom = 0
-            for batch, _ in generator_tqdm:
-
-                batch = util.move_to_device(batch, cuda_device)
 
     with torch.no_grad():
 
@@ -115,8 +99,6 @@ def evaluate_perplexity(model: Model,
                 sample_logp = sampler_output['logp']
                 sample = sampler_output['sample']
 
-                # logp of the model is the loss; we multiply by sequence length to go from token-level
-                # to sequence-level probabilities.
                 model_logp = model(**sample).get('logp')
                 summand += (model_logp - sample_logp).item()
                 denom += batch_size * sequence_length
@@ -170,6 +152,7 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     iterator_params = config.pop('iterator', 'None')
     iterator = DataIterator.from_params(iterator_params)
     iterator.index_with(model.vocab)
+    iterator.eval()
     metrics = evaluate_perplexity(model, sampler, args.num_samples, instances, iterator, args.cuda_device)
 
     logger.info('Finished evaluating.')
