@@ -265,19 +265,20 @@ class Kglm(Model):
         copy_scores = self._copy_scores(encoded_token, alias_tokens)
 
         # Combine scores to get vocab loss
-        vocab_loss = self._vocab_loss(generate_scores,
-                                      copy_scores,
-                                      target,
-                                      alias_copy_inds,
-                                      target_mask,
-                                      alias_inds,
-                                      entity_ids.gt(0))
+        vocab_loss, penalized_vocab_loss = self._vocab_loss(generate_scores,
+                                                            copy_scores,
+                                                            target,
+                                                            alias_copy_inds,
+                                                            target_mask,
+                                                            alias_inds,
+                                                            entity_ids.gt(0))
         self._avg_vocab_loss(float(vocab_loss))
         logger.debug('vocab loss: %0.4f', vocab_loss)
 
         # Compute total loss. Also compute logp (needed for importance sampling evaluation).
         loss = vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss
-        logp = -loss * target_mask.sum()
+        logp = -(vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss) * target_mask.sum()
+        penalized_logp = -(penalized_vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss) * target_mask.sum()
 
         # Activation regularization
         if self._alpha:
@@ -286,7 +287,7 @@ class Kglm(Model):
         if self._beta:
             loss = loss + self._beta * beta_loss
 
-        return {'loss': loss, 'logp': logp}
+        return {'loss': loss, 'logp': logp, 'penalized_logp': penalized_logp}
 
     def _greedy_decode(self,
                        source: Dict[str, torch.Tensor],
@@ -334,37 +335,37 @@ class Kglm(Model):
             raw_entity_ids[tuple(index)] = raw_entity_id
 
         # Derived mentions.
-        # derived_entity_mask = mention_type.eq(2)
-        # if derived_entity_mask.any():
+        derived_entity_mask = mention_type.eq(2)
+        if derived_entity_mask.any():
 
-        # Parent selection
-        candidate_ids, candidate_mask = self._recent_entities(entity_ids)
-        candidate_embeddings = self._entity_embedder(candidate_ids)
-        selection_logits = torch.bmm(encoded_head, candidate_embeddings.transpose(1, 2))
-        selection_probs = masked_softmax(selection_logits, candidate_mask)
-        _, selection_ids = torch.max(selection_probs, dim=-1)
-        parent_ids = candidate_ids.gather(-1, selection_ids)
+            # Parent selection
+            candidate_ids, candidate_mask = self._recent_entities(entity_ids)
+            candidate_embeddings = self._entity_embedder(candidate_ids)
+            selection_logits = torch.bmm(encoded_head, candidate_embeddings.transpose(1, 2))
+            selection_probs = masked_softmax(selection_logits, candidate_mask)
+            _, selection_ids = torch.max(selection_probs, dim=-1)
+            parent_ids = candidate_ids.gather(-1, selection_ids)
 
-        # Relation selection
-        indices, parent_ids_list, relations_list, tail_ids_list = self._knowledge_graph_lookup(parent_ids)
-        relation_embeddings = [self._relation_embedder(r) for r in relations_list]
+            # Relation selection
+            indices, parent_ids_list, relations_list, tail_ids_list = self._knowledge_graph_lookup(parent_ids)
+            relation_embeddings = [self._relation_embedder(r) for r in relations_list]
 
-        raw_tail_ids = torch.zeros_like(parent_ids)
-        tail_ids = torch.zeros_like(parent_ids)
-        for index, relation_embedding, tail_id_lookup in zip(indices, relation_embeddings, tail_ids_list):
-            logits = torch.mv(relation_embedding, encoded_relation[index])
-            _, selected_relation = torch.max(logits, dim=-1)
-            raw_tail_id = tail_id_lookup[selected_relation]
+            raw_tail_ids = torch.zeros_like(parent_ids)
+            tail_ids = torch.zeros_like(parent_ids)
+            for index, relation_embedding, tail_id_lookup in zip(indices, relation_embeddings, tail_ids_list):
+                logits = torch.mv(relation_embedding, encoded_relation[index])
+                _, selected_relation = torch.max(logits, dim=-1)
+                raw_tail_id = tail_id_lookup[selected_relation]
 
-            tail_id_string = self.vocab.get_token_from_index(raw_tail_id.item(), 'raw_entity_ids')
-            tail_id = self.vocab.get_token_index(tail_id_string, 'entity_ids')
+                tail_id_string = self.vocab.get_token_from_index(raw_tail_id.item(), 'raw_entity_ids')
+                tail_id = self.vocab.get_token_index(tail_id_string, 'entity_ids')
 
-            raw_tail_ids[index[:-1]] = raw_tail_id
-            tail_ids[index[:-1]] = tail_id
+                raw_tail_ids[index[:-1]] = raw_tail_id
+                tail_ids[index[:-1]] = tail_id
 
-        # TODO: Mask
-        raw_entity_ids = raw_tail_ids
-        entity_ids = tail_ids
+            # TODO: Mask
+            raw_entity_ids = raw_tail_ids
+            entity_ids = tail_ids
 
         # Vocab stuff
         vocab_size = self.vocab.get_vocab_size('tokens')
@@ -413,8 +414,12 @@ class Kglm(Model):
 
             # For the copy tokens, we first need to make a reverse lookup.
             entity = self.vocab.get_token_from_index(raw_entity_id, 'raw_entity_ids')
-            id_map = alias_database._id_map_lookup[entity]
-            reverse_id_map = {i: x for x, i in id_map.items()}
+            try:
+                id_map = alias_database._id_map_lookup[entity]
+                reverse_id_map = {i: x for x, i in id_map.items()}
+            except KeyError:
+                id_map = dict()
+                reverse_id_map = dict()
 
             # Now we accumulate probabilities
             for idx, prob in zip(alias_indices.tolist(), copy_probs.tolist()):
@@ -750,8 +755,15 @@ class Kglm(Model):
         combined_log_probs_extended_vocab = torch.logsumexp(combined_log_probs_extended_vocab,
                                                             dim=1)
         flattened_mask = flattened_mask.squeeze()
-        combined_log_probs_extended_vocab[~flattened_mask] = 0
+        # Zero out padding loss
+        combined_log_probs_extended_vocab = combined_log_probs_extended_vocab * flattened_mask.float()
         vocab_loss = -combined_log_probs_extended_vocab.sum() / (mask.sum() + 1e-13)
+
+        # Unknown penalty - only applies to non-copied unks
+        true_unks = unks.squeeze() & ~copied.squeeze() & flattened_mask
+        penalized_log_probs = combined_log_probs_extended_vocab - self._unk_penalty * true_unks.float()
+        penalized_log_probs[~flattened_mask] = 0
+        penalized_vocab_loss = -penalized_log_probs.sum() / (mask.sum() + 1e-13)
 
         # PERPLEXITY ###
         # Our perplexity terms are computed using the log probs computed w.r.t the source
@@ -783,7 +795,7 @@ class Kglm(Model):
         if bg_mask.any():
             self._bg_ppl(-combined_log_probs_source_vocab[bg_mask].sum(), bg_mask.float().sum() + 1e-13)
 
-        return vocab_loss
+        return vocab_loss, penalized_vocab_loss
 
     @overrides
     def train(self, mode=True):

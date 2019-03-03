@@ -86,14 +86,3 @@ class KglmDiscNoShortlistTest(KglmModelTestCase):
         torch.manual_seed(123)
         logp2 = self.model.sample(**batch).get('logp', None)
 
-        # Furthermore, padding should not affect the outcome
-        source = batch['source']
-        padding = torch.zeros_like(source['tokens'])
-        new_batch = batch.copy()
-        new_batch['source'] = {'tokens': torch.cat((source['tokens'], padding), dim=-1)}
-        new_batch['target'] = {'tokens': torch.cat((batch['target']['tokens'], padding), dim=-1)}
-        new_batch['raw_entity_ids'] = {'raw_entity_ids': torch.cat((batch['raw_entity_ids']['raw_entity_ids'], padding), dim=-1)}
-        new_batch['alias_copy_inds'] = torch.cat((batch['alias_copy_inds'], padding), dim=-1)
-        torch.manual_seed(123)
-        logp3 = self.model.sample(**new_batch).get('logp', None)
-

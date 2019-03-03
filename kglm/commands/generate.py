@@ -10,6 +10,8 @@ from allennlp.models.archival import load_archive
 from allennlp.predictors.predictor import Predictor, JsonDict
 from allennlp.data import Instance
 
+from kglm.predictors import ClozePredictor
+
 class Generate(Subcommand):
     def add_subparser(self, name: str, parser: argparse._SubParsersAction) -> argparse.ArgumentParser:
         # pylint: disable=protected-access
@@ -62,7 +64,7 @@ def _get_predictor(args: argparse.Namespace) -> Predictor:
                            cuda_device=args.cuda_device,
                            overrides=args.overrides)
 
-    return Predictor.from_archive(model, sampler, args.predictor)
+    return ClozePredictor.from_archive(model, sampler, args.predictor)
 
 
 class _PredictManager:
@@ -162,3 +164,4 @@ def _predict(args: argparse.Namespace) -> None:
                               not args.silent,
                               args.use_dataset_reader)
     manager.run()
+

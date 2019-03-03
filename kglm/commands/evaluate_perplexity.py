@@ -78,6 +78,8 @@ def evaluate_perplexity(model: Model,
     with torch.no_grad():
 
         summands = []
+        penalized_summands = []
+
         for i in range(num_samples):
             iterator = data_iterator(instances, num_epochs=1, shuffle=False)
             generator_tqdm = Tqdm.tqdm(iterator, total=0)
@@ -86,6 +88,7 @@ def evaluate_perplexity(model: Model,
             sampler.eval()
 
             summand = 0.0
+            penalized_summand = 0.0
             denom = 0
             for batch, _ in generator_tqdm:
 
@@ -100,25 +103,28 @@ def evaluate_perplexity(model: Model,
                 sample_logp = sampler_output['logp']
                 sample = sampler_output['sample']
 
-                model_logp = model(**sample).get('logp')
+                model_output = model(**sample)
+                model_logp = model_output['logp']
+                model_penalized_logp = model_output['penalized_logp']
                 summand += (model_logp - sample_logp).item()
-                batch_ppl = math.exp(-summand / denom)
-                print('Perplexity this batch: %f' % batch_ppl)
+                penalized_summand += (model_penalized_logp - sample_logp).item()
 
             summands.append(summand)
-            print('summands: %s', summands)
+            penalized_summands.append(penalized_summand)
             t = torch.tensor(summands)
+            p = torch.tensor(penalized_summands)
             t_sum = torch.logsumexp(t, dim=0)
+            p_sum = torch.logsumexp(p, dim=0)
             print('t_sum: %f' % t_sum)
             sum_logp = (t_sum - math.log(i+1)).item()
-            print('Average sum_logp: %f' % sum_logp)
+            sum_logp_penalized = (p_sum - math.log(i+1)).item()
             ppl = math.exp(-sum_logp / denom)
-            batch_ppl = math.exp(-summand / denom)
+            upp = math.exp(-sum_logp_penalized / denom)
 
-            print('Perplexity this batch: %f' % batch_ppl)
-            print('Perplexity so far: %f' % ppl)
+            print('PPL: %f' % ppl)
+            print('UPP: %f' % upp)
 
-    metrics = {'perplexity': ppl}
+    metrics = {'ppl': ppl, 'upp': upp}
     return metrics
 
 def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
@@ -167,3 +173,4 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
         with open(output_file, 'w') as f:
             json.dump(metrics, f, indent=4)
     return metrics
+

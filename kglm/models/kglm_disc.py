@@ -150,7 +150,15 @@ class KglmDisc(Model):
                 self._state['layer_%i' % layer] = (h, c)
         self._recent_entities.reset(reset)
 
+        # There's no good way to do this, so just do it ...
+        # Track true mention type to get PPL-ENT
+        true_mention_type = kwargs['mention_type']
+        true_entity_mask = true_mention_type.gt(0)
+
         logp = 0.0
+        logp_ent = 0.0
+
+
         mask = get_text_field_mask(target).byte()
         # We encode the target tokens (**not** source) since the discriminitative model makes
         # predictions on the current token, but the generative model expects labels for the
@@ -165,6 +173,10 @@ class KglmDisc(Model):
         mention_type = parallel_sample(mention_probs)
         mention_logp = mention_probs.gather(-1, mention_type.unsqueeze(-1)).log()
         mention_logp[~mask] = 0
+        try:
+            logp_ent += mention_logp[true_entity_mask].sum()
+        except:
+            import pdb; pdb.set_trace()
         mention_logp = mention_logp.sum()
 
         # Compute entity logits
@@ -189,6 +201,7 @@ class KglmDisc(Model):
             _new_entity_logp = new_entity_probs.gather(-1, new_entity_samples.unsqueeze(-1)).log()
             shortlist_inds = None
         _new_entity_logp[~mask] = 0
+        logp_ent += _new_entity_logp[new_entity_mask & true_entity_mask].sum()
         new_entity_logp = _new_entity_logp[new_entity_mask].sum()
 
         # Start filling in the entity ids
@@ -211,6 +224,7 @@ class KglmDisc(Model):
         for i in range(sequence_length):
 
             current_mask = derived_entity_mask[:, i] & mask[:, i]
+            current_true_entity_mask = true_entity_mask[:, i] & current_mask
 
             ## SAMPLE PARENTS ##
 
@@ -247,6 +261,7 @@ class KglmDisc(Model):
 
             parent_ids[current_mask, i] = _parent_ids[current_mask]  # TODO: Double-check
             derived_entity_logp += parent_logp[current_mask].sum()
+            logp_ent += parent_logp[current_true_entity_mask].sum()
 
             ## SAMPLE RELATIONS ##
 
@@ -271,6 +286,9 @@ class KglmDisc(Model):
                 # null parents to zero we shouldn't be accumulating probabilities for unused predictions.
                 tail_logp = tail_probs.gather(-1, tail_sample).log()
                 derived_entity_logp += tail_logp.sum()  # Sum is redundant, just need it to make logp a scalar
+                if current_true_entity_mask[index[:-1]]:
+                    logp_ent += tail_logp.sum()
+
                 # Map back to raw id
                 raw_tail_id = tail_id_lookup[tail_sample]
                 # Convert raw id to id
@@ -306,7 +324,7 @@ class KglmDisc(Model):
             'alias_copy_inds': alias_copy_inds
         }
         logp = mention_logp + new_entity_logp + derived_entity_logp
-        return {'sample': sample, 'logp': logp}
+        return {'sample': sample, 'logp': logp, 'logp_ent': logp_ent}
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
