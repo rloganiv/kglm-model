@@ -118,7 +118,7 @@ class EntityNLMDiscriminator(Model):
                 entity_types: Optional[torch.Tensor] = None,
                 entity_ids: Optional[torch.Tensor] = None,
                 mention_lengths: Optional[torch.Tensor] = None,
-                reset: bool = False)-> Dict[str, torch.Tensor]:
+                reset: torch.ByteTensor=None)-> Dict[str, torch.Tensor]:
         """
         Computes the loss during training / validation.
 
@@ -165,7 +165,8 @@ class EntityNLMDiscriminator(Model):
         return output_dict
 
     def sample(self,
-               tokens: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+               tokens: Dict[str, torch.Tensor],
+               reset: torch.ByteTensor=None) -> Dict[str, torch.Tensor]:
         """
         Generates a sample from the discriminative model.
 
@@ -177,6 +178,9 @@ class EntityNLMDiscriminator(Model):
         tokens : ``Dict[str, torch.Tensor]``
             A tensor of shape ``(batch_size, sequence_length)`` containing the sequence of
             tokens.
+        reset : ``bool``
+            Whether or not to reset the model's state. This should be done at the start of each
+            new sequence.
 
         Returns
         -------
@@ -194,11 +198,8 @@ class EntityNLMDiscriminator(Model):
             tokens (including the current one) there are in the mention.
         """
         batch_size, sequence_length = tokens['tokens'].shape
-
-        # We will use a standard iterator during evaluation instead of a split iterator. Otherwise
-        # it will be a pain to handle generating multiple samples for a sequence since there's no
-        # way to get back to the first split.
-        self.reset_states(tokens['tokens'].ones_like(batch_size, dtype=torch.uint8))
+        if reset is not None:
+            self.reset_states(reset)
 
         # Embed tokens and get RNN hidden state.
         mask = get_text_field_mask(tokens)
@@ -300,6 +301,7 @@ class EntityNLMDiscriminator(Model):
         return {
                 'logp': logp,
                 'sample': {
+                        'reset': reset,
                         'entity_types': entity_types,
                         'entity_ids': entity_ids,
                         'mention_lengths': mention_lengths
