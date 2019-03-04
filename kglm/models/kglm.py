@@ -169,20 +169,26 @@ class Kglm(Model):
         # looked up
         if self._use_shortlist:
             shortlist_mask = get_text_field_mask(shortlist)
-            new_entity_probs = masked_softmax(new_entity_logits, shortlist_mask)
-            shortlist_inds = torch.zeros_like(mask, dtype=torch.int64)
-            # Some sequences may be full of padding in which case the shortlist is empty
-            not_just_padding = shortlist_mask.byte().any(-1)
-            shortlist_inds[not_just_padding] = parallel_sample(new_entity_probs[not_just_padding])
-            shortlist_inds[~mask] = 0
-            new_entity_ids = shortlist['entity_ids'].gather(1, shortlist_inds)
+            if shortlist_mask.shape[-1] == 0:
+                new_entity_ids = shortlist_mask.new_zeros(encoded.shape[:-1])
+                shortlist_inds = shortlist_mask.new_zeros(encoded.shape[:-1])
+            else:
+                new_entity_probs = masked_softmax(new_entity_logits, shortlist_mask)
+                shortlist_inds = torch.zeros_like(mask, dtype=torch.int64)
+                # Some sequences may be full of padding in which case the shortlist is empty
+                not_just_padding = shortlist_mask.byte().any(-1)
+                shortlist_inds[not_just_padding] = parallel_sample(new_entity_probs[not_just_padding])
+                shortlist_inds[~mask] = 0
+                new_entity_ids = shortlist['entity_ids'].gather(1, shortlist_inds)
+                # Zero out any non-new entities.
+                new_entity_ids[~mask] = 0
         # If not using shortlist, then samples are indexed w.r.t to the global vocab
         else:
             new_entity_probs = F.softmax(new_entity_logits, dim=-1)
             new_entity_ids = parallel_sample(new_entity_probs)
             shortlist_inds = None
-        # Zero out any non-new entities.
-        new_entity_ids[~mask] = 0
+            # Zero out any non-new entities.
+            new_entity_ids[~mask] = 0
 
         return new_entity_ids, shortlist_inds
 
@@ -306,14 +312,17 @@ class Kglm(Model):
 
         # Predict mention type
         mention_type = self.predict_mention_type(encoded_token)
+        logger.debug('Passes mention type')
 
         # Predict new entities
         new_entity_ids, shortlist_inds = self.predict_new_entities(encoded_head + encoded_relation,
                                                                    mask=mention_type.eq(1),
                                                                    shortlist=shortlist)
+        logger.debug('Passes new ent')
 
         # Get their raw ids
-        raw_entity_ids = self.get_raw_entity_ids(new_entity_ids)
+        new_raw_entity_ids = self.get_raw_entity_ids(new_entity_ids)
+        logger.debug('Passes raw')
 
         # Predict parents and relations
         parent_ids, relations, derived_entity_ids, derived_raw_entity_ids = self.predict_knowledge_graph_entities(
@@ -321,22 +330,29 @@ class Kglm(Model):
             encoded_relation,
             new_entity_ids=new_entity_ids,
             mask=mention_type.eq(2))
+        logger.debug('Passes parents')
 
         # Combine new and derived entity annotations
         entity_ids = new_entity_ids
         entity_ids[mention_type.eq(2)] = derived_entity_ids[mention_type.eq(2)]
-        raw_entity_ids = new_entity_ids
+        raw_entity_ids = new_raw_entity_ids
         raw_entity_ids[mention_type.eq(2)] = derived_raw_entity_ids[mention_type.eq(2)]
 
         out_dict = {
+            'source': source,
+            'reset': reset,
+            'metadata': metadata,
             'mention_type': mention_type,
-            'parent_ids': parent_ids,
-            'relations': relations,
-            'entity_ids': entity_ids,
-            'raw_entity_ids': raw_entity_ids,
+            'raw_entity_ids': {'raw_entity_ids': raw_entity_ids},
+            'entity_ids': {'entity_ids': entity_ids},
+            'parent_ids': {'entity_ids': parent_ids.unsqueeze(-1)},
+            'relations': {'relations': relations},
+            'shortlist': shortlist,
             'shortlist_inds': shortlist_inds,
-            'metadata': metadata
+            'alias_copy_inds': torch.zeros_like(shortlist_inds)
         }
+        if 'target' in kwargs:
+            out_dict['target'] = kwargs['target']
 
         if emit_tokens:
 
@@ -347,22 +363,25 @@ class Kglm(Model):
             alias_tokens, alias_inds = alias_database.lookup(raw_entity_ids)
             copy_scores = self._copy_scores(encoded_token, alias_tokens)
 
-            # Output target probs.
-            out_dict['target_probs'] = self._vocab_logp(generate_scores, copy_scores, alias_inds).exp()
+            # Vocab stuff
+            vocab_size = self.vocab.get_vocab_size('tokens')
+            generate_scores = self._generate_scores(encoded_token, entity_ids)
+            alias_tokens, alias_indices = alias_database.lookup(raw_entity_ids)
+            copy_scores = self._copy_scores(encoded_token, alias_tokens)
+            copy_sequence_length = copy_scores.shape[-1]
+            concatenated_scores = torch.cat((generate_scores, copy_scores), dim=-1)
 
+            # In order to obtain proper log probabilities we create a mask to omit padding alias tokens
+            # from the calculation.
+            batch_size = source_tokens.shape[0]
+            score_mask = torch.ones_like(concatenated_scores)
+            alias_mask = alias_tokens.gt(0).view(batch_size, 1, -1)
+            score_mask[:, :, vocab_size:] = alias_mask
 
-                # # Copy
-                # copied = tokens >= self.vocab.get_vocab_size('tokens')
-                # copy_inds = torch.zeros_like(tokens)
-                # if copied.any():
-                #     alias_tokens = alias_tokens.view(batch_size, 1, -1)
-                #     alias_inds = alias_inds.view(batch_size, 1, -1)
-                #     copy_indices = tokens[copied] - self.vocab.get_vocab_size('tokens')
-                #     copy_indices = copy_indices.unsqueeze(-1)
-                #     copy_tokens = alias_tokens[copied].gather(-1, copy_indices).squeeze(-1)
-                #     _copy_inds = alias_inds[copied].gather(-1, copy_indices).squeeze(-1)
-                #     tokens[copied] = copy_tokens
-                #     copy_inds[copied] = _copy_inds
+            # The log-probability distribution is then given by taking the masked log softmax.
+            target_probs = masked_softmax(concatenated_scores, score_mask)
+            out_dict['target_probs'] = target_probs.detach()
+            out_dict['alias_indices'] = alias_indices.view(batch_size, -1)
 
         return out_dict
 

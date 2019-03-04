@@ -79,9 +79,11 @@ class ClozePredictor(Predictor):
     def predict_instance(self, instances: Tuple[Instance, Instance]) -> JsonDict:
         conditioning_instance, generative_instance = instances
 
+        self._model.eval()
+
         with torch.no_grad():
             # TODO: Make this a parameter somewhere
-            num_samples = 3
+            num_samples = 100
 
             # Duplicate instances (to sample in parallel)
             cuda_device = self._model._get_prediction_device()
@@ -94,22 +96,28 @@ class ClozePredictor(Predictor):
             generative_batch = util.move_to_device(generative_batch.as_tensor_dict(), cuda_device)
 
             # Sample annotations and generate next token
-            self._model.sample(**conditioning_batch, emit_tokens=False)
+            self._model._use_shortlist = True
+            conditioning_output = self._model.sample(**conditioning_batch, emit_tokens=False)
+            logger.debug('clears condition generation')
+            # self._model(**conditioning_output)  # Shouldn't need to do this, but just in case
+            # logger.debug('clears reconditioning')
             generative_output = self._model.sample(**generative_batch, emit_tokens=True)
+            logger.debug('clears generation')
             del conditioning_batch, generative_batch
 
             aggregate_word_probs = self._aggregate_word_probs(generative_output)
+            logger.debug('clears word probs')
 
             return aggregate_word_probs
 
     def _aggregate_word_probs(self, generative_output: Dict[str, Any]) -> Dict[str, List[Any]]:
+
         # Get vocab
         vocab = self._model.vocab
         vocab_size = vocab.get_vocab_size('tokens')
 
         # Get alias database
-        metadata = generative_output['metadata']
-        alias_database = metadata[0]['alias_database']
+        alias_database = generative_output['metadata'][0]['alias_database']
 
         # Split into source and target vocab probs
         target_probs = generative_output['target_probs']
@@ -122,26 +130,33 @@ class ClozePredictor(Predictor):
         index_to_token_vocabulary = vocab.get_index_to_token_vocabulary('tokens')
         for i, prob in enumerate(source_vocab_avg):
             word = index_to_token_vocabulary[i]
-            prob_dict[word] = prob
+            prob_dict[word] = prob.item()
+
+        # Get alias indices
+        alias_indices = generative_output['alias_indices']
 
         # The copy vocabs will be a little bit more difficult
         num_samples = target_probs.shape[0]
-        raw_entity_ids = generative_output['raw_entity_ids']
-        for copy_probs, raw_entity_id in zip(copy_vocab_probs, raw_entity_ids):
+        raw_entity_ids = generative_output['raw_entity_ids']['raw_entity_ids']
+        for alias_index, copy_probs, raw_entity_id in zip(alias_indices, copy_vocab_probs, raw_entity_ids):
             if raw_entity_id == 0:
                 continue
 
-            alias_tokens, alias_inds = alias_database.lookup(raw_entity_id.unsqueeze(-1))
-            alias_inds.view(-1)
-
-            entity = vocab.get_token_from_index(raw_entity_id, 'raw_entity_ids')
-            id_map = alias_database._id_map_lookup[entity]
+            entity = vocab.get_token_from_index(raw_entity_id.item(), 'raw_entity_ids')
+            try:
+                id_map = alias_database._id_map_lookup[entity]
+            except:
+                logger.warning('Error could not find id map for entity "%s"', entity)
+                continue
             reverse_id_map = {i: x for x, i in id_map.items()}
-            for ind, prob in zip(alias_inds, copy_probs):
+            for ind, prob in zip(alias_index, copy_probs.squeeze().tolist()):
                 if ind == 0:
                     continue
-                word = reverse_id_map[ind]
-                prob_dict[word] += prob / num_samples
+                word = reverse_id_map[ind.item()]
+                if word in prob_dict:
+                    prob_dict[word] += prob / num_samples
+                else:
+                    prob_dict[word] = prob / num_samples
 
         # Lastly, convert the prob_dict to a ranked list of words
         prob_list = list(prob_dict.items())
