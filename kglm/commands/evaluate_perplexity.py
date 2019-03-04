@@ -103,6 +103,7 @@ def evaluate_perplexity(model: Model,
                 sample_logp = sampler_output['logp']
                 sample = sampler_output['sample']
 
+                # Evaluate on sample
                 model_output = model(**sample)
                 model_logp = model_output['logp']
                 model_penalized_logp = model_output['penalized_logp']
@@ -115,7 +116,6 @@ def evaluate_perplexity(model: Model,
             p = torch.tensor(penalized_summands)
             t_sum = torch.logsumexp(t, dim=0)
             p_sum = torch.logsumexp(p, dim=0)
-            print('t_sum: %f' % t_sum)
             sum_logp = (t_sum - math.log(i+1)).item()
             sum_logp_penalized = (p_sum - math.log(i+1)).item()
             ppl = math.exp(-sum_logp / denom)

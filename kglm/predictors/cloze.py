@@ -5,12 +5,15 @@ from typing import Tuple
 from allennlp.common.util import JsonDict
 from allennlp.data import DatasetReader, Instance
 from allennlp.data.dataset import Batch
+from allennlp.data.fields import TextField
+from allennlp.data.tokenizers import Token
 from allennlp.models import Model
 from allennlp.models.archival import Archive, load_archive
 from allennlp.nn import util
 from allennlp.predictors import Predictor
 import numpy as np
 from overrides import overrides
+import torch
 
 from kglm.data import SequentialArrayField
 
@@ -35,9 +38,11 @@ class ClozePredictor(Predictor):
 
         # Manually add the start token
         tokens = ['@@START@@', *json_dict['prefix']]
+
         # Also need to offset
         start, end = json_dict['entity_indices']
         span = [start + 1, end + 1]
+
         # Repackage into the expected annotation format
         annotations = [{
             'id': json_dict['entity_id'],
@@ -47,9 +52,19 @@ class ClozePredictor(Predictor):
         }]
         data = {'tokens': [tokens], 'annotations': annotations}
         conditioning_instance = self._dataset_reader.text_to_instance(data)
+
         # Manually add the reset field here
         reset = SequentialArrayField(np.array(1), dtype=np.uint8)
         conditioning_instance.add_field('reset', reset)
+
+        # (Optionally) Add the shortlist
+        # if 'shortlist' in json_dict:
+        #     shortlist = json_dict['shortlist']
+        #     field = TextField(
+        #         [Token(x) for x in shortlist],
+        #         token_indexers=self._dataset_reader._entity_indexers)
+        #     conditioning_instance.fields['shortlist'] = field
+
 
         ### Generative Instance ###
 
@@ -66,33 +81,37 @@ class ClozePredictor(Predictor):
     def predict_instance(self, instances: Tuple[Instance, Instance]) -> JsonDict:
         conditioning_instance, generative_instance = instances
 
-        # TODO: Make this a parameter somewhere
-        #  num_samples = 100
-        #  best_logp = -float('inf')
-        #  sample = None
-        #  for _ in  range(num_samples):
-        #      # Duplicate conditioning instance to generate samples
-        #      cuda_device = self._sampler._get_prediction_device()
-        #      dataset = Batch([conditioning_instance])
-        #      dataset.index_instances(self._sampler.vocab)
-        #      model_input = util.move_to_device(dataset.as_tensor_dict(), cuda_device)
-        #      sampler_output = self._sampler.sample(**model_input)
-        #      # Run model
-        #      model_output = self._model(**sampler_output['sample'])
-        #      # Compute importance. If it is the best then make this the
-        #      # annotation used to generate the next word.
-        #      importance = model_output['logp'] - sampler_output['logp']
-        #      logger.debug('importance weight: %0.4f', importance)
-        #      if importance > best_logp:
-        #          logger.debug('best so far')
-        #          best_logp = importance
-        #          sample = sampler_output['sample']
+        with torch.no_grad():
+            # TODO: Make this a parameter somewhere
+            # num_samples = 10
+            # best_logp = -float('inf')
+            # sample = None
+            # for _ in  range(num_samples):
+            #     # Duplicate conditioning instance to generate samples
+            #     cuda_device = self._sampler._get_prediction_device()
+            #     dataset = Batch([conditioning_instance])
+            #     dataset.index_instances(self._sampler.vocab)
+            #     model_input = util.move_to_device(dataset.as_tensor_dict(), cuda_device)
+            #     sampler_output = self._sampler.sample(**model_input)
+            #     # Run model
+            #     model_output = self._model(**sampler_output['sample'])
+            #     # Compute importance. If it is the best then make this the
+            #     # annotation used to generate the next word.
+            #     importance = model_output['logp'] - sampler_output['logp']
+            #     logger.debug('importance weight: %0.4f', importance)
+            #     if importance > best_logp:
+            #         logger.debug('best so far')
+            #         best_logp = importance
+            #         sample = sampler_output['sample']
+            #     else:
+            #         del sampler_output
 
-        #  # Seed the model with the conditioning instance
-        #  self._model(**sample)
+            # # Seed the model with the conditioning instance
+            # self._model(**sample)
+            # del sample
 
-        # Seed the model with the conditioning instance
-        self._model.forward_on_instance(conditioning_instance)
+            # Seed the model with the conditioning instance
+            self._model.forward_on_instance(conditioning_instance)
 
         # Then generate
         return self._model.forward_on_instance(generative_instance)

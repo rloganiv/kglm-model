@@ -16,10 +16,12 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s
 from allennlp.commands import main
 from kglm.commands import EvaluatePerplexity
 from kglm.commands import Generate
+from kglm.commands import Sample
 
 if __name__ == "__main__":
     main(prog="allennlp",
          subcommand_overrides={
              'evaluate-perplexity': EvaluatePerplexity(),
-             'generate': Generate()
+             'generate': Generate(),
+             'sample': Sample()
          })
