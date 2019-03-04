@@ -101,7 +101,7 @@ def evaluate_perplexity(model: Model,
                 # Evaluate on sample
                 model_output = model(**sample)
                 model_logp = model_output['logp']
-                summand += (model_logp - sample_logp).sum().item()
+                summand += (model_logp.sum() - sample_logp.sum()).item()
 
             summands.append(summand)
             t = torch.tensor(summands)
