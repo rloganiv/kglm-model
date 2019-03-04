@@ -165,7 +165,7 @@ class EntityNLMDiscriminator(Model):
         return output_dict
 
     def sample(self,
-               tokens: Dict[str, torch.Tensor],
+               source: Dict[str, torch.Tensor],
                reset: torch.ByteTensor=None) -> Dict[str, torch.Tensor]:
         """
         Generates a sample from the discriminative model.
@@ -175,7 +175,7 @@ class EntityNLMDiscriminator(Model):
 
         Parameters
         ----------
-        tokens : ``Dict[str, torch.Tensor]``
+        source : ``Dict[str, torch.Tensor]``
             A tensor of shape ``(batch_size, sequence_length)`` containing the sequence of
             tokens.
         reset : ``torch.ByteTensor``
@@ -197,14 +197,13 @@ class EntityNLMDiscriminator(Model):
             A tensor of shape ``(batch_size, sequence_length)`` tracking how many remaining
             tokens (including the current one) there are in the mention.
         """
-        batch_size, sequence_length = tokens['tokens'].shape
+        batch_size, sequence_length = source['tokens'].shape
         if reset is not None:
             self.reset_states(reset)
 
         # Embed tokens and get RNN hidden state.
-        mask = get_text_field_mask(tokens)
-        embeddings = self._text_field_embedder(tokens)
-        hidden = self._encoder(embeddings, mask)
+        mask = get_text_field_mask(source)
+        embeddings = self._text_field_embedder(source)
         current_input = embeddings
         hidden_list = []
         for layer, rnn in enumerate(self.rnns):
@@ -224,11 +223,12 @@ class EntityNLMDiscriminator(Model):
 
         # Initialize outputs
         logp = hidden.new_zeros(batch_size) # Track total logp for **each** generated sample
-        entity_types = torch.zeros_like(tokens['tokens'], dtype=torch.uint8)
-        entity_ids = torch.zeros_like(tokens['tokens'])
-        mention_lengths = torch.ones_like(tokens['tokens'])
+        entity_types = torch.zeros_like(source['tokens'], dtype=torch.uint8)
+        entity_ids = torch.zeros_like(source['tokens'])
+        mention_lengths = torch.ones_like(source['tokens'])
 
         # Generate outputs
+        prev_mention_lengths = torch.ones(mask.size(0))
         for timestep in range(sequence_length):
 
             current_hidden = hidden[:, timestep]
@@ -301,6 +301,7 @@ class EntityNLMDiscriminator(Model):
         return {
                 'logp': logp,
                 'sample': {
+                        'source': source,
                         'reset': reset,
                         'entity_types': entity_types,
                         'entity_ids': entity_ids,
