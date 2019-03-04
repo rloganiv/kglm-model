@@ -228,7 +228,7 @@ class EntityNLMDiscriminator(Model):
         mention_lengths = torch.ones_like(source['tokens'])
 
         # Generate outputs
-        prev_mention_lengths = torch.ones(mask.size(0))
+        prev_mention_lengths = torch.ones(mask.size(0)).to(mask.device)
         for timestep in range(sequence_length):
 
             current_hidden = hidden[:, timestep]
