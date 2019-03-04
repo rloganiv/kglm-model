@@ -151,16 +151,142 @@ class Kglm(Model):
 
         initializer(self)
 
+    def predict_mention_type(self, encoded_token: torch.FloatTensor) -> torch.LongTensor:
+        # Predict mention type
+        mention_type_logits = self._fc_mention_type(encoded_token)
+        mention_type_probs = F.softmax(mention_type_logits, dim=-1)
+        mention_type = parallel_sample(mention_type_probs)
+        return mention_type
+
+    def predict_new_entities(self,
+                             encoded: torch.FloatTensor,
+                             mask: torch.ByteTensor,
+                             shortlist: Dict[str, torch.LongTensor] = None) -> torch.LongTensor:
+        # Compute entity logits
+        new_entity_logits = self._new_entity_logits(encoded, shortlist)
+
+        # If using shortlist, then samples are indexed w.r.t the shortlist and entity_ids must be
+        # looked up
+        if self._use_shortlist:
+            shortlist_mask = get_text_field_mask(shortlist)
+            new_entity_probs = masked_softmax(new_entity_logits, shortlist_mask)
+            shortlist_inds = torch.zeros_like(mask, dtype=torch.int64)
+            # Some sequences may be full of padding in which case the shortlist is empty
+            not_just_padding = shortlist_mask.byte().any(-1)
+            shortlist_inds[not_just_padding] = parallel_sample(new_entity_probs[not_just_padding])
+            shortlist_inds[~mask] = 0
+            new_entity_ids = shortlist['entity_ids'].gather(1, shortlist_inds)
+        # If not using shortlist, then samples are indexed w.r.t to the global vocab
+        else:
+            new_entity_probs = F.softmax(new_entity_logits, dim=-1)
+            new_entity_ids = parallel_sample(new_entity_probs)
+            shortlist_inds = None
+        # Zero out any non-new entities.
+        new_entity_ids[~mask] = 0
+
+        return new_entity_ids, shortlist_inds
+
+    def get_raw_entity_ids(self, entity_ids: torch.LongTensor) ->  torch.LongTensor:
+        raw_entity_ids = torch.zeros_like(entity_ids)
+        for *index, entity_id in nested_enumerate(entity_ids.tolist()):
+            token = self.vocab.get_token_from_index(entity_id, 'entity_ids')
+            raw_entity_id = self.vocab.get_token_index(token, 'raw_entity_ids')
+            raw_entity_ids[tuple(index)] = raw_entity_id
+        return raw_entity_ids
+
+    def predict_knowledge_graph_entities(self,
+                                         encoded_head: torch.FloatTensor,
+                                         encoded_relation: torch.FloatTensor,
+                                         new_entity_ids: torch.LongTensor,
+                                         mask: torch.ByteTensor) -> torch.LongTensor:
+        # Initialize outputs
+        parent_ids = torch.zeros_like(new_entity_ids)
+        relations = torch.zeros_like(new_entity_ids)
+        derived_entity_ids = torch.zeros_like(new_entity_ids)
+        derived_raw_entity_ids = torch.zeros_like(new_entity_ids)
+
+        # We can't make predictions in parallel since current predictions affect future predictions
+        # through the recent entity list.
+        sequence_length = mask.shape[1]
+
+        for i in range(sequence_length):
+
+            # Update recent entity list with any observed new entities.
+            current_entity_id = new_entity_ids[:, i].unsqueeze(1)
+            candidate_ids, candidate_mask = self._recent_entities(current_entity_id)
+
+            # Mask indicates whether to predict at this timestep
+            current_mask = mask[:, i]
+            if not current_mask.any():
+                continue
+
+            # Initialize outputs
+            current_parent_ids = torch.zeros_like(current_entity_id)
+            current_relations = torch.zeros_like(current_entity_id)
+            current_raw_tail_ids = torch.zeros_like(current_entity_id)
+            current_tail_ids = torch.zeros_like(current_entity_id)
+
+            ### SAMPLE PARENT IDS ###
+            current_encoded_head = encoded_head[:, i].unsqueeze(1)
+            candidate_embeddings = self._entity_embedder(candidate_ids)
+            selection_logits = torch.bmm(current_encoded_head, candidate_embeddings.transpose(1, 2))
+            selection_probs = masked_softmax(selection_logits, candidate_mask)
+            # Only sample if the is at least one viable candidate. Return zero for non-viable
+            # distributions.
+            viable_candidate_mask = candidate_mask.any(-1).squeeze()
+            if viable_candidate_mask.any():
+                viable_candidate_ids = candidate_ids[viable_candidate_mask]
+                viable_candidate_probs = selection_probs[viable_candidate_mask]
+                viable_parent_samples = parallel_sample(viable_candidate_probs)
+                viable_parent_ids = viable_candidate_ids.gather(-1, viable_parent_samples)
+                current_parent_ids[viable_candidate_mask] = viable_parent_ids
+            parent_ids[current_mask, i] = current_parent_ids[current_mask].squeeze(-1)
+
+            ## SAMPLE RELATIONS ##
+            current_encoded_relation = encoded_relation[:, i].unsqueeze(1)
+            # Look up parents in the knowledge graph
+            indices, _, relations_list, tail_ids_list = self._knowledge_graph_lookup(current_parent_ids)
+            relation_embeddings = [self._relation_embedder(r) for r in relations_list]
+
+            for index, relation_lookup, relation_embedding, tail_id_lookup in \
+                    zip(indices, relations_list, relation_embeddings, tail_ids_list):
+
+                logits = torch.mv(relation_embedding, current_encoded_relation[index])
+                tail_probs = F.softmax(logits, dim=-1)
+                tail_sample = torch.multinomial(tail_probs, 1)
+                # Lookup relation and tail's raw entity id
+                relation = relation_lookup[tail_sample]
+                raw_tail_id = tail_id_lookup[tail_sample]
+                # Convert raw entity id to entity id
+                tail_id_string = self.vocab.get_token_from_index(raw_tail_id.item(), 'raw_entity_ids')
+                tail_id = self.vocab.get_token_index(tail_id_string, 'entity_ids')
+                # Update list
+                current_relations[index] = relation
+                current_raw_tail_ids[index] = raw_tail_id
+                current_tail_ids[index] = tail_id
+
+            # Update outputs
+            relations[current_mask, i] = current_relations[current_mask].squeeze(-1)
+            derived_raw_entity_ids[current_mask, i] = current_raw_tail_ids[current_mask].squeeze(-1)
+            derived_entity_ids[current_mask, i] = current_tail_ids[current_mask].squeeze(-1)
+
+            # Add any predicted tail entities to recent entities
+            self._recent_entities.insert(current_tail_ids, current_mask)
+
+        return parent_ids, relations, derived_entity_ids, derived_raw_entity_ids
+
     def sample(self,
-               alias_database: AliasDatabase,
-               source: Dict[str, torch.Tensor] = None,
-               batch_size: int = 100,
-               length: int = 100):
+               source: Dict[str, torch.LongTensor],
+               reset: torch.ByteTensor,
+               metadata: List[Dict[str, Any]],
+               emit_tokens: bool,
+               shortlist: Dict[str, torch.LongTensor] = None,
+               **kwargs):
         # Tensorize the alias_database - this will only perform the operation once.
+        alias_database = metadata[0]['alias_database']
         alias_database.tensorize(vocab=self.vocab)
 
         # Reset
-        reset = torch.ones(batch_size, dtype=torch.uint8)
         if reset.any() and (self._state is not None):
             for layer in range(self._num_layers):
                 h, c = self._state['layer_%i' % layer]
@@ -169,145 +295,76 @@ class Kglm(Model):
                 self._state['layer_%i' % layer] = (h, c)
         self._recent_entities.reset(reset)
 
-        # Outputs
-        all_mention_types = torch.zeros(batch_size, length, dtype=torch.int64)
-        all_parent_ids = torch.zeros(batch_size, length, dtype=torch.int64)
-        all_relation_ids = torch.zeros(batch_size, length, dtype=torch.int64)
-        all_entity_ids = torch.zeros(batch_size, length, dtype=torch.int64)
-        all_raw_entity_ids = torch.zeros(batch_size, length, dtype=torch.int64)
-        all_vocab = torch.zeros(batch_size, length, dtype=torch.int64)
-        all_copy_inds = torch.zeros(batch_size, length, dtype=torch.int64)
+        # Get source tokens
+        source_tokens = source['tokens']
 
-        with torch.no_grad():
+        # Embed source tokens.
+        # shape: (batch_size, sequence_length, embedding_dim)
+        encoded, *_ = self._encode_source(source_tokens)
+        splits = [self.token_embedding_dim] + [self.entity_embedding_dim] * 2
+        encoded_token, encoded_head, encoded_relation = encoded.split(splits, dim=-1)
 
-            # Source tensor
-            source = torch.zeros(batch_size, 1, dtype=torch.int64).fill_(self.vocab.get_token_index('@@START@@', 'tokens'))
+        # Predict mention type
+        mention_type = self.predict_mention_type(encoded_token)
 
-            # Track whether a new entity has been predicted before
-            any_new = torch.zeros_like(source, dtype=torch.uint8)
+        # Predict new entities
+        new_entity_ids, shortlist_inds = self.predict_new_entities(encoded_head + encoded_relation,
+                                                                   mask=mention_type.eq(1),
+                                                                   shortlist=shortlist)
 
-            for i in range(length):
+        # Get their raw ids
+        raw_entity_ids = self.get_raw_entity_ids(new_entity_ids)
 
-                # Embed source tokens.
-                # shape: (batch_size, sequence_length, embedding_dim)
-                encoded, alpha_loss, beta_loss = self._encode_source(source)
-                splits = [self.token_embedding_dim] + [self.entity_embedding_dim] * 2
-                encoded_token, encoded_head, encoded_relation = encoded.split(splits, dim=-1)
+        # Predict parents and relations
+        parent_ids, relations, derived_entity_ids, derived_raw_entity_ids = self.predict_knowledge_graph_entities(
+            encoded_head,
+            encoded_relation,
+            new_entity_ids=new_entity_ids,
+            mask=mention_type.eq(2))
 
-                # Predict mention type
-                mention_type_logits = self._fc_mention_type(encoded_token)
-                mention_type_probs = F.softmax(mention_type_logits, dim=-1)
-                # We need to manually zero out any invalid derived mentions
-                mention_type_probs[~any_new.squeeze(), :, -1] = 0.0
-                # NOTE: Multinomial p.d.f doesn't need to be normalized, this
-                # should be okay.
-                mention_type = parallel_sample(mention_type_probs)
+        # Combine new and derived entity annotations
+        entity_ids = new_entity_ids
+        entity_ids[mention_type.eq(2)] = derived_entity_ids[mention_type.eq(2)]
+        raw_entity_ids = new_entity_ids
+        raw_entity_ids[mention_type.eq(2)] = derived_raw_entity_ids[mention_type.eq(2)]
 
-                # Track which sequences now can generate from the KG
-                any_new[mention_type.eq(1)] = 1
-
-                # Predict new entities
-                new_entity_logits = self._fc_new_entity(encoded_head + encoded_relation)
-                new_entity_probs = F.softmax(new_entity_logits, dim=-1)
-                entity_ids = parallel_sample(new_entity_probs)
-                entity_ids[~mention_type.eq(1)] = 0
-
-                # Get their raw ids
-                raw_entity_ids = torch.zeros_like(entity_ids)
-                for *index, entity_id in nested_enumerate(entity_ids.tolist()):
-                    token = self.vocab.get_token_from_index(entity_id, 'entity_ids')
-                    raw_entity_id = self.vocab.get_token_index(token, 'raw_entity_ids')
-                    raw_entity_ids[tuple(index)] = raw_entity_id
-
-                # Predict parents
-
-                # Start by updating the recent entities
-                candidate_ids, candidate_mask = self._recent_entities(entity_ids)
-                candidate_embeddings = self._entity_embedder(candidate_ids)
-                parent_logits = torch.bmm(encoded_head, candidate_embeddings.transpose(1, 2))
-                parent_probs = masked_softmax(parent_logits, candidate_mask)
-                # Sample parents. Need to use mask to avoid sequences with no candidates
-                parent_ids = torch.zeros_like(entity_ids)
-                viable = candidate_mask.any(-1).squeeze() & mention_type.eq(2)
-                if viable.any():
-                    sampled_candidate_ids = parallel_sample(parent_probs[viable])
-                    sampled_parent_ids = candidate_ids[viable].gather(-1, sampled_candidate_ids)
-                    parent_ids[viable] = sampled_parent_ids
-
-                # Predict relations
-                relations = torch.zeros_like(entity_ids)
-                if viable.any():
-                    indices, _, relation_ids_list, tail_ids_list = self._knowledge_graph_lookup(_parent_ids)
-                    relation_embeddings = [self._relation_embedder(r) for r in relations_list]
-
-                    for index, relation_ids, relation_embedding, tail_id_lookup in zip(indices, relation_ids_list, relation_embeddings, tail_ids_list):
-                        if ~viable[index]:
-                            continue
-                        # Compute the score for each relation w.r.t the current encoding. NOTE: In the loss
-                        # code index has a slice. We don't need that here since there is always a
-                        # **single** parent.
-                        logits = torch.mv(relation_embedding, encoded_relation[index])
-                        # Convert to probability
-                        tail_probs = F.softmax(logits, dim=-1)
-                        # Sample
-                        tail_sample = torch.multinomial(tail_probs, 1)
-
-                        # Map back to ids
-                        relation = relation_ids[tail_sample]
-                        raw_tail_id = tail_id_lookup[tail_sample]
-
-                        # Convert raw id to id
-                        tail_id_string = self.vocab.get_token_from_index(raw_tail_id.item(), 'raw_entity_ids')
-                        tail_id = self.vocab.get_token_index(tail_id_string, 'entity_ids')
-
-                        relations[index] = relation
-                        raw_entity_ids[index] = raw_tail_id
-                        entity_ids[index] = tail_id
-                # In case we rendered a tail, we need to update recent entities
-                self._recent_entities.insert(entity_ids)
-
-                # Predict generation-mode scores. Note: these are W.R.T to entity_ids since we need the embedding.
-                generate_scores = self._generate_scores(encoded_token, entity_ids)
-
-                # Predict copy-mode scores. Note: these are W.R.T raw_entity_ids since we need to look up aliases.
-                alias_tokens, alias_inds = alias_database.lookup(raw_entity_ids)
-                copy_scores = self._copy_scores(encoded_token, alias_tokens)
-
-                vocab_probs = self._vocab_logp(generate_scores, copy_scores, alias_inds).exp()
-                tokens = parallel_sample(vocab_probs)
-
-                # Copy
-                copied = tokens >= self.vocab.get_vocab_size('tokens')
-                copy_inds = torch.zeros_like(tokens)
-                if copied.any():
-                    alias_tokens = alias_tokens.view(batch_size, 1, -1)
-                    alias_inds = alias_inds.view(batch_size, 1, -1)
-                    copy_indices = tokens[copied] - self.vocab.get_vocab_size('tokens')
-                    copy_indices = copy_indices.unsqueeze(-1)
-                    copy_tokens = alias_tokens[copied].gather(-1, copy_indices).squeeze(-1)
-                    _copy_inds = alias_inds[copied].gather(-1, copy_indices).squeeze(-1)
-                    tokens[copied] = copy_tokens
-                    copy_inds[copied] = _copy_inds
-
-                # Write to outputs
-                all_mention_types[:, i] = mention_type.squeeze(-1)
-                all_parent_ids[:, i] = parent_ids.squeeze(-1)
-                all_relation_ids[:, i] = relations.squeeze(-1)
-                all_entity_ids[:, i] = entity_ids.squeeze(-1)
-                all_raw_entity_ids[:, i] = raw_entity_ids.squeeze(-1)
-                all_vocab[:, i] = tokens.squeeze(-1)
-                all_copy_inds[:, i] = copy_inds.squeeze(-1)
-
-                source = tokens.detach()
-
-        return {
-            'mention_type': all_mention_types,
-            'parent_id': all_parent_ids,
-            'relation': all_relation_ids,
-            'entity_id': all_entity_ids,
-            'target': all_vocab,
-            'copy_inds': all_copy_inds
+        out_dict = {
+            'mention_type': mention_type,
+            'parent_ids': parent_ids,
+            'relations': relations,
+            'entity_ids': entity_ids,
+            'raw_entity_ids': raw_entity_ids,
+            'shortlist_inds': shortlist_inds,
+            'metadata': metadata
         }
+
+        if emit_tokens:
+
+            # Predict generation-mode scores.
+            generate_scores = self._generate_scores(encoded_token, entity_ids)
+
+            # Predict copy-mode scores.
+            alias_tokens, alias_inds = alias_database.lookup(raw_entity_ids)
+            copy_scores = self._copy_scores(encoded_token, alias_tokens)
+
+            # Output target probs.
+            out_dict['target_probs'] = self._vocab_logp(generate_scores, copy_scores, alias_inds).exp()
+
+
+                # # Copy
+                # copied = tokens >= self.vocab.get_vocab_size('tokens')
+                # copy_inds = torch.zeros_like(tokens)
+                # if copied.any():
+                #     alias_tokens = alias_tokens.view(batch_size, 1, -1)
+                #     alias_inds = alias_inds.view(batch_size, 1, -1)
+                #     copy_indices = tokens[copied] - self.vocab.get_vocab_size('tokens')
+                #     copy_indices = copy_indices.unsqueeze(-1)
+                #     copy_tokens = alias_tokens[copied].gather(-1, copy_indices).squeeze(-1)
+                #     _copy_inds = alias_inds[copied].gather(-1, copy_indices).squeeze(-1)
+                #     tokens[copied] = copy_tokens
+                #     copy_inds[copied] = _copy_inds
+
+        return out_dict
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ

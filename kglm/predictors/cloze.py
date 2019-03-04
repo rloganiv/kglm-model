@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Tuple
+from typing import Any, Dict, List, Tuple
 
 from allennlp.common.util import JsonDict
 from allennlp.data import DatasetReader, Instance
@@ -22,9 +22,8 @@ logger = logging.getLogger(__name__)
 
 @Predictor.register('cloze')
 class ClozePredictor(Predictor):
-    def __init__(self, model: Model, sampler: Model, dataset_reader: DatasetReader):
+    def __init__(self, model: Model, dataset_reader: DatasetReader):
         self._model = model
-        self._sampler = sampler
         self._dataset_reader = dataset_reader
 
     @overrides
@@ -57,14 +56,13 @@ class ClozePredictor(Predictor):
         reset = SequentialArrayField(np.array(1), dtype=np.uint8)
         conditioning_instance.add_field('reset', reset)
 
-        # (Optionally) Add the shortlist
-        # if 'shortlist' in json_dict:
-        #     shortlist = json_dict['shortlist']
-        #     field = TextField(
-        #         [Token(x) for x in shortlist],
-        #         token_indexers=self._dataset_reader._entity_indexers)
-        #     conditioning_instance.fields['shortlist'] = field
-
+        # Add the shortlist
+        if 'shortlist' in json_dict:
+            shortlist = json_dict['shortlist']
+            field = TextField(
+                [Token(x) for x in shortlist],
+                token_indexers=self._dataset_reader._entity_indexers)
+            conditioning_instance.fields['shortlist'] = field
 
         ### Generative Instance ###
 
@@ -83,57 +81,71 @@ class ClozePredictor(Predictor):
 
         with torch.no_grad():
             # TODO: Make this a parameter somewhere
-            # num_samples = 10
-            # best_logp = -float('inf')
-            # sample = None
-            # for _ in  range(num_samples):
-            #     # Duplicate conditioning instance to generate samples
-            #     cuda_device = self._sampler._get_prediction_device()
-            #     dataset = Batch([conditioning_instance])
-            #     dataset.index_instances(self._sampler.vocab)
-            #     model_input = util.move_to_device(dataset.as_tensor_dict(), cuda_device)
-            #     sampler_output = self._sampler.sample(**model_input)
-            #     # Run model
-            #     model_output = self._model(**sampler_output['sample'])
-            #     # Compute importance. If it is the best then make this the
-            #     # annotation used to generate the next word.
-            #     importance = model_output['logp'] - sampler_output['logp']
-            #     logger.debug('importance weight: %0.4f', importance)
-            #     if importance > best_logp:
-            #         logger.debug('best so far')
-            #         best_logp = importance
-            #         sample = sampler_output['sample']
-            #     else:
-            #         del sampler_output
+            num_samples = 3
 
-            # # Seed the model with the conditioning instance
-            # self._model(**sample)
-            # del sample
+            # Duplicate instances (to sample in parallel)
+            cuda_device = self._model._get_prediction_device()
+            conditioning_batch = Batch([conditioning_instance] * num_samples)
+            conditioning_batch.index_instances(self._model.vocab)
+            conditioning_batch = util.move_to_device(conditioning_batch.as_tensor_dict(), cuda_device)
 
-            # Seed the model with the conditioning instance
-            self._model.forward_on_instance(conditioning_instance)
+            generative_batch = Batch([generative_instance] * num_samples)
+            generative_batch.index_instances(self._model.vocab)
+            generative_batch = util.move_to_device(generative_batch.as_tensor_dict(), cuda_device)
 
-        # Then generate
-        return self._model.forward_on_instance(generative_instance)
+            # Sample annotations and generate next token
+            self._model.sample(**conditioning_batch, emit_tokens=False)
+            generative_output = self._model.sample(**generative_batch, emit_tokens=True)
+            del conditioning_batch, generative_batch
 
-    @classmethod
-    def from_archive(cls, model_archive: Archive, sampler_archive: Archive, predictor_name: str = None) -> 'Predictor':
-        """
-        Instantiate a :class:`Predictor` from an :class:`~allennlp.models.archival.Archive`;
-        that is, from the result of training a model. Optionally specify which `Predictor`
-        subclass; otherwise, the default one for the model will be used.
-        """
-        # Duplicate the config so that the config inside the archive doesn't get consumed
-        model_config = model_archive.config.duplicate()
+            aggregate_word_probs = self._aggregate_word_probs(generative_output)
 
-        dataset_reader_params = model_config["dataset_reader"]
-        dataset_reader = DatasetReader.from_params(dataset_reader_params)
+            return aggregate_word_probs
 
-        model = model_archive.model
-        model.eval()
+    def _aggregate_word_probs(self, generative_output: Dict[str, Any]) -> Dict[str, List[Any]]:
+        # Get vocab
+        vocab = self._model.vocab
+        vocab_size = vocab.get_vocab_size('tokens')
 
-        sampler = sampler_archive.model
-        sampler.eval()
+        # Get alias database
+        metadata = generative_output['metadata']
+        alias_database = metadata[0]['alias_database']
 
-        return Predictor.by_name(predictor_name)(model, sampler, dataset_reader)
+        # Split into source and target vocab probs
+        target_probs = generative_output['target_probs']
+        source_vocab_probs = target_probs[:, :, :vocab_size]
+        copy_vocab_probs = target_probs[:, :, vocab_size:]
 
+        # Average source vocab prob is easy to compute
+        source_vocab_avg = source_vocab_probs.mean(0).squeeze()
+        prob_dict = dict()
+        index_to_token_vocabulary = vocab.get_index_to_token_vocabulary('tokens')
+        for i, prob in enumerate(source_vocab_avg):
+            word = index_to_token_vocabulary[i]
+            prob_dict[word] = prob
+
+        # The copy vocabs will be a little bit more difficult
+        num_samples = target_probs.shape[0]
+        raw_entity_ids = generative_output['raw_entity_ids']
+        for copy_probs, raw_entity_id in zip(copy_vocab_probs, raw_entity_ids):
+            if raw_entity_id == 0:
+                continue
+
+            alias_tokens, alias_inds = alias_database.lookup(raw_entity_id.unsqueeze(-1))
+            alias_inds.view(-1)
+
+            entity = vocab.get_token_from_index(raw_entity_id, 'raw_entity_ids')
+            id_map = alias_database._id_map_lookup[entity]
+            reverse_id_map = {i: x for x, i in id_map.items()}
+            for ind, prob in zip(alias_inds, copy_probs):
+                if ind == 0:
+                    continue
+                word = reverse_id_map[ind]
+                prob_dict[word] += prob / num_samples
+
+        # Lastly, convert the prob_dict to a ranked list of words
+        prob_list = list(prob_dict.items())
+        prob_list.sort(key=lambda x: x[1], reverse=True)
+
+        words, probs = zip(*prob_list[:1000])
+        return {'words': words, 'probs': probs}

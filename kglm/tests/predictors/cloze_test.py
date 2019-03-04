@@ -13,11 +13,10 @@ class ClozePredictorTest(AllenNlpTestCase):
             "prefix": ["Benton", "Brindge", "is", "in"],
             "expected_tail": "Washington",
             "entity_id": "Q4890550",
-            "entity_indices": [0, 2]
+            "entity_indices": [0, 2],
+            "shortlist": ["Q4890550", "Q35657"]
         }
         archive = load_archive('kglm/tests/fixtures/kglm.model.tar.gz')
-        # TODO: Really need to import a valid discriminator, not just the
-        # generator twice.
-        predictor = ClozePredictor.from_archive(archive, archive, 'cloze')
+        predictor = Predictor.from_archive(archive, 'cloze')
         predictor.predict_json(inputs)
         predictor.predict_json(inputs)
