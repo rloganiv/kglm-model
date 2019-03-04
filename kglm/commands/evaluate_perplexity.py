@@ -85,13 +85,13 @@ def evaluate_perplexity(model: Model,
             generator_tqdm = Tqdm.tqdm(iterator, total=0)
 
             summand = 0.0
-            denom = 0
+            denom = 0.0
 
             for batch, _ in generator_tqdm:
                 batch = util.move_to_device(batch, cuda_device)
                 # We need sequence length to help compute perplexity
                 n_tokens = util.get_text_field_mask(batch['source']).float().sum().item()
-                denom += (n_tokens / 100)
+                denom += (n_tokens)
 
                 # Draw a sample
                 sampler_output = sampler.sample(batch["source"], batch["reset"])
@@ -101,7 +101,13 @@ def evaluate_perplexity(model: Model,
                 # Evaluate on sample
                 model_output = model(**sample)
                 model_logp = model_output['logp']
-                summand += ((model_logp.sum() - sample_logp.sum()).item() / 100)
+                inc = model_logp.sum() - sample_logp.sum()
+                logger.debug('Model: %0.4f', model_logp.sum() / n_tokens)
+                logger.debug('Sample: %0.4f', sample_logp.sum() / n_tokens)
+                summand += inc
+
+                ppl = math.exp(-summand / denom)
+                logger.debug('PPL: %f' % ppl)
 
             summands.append(summand)
             t = torch.tensor(summands)
@@ -162,3 +168,4 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
         with open(output_file, 'w') as f:
             json.dump(metrics, f, indent=4)
     return metrics
+

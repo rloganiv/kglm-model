@@ -5,6 +5,8 @@ import torch
 from torch.nn import Module, Parameter
 import torch.nn.functional as F
 
+from allennlp.nn.util import masked_log_softmax
+
 
 class DynamicEmbedding(Module):
     """Dynamic embedding module.
@@ -216,7 +218,7 @@ class DynamicEmbedding(Module):
         num_embeddings = self.num_embeddings[mask].unsqueeze(1)
         arange = torch.arange(self._max_embeddings, device=num_embeddings.device).repeat(mask.sum(), 1)
         logit_mask = arange.lt(num_embeddings)
-        logits[logit_mask != 1] = -float('inf')
+        logits[logit_mask != 1] = 1e-34
 
         out = {
                 'logits': logits,
@@ -224,8 +226,9 @@ class DynamicEmbedding(Module):
         }
 
         if target is not None:
-            target = target[mask]
-            loss = F.cross_entropy(logits, target, reduction='none')
+            target = target[mask].unsqueeze(-1)
+            log_probs = masked_log_softmax(logits, logit_mask)
+            loss = log_probs.gather(-1, target)
             out['loss'] = loss
 
         return out

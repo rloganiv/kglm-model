@@ -11,6 +11,7 @@ from allennlp.modules.input_variational_dropout import InputVariationalDropout
 from allennlp.modules.text_field_embedders import TextFieldEmbedder
 from allennlp.modules.seq2seq_encoders import Seq2SeqEncoder
 from allennlp.nn import InitializerApplicator
+from allennlp.nn.util import masked_softmax
 from allennlp.training.metrics import CategoricalAccuracy
 from overrides import overrides
 import torch
@@ -201,6 +202,11 @@ class EntityNLMDiscriminator(Model):
         if reset is not None:
             self.reset_states(reset)
 
+        if self._state is None:
+            prev_mention_lengths = source['tokens'].new_ones(batch_size)
+        else:
+            prev_mention_lengths = self._state['prev_mention_lengths']
+
         # Embed tokens and get RNN hidden state.
         mask = get_text_field_mask(source)
         embeddings = self._text_field_embedder(source)
@@ -221,6 +227,8 @@ class EntityNLMDiscriminator(Model):
             current_input = output
         hidden = current_input
 
+        self._state = {'layer_%i' % i: h for i, h in enumerate(hidden_list)}
+
         # Initialize outputs
         logp = hidden.new_zeros(batch_size) # Track total logp for **each** generated sample
         entity_types = torch.zeros_like(source['tokens'], dtype=torch.uint8)
@@ -235,8 +243,8 @@ class EntityNLMDiscriminator(Model):
 
             # We only predict types / ids / lengths if the previous mention is terminated.
             predict_mask = prev_mention_lengths == 1
-            predict_mask = predict_mask * mask[:, timestep].byte()
-            if predict_mask.sum() > 0:
+            predict_mask = predict_mask & mask[:, timestep].byte()
+            if predict_mask.any():
 
                 # Predict entity types
                 entity_type_logits = self._entity_type_projection(current_hidden[predict_mask])
@@ -247,14 +255,19 @@ class EntityNLMDiscriminator(Model):
                 logp[predict_mask] += entity_type_prediction_logp
 
                 # Only predict entity and mention lengths if we predicted that there was a mention
-                predict_em = entity_types[:, timestep] * predict_mask
+                predict_em = entity_types[:, timestep] & predict_mask
                 if predict_em.sum() > 0:
                     # Predict entity ids
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
                                                                             mask=predict_em)
                     entity_id_logits = entity_id_prediction_outputs['logits']
-                    entity_id_logp = F.log_softmax(entity_id_logits, dim=-1)
-                    entity_id_prediction_logp, entity_id_predictions = sample_from_logp(entity_id_logp)
+                    entity_id_mask = entity_id_prediction_outputs['logit_mask']
+                    entity_id_probs = masked_softmax(entity_id_logits,
+                                                     entity_id_mask)
+                    entity_id_predictions = torch.multinomial(entity_id_probs, 1)
+                    entity_id_prediction_logp = entity_id_probs.gather(-1, entity_id_predictions).log()
+                    entity_id_predictions = entity_id_predictions.squeeze(-1)
+                    entity_id_prediction_logp = entity_id_prediction_logp.squeeze(-1)
 
                     # Predict mention lengths - we do this before writing the
                     # entity id predictions since we'll need to reindex the new
@@ -297,6 +310,9 @@ class EntityNLMDiscriminator(Model):
 
             # Update mention lengths for next timestep
             prev_mention_lengths = mention_lengths[:, timestep]
+
+        # Update state
+        self._state['prev_mention_lengths'] = prev_mention_lengths.detach()
 
         return {
                 'logp': logp,

@@ -272,7 +272,7 @@ class EntityNLM(Model):
         entity_id_loss = 0.0
         mention_length_loss = 0.0
         vocab_loss = 0.0
-        logp = hidden.new_zeros(batch_size)
+        # logp = hidden.new_zeros(batch_size)
 
         # We dynamically add entities and update their representations in sequence. The following
         # loop is designed to imitate as closely as possible lines 219-313 in:
@@ -322,14 +322,13 @@ class EntityNLM(Model):
 
                 # Equation 3 in the paper.
                 entity_type_logits = self._entity_type_projection(current_hidden[predict_all])
-                _entity_type_loss = F.cross_entropy(entity_type_logits,
-                                                    next_entity_types[predict_all].long(),
-                                                    reduction='none')
+                entity_type_logp = F.softmax(entity_type_logits, -1)
+                _entity_type_loss = -entity_type_logp.gather(-1, next_entity_types[predict_all].long().unsqueeze(-1))
                 entity_type_loss += _entity_type_loss.sum()
 
-                entity_type_logp = torch.zeros_like(next_entity_types, dtype=torch.float32)
-                entity_type_logp[predict_all] = -_entity_type_loss
-                logp += entity_type_logp
+                # entity_type_logp = torch.zeros_like(next_entity_types, dtype=torch.float32)
+                # entity_type_logp[predict_all] = -_entity_type_loss
+                # logp += entity_type_logp
 
                 self._entity_type_accuracy(predictions=entity_type_logits,
                                            gold_labels=next_entity_types[predict_all].long())
@@ -341,12 +340,12 @@ class EntityNLM(Model):
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
                                                                             target=next_entity_ids,
                                                                             mask=predict_em)
-                    _entity_id_loss = entity_id_prediction_outputs['loss']
+                    _entity_id_loss = -entity_id_prediction_outputs['loss']
                     entity_id_loss += _entity_id_loss.sum()
 
-                    entity_id_logp = torch.zeros_like(next_entity_ids, dtype=torch.float32)
-                    entity_id_logp[predict_em] = -_entity_id_loss
-                    logp += entity_id_logp
+                    # entity_id_logp = torch.zeros_like(next_entity_ids, dtype=torch.float32)
+                    # entity_id_logp[predict_em] = -_entity_id_loss
+                    # logp += entity_id_logp
 
                     self._entity_id_accuracy(predictions=entity_id_prediction_outputs['logits'],
                                              gold_labels=next_entity_ids[predict_em])
@@ -356,14 +355,16 @@ class EntityNLM(Model):
                     next_entity_embeddings = self._dropout(next_entity_embeddings)
                     concatenated = torch.cat((current_hidden[predict_em], next_entity_embeddings), dim=-1)
                     mention_length_logits = self._mention_length_projection(concatenated)
-                    _mention_length_loss = F.cross_entropy(mention_length_logits,
-                                                           next_mention_lengths[predict_em],
-                                                           reduction='none')
+                    mention_length_logp = F.log_softmax(mention_length_logits, -1)
+                    _mention_length_loss = -mention_length_logp.gather(-1, next_mention_lengths[predict_em].unsqueeze(-1))
+                    # _mention_length_loss = F.cross_entropy(mention_length_logits,
+                    #                                        next_mention_lengths[predict_em],
+                    #                                        reduction='none')
                     mention_length_loss += _mention_length_loss.sum()
 
-                    mention_length_logp = torch.zeros_like(next_mention_lengths, dtype=torch.float32)
-                    mention_length_logp[predict_em] = -_mention_length_loss
-                    logp += mention_length_logp
+                    # mention_length_logp = torch.zeros_like(next_mention_lengths, dtype=torch.float32)
+                    # mention_length_logp[predict_em] = -_mention_length_loss
+                    # logp += mention_length_logp
 
                     self._mention_length_accuracy(predictions=mention_length_logits,
                                                   gold_labels=next_mention_lengths[predict_em])
@@ -381,12 +382,14 @@ class EntityNLM(Model):
                 vocab_features[next_entity_types] = vocab_features[next_entity_types] + entity_embeddings
             if (1 - next_entity_types.sum()) > 0:
                 vocab_features[1 - next_entity_types] = vocab_features[1 - next_entity_types] + context_embeddings
-            vocab_logits = self._vocab_projection(vocab_features)
+            vocab_logits = self._vocab_projection(vocab_features[next_mask.byte()])
+            vocab_logp = F.log_softmax(vocab_logits, -1)
+            _vocab_loss = -vocab_logp.gather(-1, next_tokens[next_mask.byte()].unsqueeze(-1))
 
-            _vocab_loss = F.cross_entropy(vocab_logits, next_tokens, reduction='none')
-            _vocab_loss = _vocab_loss * next_mask.float()
+            # _vocab_loss = F.cross_entropy(vocab_logits, next_tokens, reduction='none')
+            # _vocab_loss = _vocab_loss * next_mask.float()
             vocab_loss += _vocab_loss.sum()
-            logp += -_vocab_loss
+            # logp += -_vocab_loss
 
             # self._perplexity(logits=vocab_logits,
             #                  labels=next_tokens,
@@ -400,9 +403,13 @@ class EntityNLM(Model):
 
         # Normalize the losses
         entity_type_loss /= mask.sum()
+        logger.debug('Entity type loss: %0.4f', entity_type_loss)
         entity_id_loss /= mask.sum()
+        logger.debug('Entity id loss: %0.4f', entity_id_loss)
         mention_length_loss /= mask.sum()
+        logger.debug('Mention length loss: %0.4f', mention_length_loss)
         vocab_loss /= mask.sum()
+        logger.debug('Vocab loss: %0.4f', vocab_loss)
         total_loss = entity_type_loss + entity_id_loss + mention_length_loss + vocab_loss
 
         output_dict = {
@@ -411,7 +418,7 @@ class EntityNLM(Model):
                 'mention_length_loss': mention_length_loss,
                 'vocab_loss': vocab_loss,
                 'loss': total_loss,
-                'logp': logp
+                'logp': -total_loss * mask.sum()
         }
 
         # Update the model state
