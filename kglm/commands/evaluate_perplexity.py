@@ -91,7 +91,7 @@ def evaluate_perplexity(model: Model,
                 batch = util.move_to_device(batch, cuda_device)
                 # We need sequence length to help compute perplexity
                 n_tokens = util.get_text_field_mask(batch['source']).float().sum().item()
-                denom += n_tokens
+                denom += (n_tokens / 100)
 
                 # Draw a sample
                 sampler_output = sampler.sample(batch["source"], batch["reset"])
@@ -101,7 +101,7 @@ def evaluate_perplexity(model: Model,
                 # Evaluate on sample
                 model_output = model(**sample)
                 model_logp = model_output['logp']
-                summand += (model_logp.sum() - sample_logp.sum()).item()
+                summand += ((model_logp.sum() - sample_logp.sum()).item() / 100)
 
             summands.append(summand)
             t = torch.tensor(summands)
