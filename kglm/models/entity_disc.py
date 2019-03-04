@@ -136,7 +136,7 @@ class EntityNLMDiscriminator(Model):
         mention_lengths : ``torch.Tensor``
             A tensor of shape ``(batch_size, sequence_length)`` tracking how many remaining
             tokens (including the current one) there are in the mention.
-        reset : ``bool``
+        reset : ``torch.ByteTensor``
             Whether or not to reset the model's state. This should be done at the start of each
             new sequence.
 
@@ -178,7 +178,7 @@ class EntityNLMDiscriminator(Model):
         tokens : ``Dict[str, torch.Tensor]``
             A tensor of shape ``(batch_size, sequence_length)`` containing the sequence of
             tokens.
-        reset : ``bool``
+        reset : ``torch.ByteTensor``
             Whether or not to reset the model's state. This should be done at the start of each
             new sequence.
 
