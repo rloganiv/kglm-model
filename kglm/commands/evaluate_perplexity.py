@@ -102,7 +102,6 @@ def evaluate_perplexity(model: Model,
                 model_output = model(**sample)
                 model_logp = model_output['logp']
                 summand += (model_logp - sample_logp).sum().item()
-                print('PPL ESTIMATE: %f' % (math.exp(-summand / denom)))
 
             summands.append(summand)
             t = torch.tensor(summands)
