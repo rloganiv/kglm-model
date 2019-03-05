@@ -348,8 +348,7 @@ class Kglm(Model):
             'parent_ids': {'entity_ids': parent_ids.unsqueeze(-1)},
             'relations': {'relations': relations},
             'shortlist': shortlist,
-            'shortlist_inds': shortlist_inds,
-            'alias_copy_inds': torch.zeros_like(shortlist_inds)
+            'shortlist_inds': shortlist_inds
         }
         if 'target' in kwargs:
             out_dict['target'] = kwargs['target']

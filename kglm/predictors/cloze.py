@@ -57,12 +57,12 @@ class ClozePredictor(Predictor):
         conditioning_instance.add_field('reset', reset)
 
         # Add the shortlist
-        if 'shortlist' in json_dict:
-            shortlist = json_dict['shortlist']
-            field = TextField(
-                [Token(x) for x in shortlist],
-                token_indexers=self._dataset_reader._entity_indexers)
-            conditioning_instance.fields['shortlist'] = field
+        # if 'shortlist' in json_dict:
+        #     shortlist = json_dict['shortlist']
+        #     field = TextField(
+        #         [Token(x) for x in shortlist],
+        #         token_indexers=self._dataset_reader._entity_indexers)
+        #     conditioning_instance.fields['shortlist'] = field
 
         ### Generative Instance ###
 
@@ -96,7 +96,7 @@ class ClozePredictor(Predictor):
             generative_batch = util.move_to_device(generative_batch.as_tensor_dict(), cuda_device)
 
             # Sample annotations and generate next token
-            self._model._use_shortlist = True
+            self._model._use_shortlist = False
             conditioning_output = self._model.sample(**conditioning_batch, emit_tokens=False)
             logger.debug('clears condition generation')
             # self._model(**conditioning_output)  # Shouldn't need to do this, but just in case
