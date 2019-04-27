@@ -246,19 +246,30 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 # attributes of the next token. In the discriminative case, each timestep
                 # is for predicting attributes of the current token.
                 offset = 0 if self._mode == "generative" else 1
+
+                # Mention type:
+                #  1 : New
+                #  2 : Previously Observed
+                #  3 : Continue
+                # Start by filling in continue tokens.
                 for i in range(*annotation['span']):
                     raw_entity_ids[i+offset] = raw_entity_id
                     entity_ids[i+offset] = entity_id
+                    mention_type[i+offset] = 3
                     if new_entity:
-                        mention_type[i+offset] = 1
                         shortlist_inds[i+offset] = shortlist_ind
                     else:
-                        mention_type[i+offset] = 2
                         relations[i+offset] = relation[:MAX_PARENTS]
                         parent_ids[i+offset] = parent_id[:MAX_PARENTS]
                     if self._mode == "generative":
                         alias_copy_inds[i+offset] = self._alias_database.token_to_uid(raw_entity_id,
                                                                                       tokens[i+1])
+                # Now put in proper mention type for first token
+                start = annotation['span'][0]
+                if new_entity:
+                    mention_type[start+offset] = 1
+                else:
+                    mention_type[start+offset] = 2
 
             # Convert to fields
             fields['raw_entity_ids'] = TextField(
