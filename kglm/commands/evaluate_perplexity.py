@@ -56,63 +56,76 @@ class EvaluatePerplexity(Subcommand):
                                help='If non-empty, name of metric used to weight the loss on a per-batch basis.')
         subparser.set_defaults(func=evaluate_from_args)
 
+        subparser.add_argument('--num-samples',
+                               type=int,
+                               default=100,
+                               help='Number of importance samples to draw.')
+        subparser.set_defaults(func=evaluate_from_args)
+
         return subparser
 
 
 def evaluate_perplexity(model: Model,
                         sampler: Model,
+                        num_samples: int,
                         instances: Iterator[Instance],
                         data_iterator: DataIterator,
                         cuda_device: int) -> Dict[str, Any]:
     check_for_gpu(cuda_device)
 
-    num_samples = 100 # TODO: Make this something you can specify
+    logger.info('Iterating over dataset')
 
     with torch.no_grad():
-        model.eval()
-        sampler.eval()
 
-        iterator = data_iterator(instances, num_epochs=1, shuffle=False)
-        logger.info('Iterating over dataset')
-        generator_tqdm = Tqdm.tqdm(iterator, total=data_iterator.get_num_batches(instances))
+        summands = []
+        penalized_summands = []
 
-        total_cross_entropy = 0.0
-        batch_count = 0
+        for i in range(num_samples):
+            iterator = data_iterator(instances, num_epochs=1, shuffle=False)
+            generator_tqdm = Tqdm.tqdm(iterator, total=0)
 
-        for batch in generator_tqdm:
-            batch_count += 1
-            tokens = batch['tokens']
-            tokens['tokens'] = tokens['tokens'].repeat(num_samples, 1)
-            batch = util.move_to_device(batch, cuda_device)
-            sequence_length = batch['tokens']['tokens'].shape[1]
+            model.eval()
+            sampler.eval()
 
-            # Draw a sample
-            sampler_output = sampler.sample(batch['tokens'])
-            sample_logp = sampler_output['logp']
-            sample = sampler_output['sample']
-            sample['reset'] = True
-            sample['tokens'] = batch['tokens']  # Add tokens to batch
+            summand = 0.0
+            penalized_summand = 0.0
+            denom = 0
+            for batch, _ in generator_tqdm:
 
-            # logp of the model is the loss; we multiply by sequence length to go from token-level
-            # to sequence-level probabilities.
-            model_logp = model(**sample).get('logp')
-            log_summands = model_logp - sample_logp
+                batch = util.move_to_device(batch, cuda_device)
 
-            # This is the log probability of the entire sentence
-            logp = torch.logsumexp(log_summands, dim=0) - math.log(num_samples)
+                # We need sequence length to help compute perplexity
+                n_tokens = util.get_text_field_mask(batch['source']).float().sum().item()
+                denom += n_tokens
 
-            # We care about per-token cross entropy
-            per_word_cross_entropy = -logp / sequence_length
-            print(math.exp(per_word_cross_entropy))
-            total_cross_entropy += per_word_cross_entropy
+                # Draw a sample
+                sampler_output = sampler.sample(**batch)
+                sample_logp = sampler_output['logp']
+                sample = sampler_output['sample']
 
-        # Aggregate metrics
-        avg_per_word_cross_entropy = total_cross_entropy / batch_count
-        perplexity = torch.exp(avg_per_word_cross_entropy)
+                # Evaluate on sample
+                model_output = model(**sample)
+                model_logp = model_output['logp']
+                model_penalized_logp = model_output['penalized_logp']
+                summand += (model_logp - sample_logp).item()
+                penalized_summand += (model_penalized_logp - sample_logp).item()
 
-    metrics = {'perplexity': perplexity}
+            summands.append(summand)
+            penalized_summands.append(penalized_summand)
+            t = torch.tensor(summands)
+            p = torch.tensor(penalized_summands)
+            t_sum = torch.logsumexp(t, dim=0)
+            p_sum = torch.logsumexp(p, dim=0)
+            sum_logp = (t_sum - math.log(i+1)).item()
+            sum_logp_penalized = (p_sum - math.log(i+1)).item()
+            ppl = math.exp(-sum_logp / denom)
+            upp = math.exp(-sum_logp_penalized / denom)
+
+            print('PPL: %f' % ppl)
+            print('UPP: %f' % upp)
+
+    metrics = {'ppl': ppl, 'upp': upp}
     return metrics
-
 
 def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     # Disable some of the more verbose logging statements
@@ -132,7 +145,7 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     sampler = sampler_archive.model
     sampler.eval()
 
-    # Load the evaluation data
+    # Load the evaluation data. NOTE: We are using the model's reader!
     validation_dataset_reader_params = config.pop('validation_dataset_reader', None)
     if validation_dataset_reader_params is not None:
         dataset_reader = DatasetReader.from_params(validation_dataset_reader_params)
@@ -144,9 +157,11 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
 
     # To avoid hairy issues with splitting, we opt to use a basic iterator so that we can
     # generate samples for entire sequences.
-    iterator = BasicIterator(batch_size=1)
+    iterator_params = config.pop('iterator', 'None')
+    iterator = DataIterator.from_params(iterator_params)
     iterator.index_with(model.vocab)
-    metrics = evaluate_perplexity(model, sampler, instances, iterator, args.cuda_device)
+    iterator.eval()
+    metrics = evaluate_perplexity(model, sampler, args.num_samples, instances, iterator, args.cuda_device)
 
     logger.info('Finished evaluating.')
     logger.info('Metrics:')
@@ -158,3 +173,4 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
         with open(output_file, 'w') as f:
             json.dump(metrics, f, indent=4)
     return metrics
+

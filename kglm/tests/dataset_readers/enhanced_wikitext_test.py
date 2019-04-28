@@ -11,7 +11,7 @@ class TestEnhancedWikitextEntityNLMReader:
     @pytest.mark.parametrize('lazy', (True, False))
     def test_read_from_file(self, lazy):
         reader = EnhancedWikitextEntityNlmReader(lazy=lazy)
-        fixture_path = 'kglm/tests/fixtures/enhanced-wikitext.jsonl'
+        fixture_path = 'kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl'
         instances = ensure_list(reader.read(fixture_path))
 
         first_instance_tokens = [x.text for x in instances[0]["tokens"].tokens]
@@ -33,11 +33,11 @@ class TestEnhancedWikitextKglmReader:
     @pytest.mark.parametrize('mode', ("generative", "discriminative"))
     def test_read_from_file(self, lazy, mode):
         offset = 0 if mode == "generative" else 1
-        alias_database_path = 'kglm/tests/fixtures/mini.alias.pkl'
+        alias_database_path = 'kglm/tests/fixtures/enhanced-wikitext-test/alias.pkl'
         reader = EnhancedWikitextKglmReader(lazy=lazy,
                                             mode=mode,
                                             alias_database_path=alias_database_path)
-        fixture_path = 'kglm/tests/fixtures/enhanced-wikitext.jsonl'
+        fixture_path = 'kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl'
         instances = ensure_list(reader.read(fixture_path))
 
         # Test correct number of instances is being created
@@ -64,6 +64,7 @@ class TestEnhancedWikitextKglmReader:
         assert first_instance_mention_type[0 + offset] == 0
         # "state highway" is a new entity mention
         assert first_instance_mention_type[16 + offset] == 1
+        assert first_instance_mention_type[17 + offset] == 3
         # "Washington" is a derived entity mention
         assert first_instance_mention_type[27 + offset] == 2
 

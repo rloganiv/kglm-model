@@ -46,4 +46,5 @@ class SequentialArrayField(ArrayField, SequenceField):
     def empty_field(self):  # pylint: disable=no-self-use
         # Pass the padding_value, so that any outer field, e.g., `ListField[ArrayField]` uses the
         # same padding_value in the padded ArrayFields
-        return ArrayField(np.array([], dtype=self._dtype), padding_value=self.padding_value)
+        shape = tuple(0 for _ in self.array.shape)
+        return SequentialArrayField(np.empty(shape), dtype=self._dtype, padding_value=self.padding_value)
