@@ -183,6 +183,6 @@ class AliasDatabase:
             for j in range(sequence_length):
                 token_id = tokens[i, j]
                 for k in self._token_id_to_entity_id_lookup[token_id]:
-                    output[i, j] = 1
+                    output[i, j, k] = 1
 
         return output
