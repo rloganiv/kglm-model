@@ -192,7 +192,7 @@ class KglmDisc(Model):
         else:
             # Get overlap feature
             overlap_feature = alias_database.reverse_lookup(target['tokens'])
-            new_entity_logits = new_entity_logits + self._overlap_weight * overlap_feature
+            new_entity_logits = new_entity_logits + self._overlap_weight * overlap_feature.float()
             # If not using shortlist, then samples are indexed w.r.t to the global vocab
             new_entity_probs = F.softmax(new_entity_logits, dim=-1)
             new_entity_samples = parallel_sample(new_entity_probs)
@@ -297,6 +297,18 @@ class KglmDisc(Model):
             entity_ids[current_mask, i] = _tail_ids[current_mask]  # TODO: Double-check
 
             self._recent_entities.insert(_tail_ids, current_mask)
+
+            ## CONTINUE MENTIONS ##
+            continue_mask = mention_type[:, i].eq(3) & mask[:, i]
+            if not current_mask.any() or i==0:
+                continue
+            raw_entity_ids[continue_mask, i] = raw_entity_ids[continue_mask, i-1]
+            entity_ids[continue_mask, i] = entity_ids[continue_mask, i-1]
+            entity_ids[continue_mask, i] = entity_ids[continue_mask, i-1]
+            parent_ids[continue_mask, i] = parent_ids[continue_mask, i-1]
+            if self._use_shortlist:
+                shortlist_inds[continue_mask, i] = shortlist_inds[continue_mask, i-1]
+            alias_copy_inds[continue_mask, i] = alias_copy_inds[continue_mask, i-1]
 
         # Lastly, because entities won't always match the true entity ids, we need to zero out any alias copy ids that won't be valid.
         true_raw_entity_ids = kwargs['raw_entity_ids']['raw_entity_ids']
