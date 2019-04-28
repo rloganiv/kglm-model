@@ -22,6 +22,11 @@ class AliasDatabaseTest(AllenNlpTestCase):
         self.id_array_lookup = {
                 'Entity1': np.array([[1, 2], [3, 0]], dtype=int)
         }
+        self.token_to_entity_lookup = {
+                'Robert': {'Entity1'},
+                'Logan': {'Entity1'},
+                'Robby': {'Entity1'}
+        }
         token_indexer = SingleIdTokenIndexer()
         entity_indexer = SingleIdTokenIndexer(namespace='entity_ids')
         text_field = TextField([Token(t) for t in ['Robby', 'is', 'a', 'nickname', 'for', 'Robert']],
@@ -59,7 +64,8 @@ class AliasDatabaseTest(AllenNlpTestCase):
     def test_token_to_uid(self):
         alias_database = AliasDatabase(token_lookup=self.token_lookup,
                                        id_map_lookup=self.id_map_lookup,
-                                       id_array_lookup=self.id_array_lookup)
+                                       id_array_lookup=self.id_array_lookup,
+                                       token_to_entity_lookup=self.token_to_entity_lookup)
         assert alias_database.token_to_uid('Entity1', 'Robert') == 1
         assert alias_database.token_to_uid('Entity1', 'Nelson') == 0
 
@@ -67,7 +73,8 @@ class AliasDatabaseTest(AllenNlpTestCase):
         # Tensor fields should be empty when ``AliasDatabase``` is created
         alias_database = AliasDatabase(token_lookup=self.token_lookup,
                                        id_map_lookup=self.id_map_lookup,
-                                       id_array_lookup=self.id_array_lookup)
+                                       id_array_lookup=self.id_array_lookup,
+                                       token_to_entity_lookup=self.token_to_entity_lookup)
         assert not alias_database.is_tensorized
 
         # But should exist after ``AliasDatabase`` is tensorized
@@ -80,7 +87,9 @@ class AliasDatabaseTest(AllenNlpTestCase):
 
         tensor_dict = self.dataset.as_tensor_dict()
         entity_ids = tensor_dict['entity_identifiers']['entity_ids']
+        tokens = tensor_dict['tokens']['tokens']
         global_tensor, local_tensor = alias_database.lookup(entity_ids)
+        entity_id_tensor = alias_database.reverse_lookup(tokens)
 
         # The first two dimensions should match the batch_size and sequence length of the index.
         # The next dimensions should be the max number of aliases of all entities (in this case 2
@@ -88,6 +97,7 @@ class AliasDatabaseTest(AllenNlpTestCase):
         # 'Robert Logan' is two tokens).
         assert global_tensor.shape == (1, 6, 2, 2)
         assert local_tensor.shape == (1, 6, 2, 2)
+        assert entity_id_tensor.shape == (1, 6, 1)
 
         # Check that the global ids match the vocabulary indices
         assert global_tensor[0, 0, 0, 0] == self.vocab.get_token_index('Robert', namespace='tokens')
@@ -95,3 +105,5 @@ class AliasDatabaseTest(AllenNlpTestCase):
 
         assert local_tensor[0, 0, 0, 0] == 1
         assert local_tensor[0, 1, 0, 0] == 0  # Padding since not an alias
+
+        assert entity_id_tensor[0, 0, 0] == self.vocab.get_token_index('Entity1', namespace='entity_ids')

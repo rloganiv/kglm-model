@@ -111,6 +111,8 @@ class KglmDisc(Model):
             if tie_weights:
                 self._fc_new_entity.weight = self._entity_embedder.weight
 
+        self._overlap_weight = torch.nn.Parameter(torch.tensor([1.]))
+
         self._state: Optional[Dict[str, Any]] = None
 
         # Metrics
@@ -140,6 +142,10 @@ class KglmDisc(Model):
         Sampling annotations for the generative model. Note that unlike forward, this function
         expects inputs from a **generative** dataset reader, not a **discriminative** one.
         """
+
+        # Tensorize the alias_database - this will only perform the operation once.
+        alias_database = metadata[0]['alias_database']
+        alias_database.tensorize(vocab=self.vocab)
 
         # Reset the model if needed
         if reset.any() and (self._state is not None):
@@ -184,6 +190,9 @@ class KglmDisc(Model):
             _new_entity_logp = new_entity_probs.gather(-1, shortlist_inds.unsqueeze(-1)).log()
             new_entity_samples = shortlist['entity_ids'].gather(1, shortlist_inds)
         else:
+            # Get overlap feature
+            overlap_feature = alias_database.reverse_lookup(target['tokens'])
+            new_entity_logits = new_entity_logits + self._overlap_weight * overlap_feature.float()
             # If not using shortlist, then samples are indexed w.r.t to the global vocab
             new_entity_probs = F.softmax(new_entity_logits, dim=-1)
             new_entity_samples = parallel_sample(new_entity_probs)
@@ -289,6 +298,18 @@ class KglmDisc(Model):
 
             self._recent_entities.insert(_tail_ids, current_mask)
 
+            ## CONTINUE MENTIONS ##
+            continue_mask = mention_type[:, i].eq(3) & mask[:, i]
+            if not current_mask.any() or i==0:
+                continue
+            raw_entity_ids[continue_mask, i] = raw_entity_ids[continue_mask, i-1]
+            entity_ids[continue_mask, i] = entity_ids[continue_mask, i-1]
+            entity_ids[continue_mask, i] = entity_ids[continue_mask, i-1]
+            parent_ids[continue_mask, i] = parent_ids[continue_mask, i-1]
+            if self._use_shortlist:
+                shortlist_inds[continue_mask, i] = shortlist_inds[continue_mask, i-1]
+            alias_copy_inds[continue_mask, i] = alias_copy_inds[continue_mask, i-1]
+
         # Lastly, because entities won't always match the true entity ids, we need to zero out any alias copy ids that won't be valid.
         true_raw_entity_ids = kwargs['raw_entity_ids']['raw_entity_ids']
         invalid_id_mask = ~true_raw_entity_ids.eq(raw_entity_ids)
@@ -325,6 +346,9 @@ class KglmDisc(Model):
                 shortlist: Dict[str, torch.Tensor] = None,
                 shortlist_inds: torch.Tensor = None) -> Dict[str, torch.Tensor]:
 
+        # Tensorize the alias_database - this will only perform the operation once.
+        alias_database = metadata[0]['alias_database']
+        alias_database.tensorize(vocab=self.vocab)
 
         # Reset the model if needed
         if reset.any() and (self._state is not None):
@@ -338,6 +362,7 @@ class KglmDisc(Model):
         if entity_ids is not None:
             output_dict = self._forward_loop(
                 source=source,
+                alias_database=alias_database,
                 mention_type=mention_type,
                 raw_entity_ids=raw_entity_ids,
                 entity_ids=entity_ids,
@@ -432,6 +457,7 @@ class KglmDisc(Model):
 
     def _new_entity_loss(self,
                          encoded: torch.Tensor,
+                         overlap_feature: torch.Tensor,
                          target_inds: torch.Tensor,
                          shortlist: torch.Tensor,
                          target_mask: torch.Tensor) -> torch.Tensor:
@@ -447,6 +473,7 @@ class KglmDisc(Model):
             shortlist_mask = get_text_field_mask(shortlist)
             log_probs = masked_log_softmax(logits, shortlist_mask)
         else:
+            logits = logits + self._overlap_weight * overlap_feature.float()
             log_probs = F.log_softmax(logits, dim=-1)
             num_categories = log_probs.shape[-1]
             log_probs = log_probs.view(-1, num_categories)
@@ -577,6 +604,7 @@ class KglmDisc(Model):
 
     def _forward_loop(self,
                       source: Dict[str, torch.Tensor],
+                      alias_database: AliasDatabase,
                       mention_type: torch.Tensor,
                       raw_entity_ids: Dict[str, torch.Tensor],
                       entity_ids: Dict[str, torch.Tensor],
@@ -609,13 +637,16 @@ class KglmDisc(Model):
 
         # For new mentions, predict which entity (among those in the supplied shortlist) will be
         # mentioned.
+        overlap_feature = alias_database.reverse_lookup(source)
         if self._use_shortlist:
             new_entity_loss = self._new_entity_loss(encoded_head + encoded_relation,
+                                                    overlap_feature,
                                                     shortlist_inds,
                                                     shortlist,
                                                     target_mask)
         else:
             new_entity_loss = self._new_entity_loss(encoded_head + encoded_relation,
+                                                    overlap_feature,
                                                     entity_ids,
                                                     None,
                                                     target_mask)

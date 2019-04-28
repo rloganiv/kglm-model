@@ -1,6 +1,7 @@
+from collections import defaultdict
 import logging
 import pickle
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 from allennlp.common.tqdm import Tqdm
 from allennlp.data import Vocabulary
@@ -26,14 +27,18 @@ class AliasDatabase:
     def __init__(self,
                  token_lookup: Dict[str, AliasList],
                  id_map_lookup: Dict[str, Dict[str, int]],
-                 id_array_lookup: Dict[str, np.ndarray]) -> None:
+                 id_array_lookup: Dict[str, np.ndarray],
+                 token_to_entity_lookup: Dict[str, Set[Any]]) -> None:
         self._token_lookup = token_lookup or {}
         self._id_map_lookup = id_map_lookup or {}
         self._id_array_lookup = id_array_lookup or {}
+        self._token_to_entity_lookup = token_to_entity_lookup or {}
 
         self.is_tensorized = False
         self._global_id_lookup: List[torch.Tensor] = []
         self._local_id_lookup: List[torch.Tensor] = []
+        self._token_id_to_entity_id_lookup: List[torch.Tensor] = []
+        self._num_entities = -1
 
     @classmethod
     def load(cls, path: str):
@@ -46,12 +51,18 @@ class AliasDatabase:
         token_lookup: Dict[str, AliasList] = {}
         id_map_lookup: Dict[str, Dict[str, int]] = {}
         id_array_lookup: Dict[str, np.ndarray] = {}
+        token_to_entity_lookup: Dict[str, Set[Any]] = defaultdict(set)
 
         # Right now we only support loading the alias database from a pickle file.
         with open(path, 'rb') as f:
             alias_lookup = pickle.load(f)
 
         for entity, aliases in Tqdm.tqdm(alias_lookup.items()):
+            # Reverse token to potential entity lookup
+            for alias in aliases:
+                for token in tokenize_to_string(alias, tokenizer):
+                    token_to_entity_lookup[token].add(entity)
+
             # Start by tokenizing the aliases
             tokenized_aliases: AliasList = [tokenize_to_string(alias, tokenizer)[:MAX_TOKENS] for alias in aliases]
             tokenized_aliases = tokenized_aliases[:MAX_ALIASES]
@@ -76,7 +87,8 @@ class AliasDatabase:
 
         return cls(token_lookup=token_lookup,
                    id_map_lookup=id_map_lookup,
-                   id_array_lookup=id_array_lookup)
+                   id_array_lookup=id_array_lookup,
+                   token_to_entity_lookup=token_to_entity_lookup)
 
     def token_to_uid(self, entity: str, token: str) -> int:
         if entity in self._id_map_lookup:
@@ -126,9 +138,25 @@ class AliasDatabase:
             local_id_tensor = torch.tensor(self._id_array_lookup[entity], requires_grad=False)  # pylint: disable=not-callable
             self._local_id_lookup.append(local_id_tensor)
 
+        # Build the tensorized token -> potential entities lookup.
+        # NOTE: Initial approach will be to store just the necessary info to build one-hot vectors
+        # on the fly since storing them will probably be way too expensive.
+        token_idx_to_token = vocab.get_index_to_token_vocabulary('tokens')
+        for i in range(len(token_idx_to_token)):
+            token = token_idx_to_token[i]
+            try:
+                potential_entities = self._token_to_entity_lookup[token]
+            except KeyError:
+                self._token_id_to_entity_id_lookup.append(None)
+            else:
+                potential_entity_ids = [vocab.get_token_index(str(x), 'entity_ids') for x in potential_entities]
+                self._token_id_to_entity_id_lookup.append(potential_entity_ids)
+        self._num_entities = vocab.get_vocab_size('entity_ids')  # Needed to get one-hot vector length
+
         self.is_tensorized = True
 
     def lookup(self, entity_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Looks up alias tokens for the given entities."""
         # Initialize empty tensors and fill them using the lookup
         batch_size, sequence_length = entity_ids.shape
         global_tensor = entity_ids.new_zeros(batch_size, sequence_length, MAX_ALIASES, MAX_TOKENS,
@@ -146,3 +174,15 @@ class AliasDatabase:
                     global_tensor[i, j, :num_aliases, :alias_length] = global_indices
 
         return global_tensor, local_tensor
+
+    def reverse_lookup(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Looks up potential entity matches for the given token."""
+        batch_size, sequence_length = tokens.shape
+        output = tokens.new_zeros(batch_size, sequence_length, self._num_entities, dtype=torch.uint8)
+        for i in range(batch_size):
+            for j in range(sequence_length):
+                token_id = tokens[i, j]
+                for k in self._token_id_to_entity_id_lookup[token_id]:
+                    output[i, j, k] = 1
+
+        return output
