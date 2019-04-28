@@ -38,7 +38,7 @@ class KglmDiscTest(KglmModelTestCase):
                           "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl")
 
     def test_model_can_train_save_and_load(self):
-        self.ensure_model_can_train_save_and_load(self.param_file)
+        self.ensure_model_can_train_save_and_load(self.param_file, gradients_to_ignore=['_overlap_weight'])
 
     def test_sample(self):
         generator_params = Params.from_file("kglm/tests/fixtures/training_config/kglm.json")
