@@ -13,7 +13,7 @@ class EntityNLMTest(ModelTestCase):
     def setUp(self):
         super().setUp()
         self.set_up_model("kglm/tests/fixtures/training_config/entity_nlm.json",
-                          "kglm/tests/fixtures/enhanced-wikitext.jsonl")
+                          "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl")
 
     def test_model_can_train_save_and_load(self):
         # TODO: Construct test cases where we can obtain gradients for these components

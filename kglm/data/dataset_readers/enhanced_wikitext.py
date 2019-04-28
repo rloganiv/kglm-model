@@ -79,7 +79,7 @@ class EnhancedWikitextEntityNlmReader(DatasetReader):
     def text_to_instance(self, data: Dict[str, Any]) -> Instance:  # pylint: disable=arguments-differ
         # Flatten and pad tokens
         tokens = _flatten(data['tokens'])
-        tokens = ['@@START@@', *tokens, '@@END@@']
+        tokens = [*tokens]
         tokens = [Token(x) for x in tokens]
         fields = {'tokens': TextField(tokens, self._token_indexers)}
 
@@ -101,9 +101,9 @@ class EnhancedWikitextEntityNlmReader(DatasetReader):
 
                 for i in range(*annotation['span']):
                     # Note: +1 offset to account for start token.
-                    entity_types[i+1] = 1
-                    entity_ids[i+1] = len(seen_entities)
-                    mention_lengths[i+1] = length
+                    entity_types[i] = 1
+                    entity_ids[i] = len(seen_entities)
+                    mention_lengths[i] = length
                     length -= 1
 
             fields['entity_types'] = SequentialArrayField(entity_types, dtype=np.uint8)
@@ -185,16 +185,20 @@ class EnhancedWikitextKglmReader(DatasetReader):
     def text_to_instance(self, data: Dict[str, Any]) -> Instance:  # pylint: disable=arguments-differ
         # Flatten and pad tokens
         tokens = _flatten(data['tokens'])
-        tokens = ['@@START@@', *tokens, '@@END@@']
-        source = [Token(x) for x in tokens[:-1]]
-        target = [Token(x) for x in tokens[1:]]
-        assert len(source) == len(target)
+        if len(tokens) == 1:
+            source = [Token(x) for x in tokens]
+        else:
+            source = [Token(x) for x in tokens[:-1]]
         fields = {
             'source': TextField(source, self._token_indexers)
         }
 
-        if self._mode == "generative":
-            fields["target"] = TextField(target, self._token_indexers)
+        # If there are no annotations then we are in a predictive situation, and thus don't need
+        # target either.
+        if self._mode == 'generative' and 'annotations' in data:
+            target = [Token(x) for x in tokens[1:]]
+            fields['target'] = TextField(target, self._token_indexers)
+            assert len(source) == len(target)
 
         meta_fields = {
             'tokens': tokens,
@@ -210,15 +214,15 @@ class EnhancedWikitextKglmReader(DatasetReader):
             shortlist = [DEFAULT_PADDING_TOKEN]
             reverse_shortlist = {DEFAULT_PADDING_TOKEN: 0}
 
-            raw_entity_ids = [DEFAULT_PADDING_TOKEN] * len(target)
-            entity_ids = [DEFAULT_PADDING_TOKEN] * len(target)
-            relations = [[DEFAULT_PADDING_TOKEN]] * len(target)
-            parent_ids = [[DEFAULT_PADDING_TOKEN]] * len(target)
-            shortlist_inds = np.zeros(shape=(len(target),))
-            mention_type = np.zeros(shape=(len(target),))
+            raw_entity_ids = [DEFAULT_PADDING_TOKEN] * len(source)
+            entity_ids = [DEFAULT_PADDING_TOKEN] * len(source)
+            relations = [[DEFAULT_PADDING_TOKEN]] * len(source)
+            parent_ids = [[DEFAULT_PADDING_TOKEN]] * len(source)
+            shortlist_inds = np.zeros(shape=(len(source),))
+            mention_type = np.zeros(shape=(len(source),))
 
             if self._mode == "generative":
-                alias_copy_inds = np.zeros(shape=(len(target),))
+                alias_copy_inds = np.zeros(shape=(len(source),))
 
             # Process annotations
             for annotation in data['annotations']:
@@ -245,13 +249,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 # Offset is 0 in generative case, since each timestep is for predicting
                 # attributes of the next token. In the discriminative case, each timestep
                 # is for predicting attributes of the current token.
-                offset = 0 if self._mode == "generative" else 1
-
-                # Mention type:
-                #  1 : New
-                #  2 : Previously Observed
-                #  3 : Continue
-                # Start by filling in continue tokens.
+                offset = -1 if self._mode == "generative" else 0
                 for i in range(*annotation['span']):
                     raw_entity_ids[i+offset] = raw_entity_id
                     entity_ids[i+offset] = entity_id
@@ -263,7 +261,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
                         parent_ids[i+offset] = parent_id[:MAX_PARENTS]
                     if self._mode == "generative":
                         alias_copy_inds[i+offset] = self._alias_database.token_to_uid(raw_entity_id,
-                                                                                      tokens[i+1])
+                                                                                      tokens[i])
                 # Now put in proper mention type for first token
                 start = annotation['span'][0]
                 if new_entity:

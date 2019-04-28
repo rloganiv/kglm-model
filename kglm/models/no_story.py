@@ -457,7 +457,16 @@ class NoStory(Model):
                                                       dim=1)
         combined_log_probs_extended_vocab = torch.logsumexp(combined_log_probs_extended_vocab,
                                                             dim=1)
+        flattened_mask = flattened_mask.squeeze()
+        # Zero out padding loss
+        combined_log_probs_extended_vocab = combined_log_probs_extended_vocab * flattened_mask.float()
         vocab_loss = -combined_log_probs_extended_vocab.sum() / (mask.sum() + 1e-13)
+
+        # Unknown penalty - only applies to non-copied unks
+        true_unks = unks.squeeze() & ~copied.squeeze() & flattened_mask
+        penalized_log_probs = combined_log_probs_extended_vocab - self._unk_penalty * true_unks.float()
+        penalized_log_probs[~flattened_mask] = 0
+        penalized_vocab_loss = -penalized_log_probs.sum() / (mask.sum() + 1e-13)
 
         # PERPLEXITY ###
         # Our perplexity terms are computed using the log probs computed w.r.t the source
@@ -487,7 +496,7 @@ class NoStory(Model):
         if bg_mask.any():
             self._bg_ppl(-combined_log_probs_source_vocab[bg_mask].sum(), bg_mask.float().sum() + 1e-13)
 
-        return vocab_loss
+        return vocab_loss, penalized_vocab_loss
 
     def _forward_loop(self,
                       source: Dict[str, torch.Tensor],
@@ -546,17 +555,19 @@ class NoStory(Model):
         copy_scores = self._copy_scores(encoded_token, alias_tokens)
 
         # Combine scores to get vocab loss
-        vocab_loss = self._vocab_loss(generate_scores,
-                                      copy_scores,
-                                      target,
-                                      alias_copy_inds,
-                                      target_mask,
-                                      alias_inds,
-                                      entity_ids.gt(0))
+        vocab_loss, penalized_vocab_loss = self._vocab_loss(generate_scores,
+                                                            copy_scores,
+                                                            target,
+                                                            alias_copy_inds,
+                                                            target_mask,
+                                                            alias_inds,
+                                                            entity_ids.gt(0))
         self._avg_vocab_loss(float(vocab_loss))
 
-        # Compute total loss
+        # Compute total loss. Also compute logp (needed for importance sampling evaluation).
         loss = vocab_loss + mention_type_loss + new_entity_loss
+        logp = -(vocab_loss + mention_type_loss + new_entity_loss) * target_mask.sum()
+        penalized_logp = -(penalized_vocab_loss + mention_type_loss + new_entity_loss) * target_mask.sum()
 
         # Activation regularization
         if self._alpha:
@@ -565,7 +576,7 @@ class NoStory(Model):
         if self._beta:
             loss = loss + self._beta * beta_loss
 
-        return {'loss': loss}
+        return {'loss': loss, 'logp': logp, 'penalized_logp': penalized_logp}
 
     @overrides
     def train(self, mode=True):
@@ -583,7 +594,7 @@ class NoStory(Model):
         self._state = None
 
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
-        out =  {
+        out = {
             'ppl': self._ppl.get_metric(reset),
             'upp': self._upp.get_metric(reset),
             'kg_ppl': self._kg_ppl.get_metric(reset),
@@ -593,7 +604,7 @@ class NoStory(Model):
             'vocab': self._avg_vocab_loss.get_metric(reset),
         }
         # if not self.training:
-        p, r, f  = self._new_mention_f1.get_metric(reset)
+        p, r, f = self._new_mention_f1.get_metric(reset)
         out['new_p'] = p
         out['new_r'] = r
         out['new_f1'] = f

@@ -70,7 +70,7 @@ class RecentEntities:
             else:
                 # Fill in mask
                 k = candidate_lookup[i][parent_id]
-                candidate_mask[i, j + 1:j + self._cutoff + 1, k] = 1
+                candidate_mask[i, j + 1 : j + self._cutoff + 1, k] = 1
                 # Track how many sequence elements remain
                 remainder = sequence_length - (j + self._cutoff + 1)
                 self._remaining[i][parent_id] = (j + self._cutoff + 1) - sequence_length
@@ -142,4 +142,17 @@ class RecentEntities:
             for i, should_reset in enumerate(reset):
                 if should_reset:
                     self._remaining[i] = {}
+
+    # TODO: Check
+    def insert(self, values: torch.LongTensor, mask: torch.ByteTensor = None) -> None:
+        """
+        To deal with case in sampling where tail ids are only known after __call__
+        """
+        batch_size = values.shape[0]
+        for i in range(batch_size):
+            if mask is not None:
+                if mask[i]:
+                    self._remaining[i][values[i].item()] = self._cutoff + 1
+            else:
+                self._remaining[i][values[i].item()] = self._cutoff + 1
 
