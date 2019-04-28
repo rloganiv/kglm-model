@@ -102,7 +102,7 @@ class Kglm(Model):
         # Various linear transformations.
         self._fc_mention_type = torch.nn.Linear(
             in_features=token_embedding_dim,
-            out_features=3)
+            out_features=4)
 
         if not use_shortlist:
             self._fc_new_entity = torch.nn.Linear(

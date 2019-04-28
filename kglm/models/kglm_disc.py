@@ -100,7 +100,7 @@ class KglmDisc(Model):
         # Various linear transformations.
         self._fc_mention_type = torch.nn.Linear(
             in_features=token_embedding_dim,
-            out_features=3)
+            out_features=4)
 
         if not use_shortlist:
             self._fc_new_entity = torch.nn.Linear(
@@ -503,4 +503,3 @@ class KglmDisc(Model):
         out['parent_ppl'] = self._parent_ppl.get_metric(reset)
         out['relation_ppl'] = self._relation_ppl.get_metric(reset)
         return out
-
