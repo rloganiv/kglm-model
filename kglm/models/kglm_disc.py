@@ -143,6 +143,10 @@ class KglmDisc(Model):
         expects inputs from a **generative** dataset reader, not a **discriminative** one.
         """
 
+        # Tensorize the alias_database - this will only perform the operation once.
+        alias_database = metadata[0]['alias_database']
+        alias_database.tensorize(vocab=self.vocab)
+
         # Reset the model if needed
         if reset.any() and (self._state is not None):
             for layer in range(self._num_layers):
@@ -186,6 +190,9 @@ class KglmDisc(Model):
             _new_entity_logp = new_entity_probs.gather(-1, shortlist_inds.unsqueeze(-1)).log()
             new_entity_samples = shortlist['entity_ids'].gather(1, shortlist_inds)
         else:
+            # Get overlap feature
+            overlap_feature = alias_database.reverse_lookup(target['tokens'])
+            new_entity_logits = new_entity_logits + self._overlap_weight * overlap_feature
             # If not using shortlist, then samples are indexed w.r.t to the global vocab
             new_entity_probs = F.softmax(new_entity_logits, dim=-1)
             new_entity_samples = parallel_sample(new_entity_probs)
