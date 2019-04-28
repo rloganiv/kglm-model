@@ -64,6 +64,7 @@ class TestEnhancedWikitextKglmReader:
         assert first_instance_mention_type[0 + offset] == 0
         # "state highway" is a new entity mention
         assert first_instance_mention_type[16 + offset] == 1
+        assert first_instance_mention_type[17 + offset] == 3
         # "Washington" is a derived entity mention
         assert first_instance_mention_type[27 + offset] == 2
 
