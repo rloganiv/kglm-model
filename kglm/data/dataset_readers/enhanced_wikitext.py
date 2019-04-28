@@ -184,6 +184,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
     @overrides
     def text_to_instance(self, data: Dict[str, Any]) -> Instance:  # pylint: disable=arguments-differ
         # Flatten and pad tokens
+        tokens = [x + ['@@END@@'] for x in data['tokens']]
         tokens = _flatten(data['tokens'])
         if len(tokens) == 1:
             source = [Token(x) for x in tokens]
