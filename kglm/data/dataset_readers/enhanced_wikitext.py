@@ -51,6 +51,7 @@ class EnhancedWikitextReader(DatasetReader):
         # Flatten and pad tokens
         tokens = [x + ['@@END@@'] for x in data['tokens']]
         tokens = _flatten(tokens)
+        offset = _flatten(offset)
         tokens = [Token(x) for x in tokens]
         fields = {'tokens': TextField(tokens, self._token_indexers)}
         return Instance(fields)
@@ -184,8 +185,10 @@ class EnhancedWikitextKglmReader(DatasetReader):
     @overrides
     def text_to_instance(self, data: Dict[str, Any]) -> Instance:  # pylint: disable=arguments-differ
         # Flatten and pad tokens
-        tokens = [x + ['@@END@@'] for x in data['tokens']]
-        tokens = _flatten(data['tokens'])
+        tokens = [x + ['@@END@@'] for x in data['tokens'][1:-1]]
+        eos_offset = [[i] * len(x) for i, x in enumerate(tokens)]
+        tokens = ['@@START@@'] + _flatten(tokens)
+        eos_offset = [0] + _flatten(eos_offset)
         if len(tokens) == 1:
             source = [Token(x) for x in tokens]
         else:
@@ -250,25 +253,26 @@ class EnhancedWikitextKglmReader(DatasetReader):
                 # Offset is 0 in generative case, since each timestep is for predicting
                 # attributes of the next token. In the discriminative case, each timestep
                 # is for predicting attributes of the current token.
-                offset = -1 if self._mode == "generative" else 0
-                for i in range(*annotation['span']):
-                    raw_entity_ids[i+offset] = raw_entity_id
-                    entity_ids[i+offset] = entity_id
-                    mention_type[i+offset] = 3
+                mode_offset = -1 if self._mode == "generative" else 0
+                span = annotation['span']
+                eos_offset_adjusted_span = tuple(i + eos_offset[i] for i in span)
+                for i in range(*eos_offset_adjusted_span):
+                    raw_entity_ids[i+mode_offset] = raw_entity_id
+                    entity_ids[i+mode_offset] = entity_id
+                    mention_type[i+mode_offset] = 3
                     if new_entity:
-                        shortlist_inds[i+offset] = shortlist_ind
+                        shortlist_inds[i+mode_offset] = shortlist_ind
                     else:
-                        relations[i+offset] = relation[:MAX_PARENTS]
-                        parent_ids[i+offset] = parent_id[:MAX_PARENTS]
+                        relations[i+mode_offset] = relation[:MAX_PARENTS]
+                        parent_ids[i+mode_offset] = parent_id[:MAX_PARENTS]
                     if self._mode == "generative":
-                        alias_copy_inds[i+offset] = self._alias_database.token_to_uid(raw_entity_id,
-                                                                                      tokens[i])
+                        alias_copy_inds[i+mode_offset] = self._alias_database.token_to_uid(raw_entity_id, tokens[i])
                 # Now put in proper mention type for first token
                 start = annotation['span'][0]
                 if new_entity:
-                    mention_type[start+offset] = 1
+                    mention_type[start+mode_offset] = 1
                 else:
-                    mention_type[start+offset] = 2
+                    mention_type[start+mode_offset] = 2
 
             # Convert to fields
             fields['raw_entity_ids'] = TextField(
