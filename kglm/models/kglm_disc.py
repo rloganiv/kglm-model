@@ -111,7 +111,7 @@ class KglmDisc(Model):
             if tie_weights:
                 self._fc_new_entity.weight = self._entity_embedder.weight
 
-        self._overlap_weight = torch.nn.Parameter(torch.tensor([1.]))
+        # self._overlap_weight = torch.nn.Parameter(torch.tensor([1.]))
 
         self._state: Optional[Dict[str, Any]] = None
 
@@ -191,8 +191,8 @@ class KglmDisc(Model):
             new_entity_samples = shortlist['entity_ids'].gather(1, shortlist_inds)
         else:
             # Get overlap feature
-            overlap_feature = alias_database.reverse_lookup(target['tokens'])
-            new_entity_logits = new_entity_logits + self._overlap_weight * overlap_feature.float()
+            # overlap_feature = alias_database.reverse_lookup(target['tokens'])
+            new_entity_logits = new_entity_logits # + self._overlap_weight * overlap_feature.float()
             # If not using shortlist, then samples are indexed w.r.t to the global vocab
             new_entity_probs = F.softmax(new_entity_logits, dim=-1)
             new_entity_samples = parallel_sample(new_entity_probs)
@@ -473,7 +473,7 @@ class KglmDisc(Model):
             shortlist_mask = get_text_field_mask(shortlist)
             log_probs = masked_log_softmax(logits, shortlist_mask)
         else:
-            logits = logits + self._overlap_weight * overlap_feature.float()
+            logits = logits #  + self._overlap_weight * overlap_feature.float()
             log_probs = F.log_softmax(logits, dim=-1)
             num_categories = log_probs.shape[-1]
             log_probs = log_probs.view(-1, num_categories)
@@ -637,7 +637,8 @@ class KglmDisc(Model):
 
         # For new mentions, predict which entity (among those in the supplied shortlist) will be
         # mentioned.
-        overlap_feature = alias_database.reverse_lookup(source)
+        # overlap_feature = alias_database.reverse_lookup(source)
+        overlap_feature = None
         if self._use_shortlist:
             new_entity_loss = self._new_entity_loss(encoded_head + encoded_relation,
                                                     overlap_feature,
