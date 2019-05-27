@@ -34,23 +34,25 @@ class ClozePredictor(Predictor):
         instance (e.g. the token to predict on).
         """
         ### Conditioning Instance ###
+        # TODO: This is totally broken...
 
         # Manually add the start token
         tokens = ['@@START@@', *json_dict['prefix']]
 
         # Also need to offset
-        start, end = json_dict['entity_indices']
-        span = [start + 1, end + 1]
+        # start, end = json_dict['entity_indices']
+        # span = [start + 1, end + 1]
 
         # Repackage into the expected annotation format
-        annotations = [{
-            'id': json_dict['entity_id'],
-            'relation': ['@@NEW@@'],
-            'parent_id': [json_dict['entity_id']],
-            'span': span
-        }]
-        data = {'tokens': [tokens], 'annotations': annotations}
-        conditioning_instance = self._dataset_reader.text_to_instance(data)
+        # annotations = [{
+        #     'id': json_dict['entity_id'],
+        #     'relation': ['@@NEW@@'],
+        #     'parent_id': [json_dict['entity_id']],
+        #     'span': span
+        # }]
+        # data = {'tokens': [tokens], 'annotations': annotations}
+        # conditioning_instance = self._dataset_reader.text_to_instance(data)
+        conditioning_instance = self._dataset_reader.text_to_instance(tokens[:-1])
 
         # Manually add the reset field here
         reset = SequentialArrayField(np.array(1), dtype=np.uint8)
@@ -66,12 +68,14 @@ class ClozePredictor(Predictor):
 
         ### Generative Instance ###
 
-        data = {'tokens': [[tokens[-1]]]}
-        generative_instance = self._dataset_reader.text_to_instance(data)
+        # data = {'tokens': [[tokens[-1]]]}
+        # generative_instance = self._dataset_reader.text_to_instance(data)
+        generative_instance = self._dataset_reader.text_to_instance([tokens[-1]])
         # Manually add the reset field here
         reset = SequentialArrayField(np.array(0), dtype=np.uint8)
         generative_instance.add_field('reset', reset)
-        generative_instance.add_field('shortlist', conditioning_instance.fields['shortlist'])
+        if 'shortlist' in json_dict:
+            generative_instance.add_field('shortlist', conditioning_instance.fields['shortlist'])
 
         return conditioning_instance, generative_instance
 
