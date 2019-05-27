@@ -51,7 +51,6 @@ class EnhancedWikitextReader(DatasetReader):
         # Flatten and pad tokens
         tokens = [x + ['@@END@@'] for x in data['tokens']]
         tokens = _flatten(tokens)
-        offset = _flatten(offset)
         tokens = [Token(x) for x in tokens]
         fields = {'tokens': TextField(tokens, self._token_indexers)}
         return Instance(fields)
