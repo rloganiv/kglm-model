@@ -67,6 +67,8 @@ class TestEnhancedWikitextKglmReader:
         assert first_instance_mention_type[17 + offset] == 3
         # "Washington" is a derived entity mention
         assert first_instance_mention_type[27 + offset] == 2
+        # "Check that eos offestting is working
+        assert first_instance_mention_type[57 + offset] == 1
 
         # Test entity id
         first_instance_entity_ids = [x.text for x in instances[0]['entity_ids'].tokens]
