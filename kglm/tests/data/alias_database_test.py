@@ -14,18 +14,22 @@ class AliasDatabaseTest(AllenNlpTestCase):
 
     def setUp(self):
         self.token_lookup = {
-                'Entity1': [['Robert', 'Logan'], ['Robby']]
+                'Entity1': [['Robert', 'Logan'], ['Robby']],
+                'Entity2': [['Jimmy']]
         }
         self.id_map_lookup = {
-                'Entity1': {'Robert': 1, 'Logan': 2, 'Robby': 3}
+                'Entity1': {'Robert': 1, 'Logan': 2, 'Robby': 3},
+                'Entity2': {'Jimmy': 1}
         }
         self.id_array_lookup = {
-                'Entity1': np.array([[1, 2], [3, 0]], dtype=int)
+                'Entity1': np.array([[1, 2], [3, 0]], dtype=int),
+                'Entity2': np.array([[1]], dtype=int)
         }
         self.token_to_entity_lookup = {
                 'Robert': {'Entity1'},
                 'Logan': {'Entity1'},
-                'Robby': {'Entity1'}
+                'Robby': {'Entity1'},
+                'Jimmy': {'Entity2'}
         }
         token_indexer = SingleIdTokenIndexer()
         entity_indexer = SingleIdTokenIndexer(namespace='entity_ids')
@@ -106,4 +110,8 @@ class AliasDatabaseTest(AllenNlpTestCase):
         assert local_tensor[0, 0, 0, 0] == 1
         assert local_tensor[0, 1, 0, 0] == 0  # Padding since not an alias
 
-        assert entity_id_tensor[0, 0, 0] == self.vocab.get_token_index('Entity1', namespace='entity_ids')
+        match_token_idx = self.vocab.get_token_index('Entity1', namespace='entity_ids')
+        nonmatch_token_idx = self.vocab.get_token_index('Entity2', namespace='entity_ids')
+        assert entity_id_tensor[0, 0, match_token_idx] == 1
+        assert entity_id_tensor[0, 0, nonmathc_token_idx] == 0
+
