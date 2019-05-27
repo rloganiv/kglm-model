@@ -111,6 +111,8 @@ class AliasDatabase:
         if self.is_tensorized:
             return
 
+        logger.debug('Tensorizing AliasDatabase')
+
         entity_idx_to_token = vocab.get_index_to_token_vocabulary('raw_entity_ids')
         for i in range(len(entity_idx_to_token)):  # pylint: disable=C0200
             entity = entity_idx_to_token[i]
@@ -149,11 +151,15 @@ class AliasDatabase:
             except KeyError:
                 self._token_id_to_entity_id_lookup.append(None)
             else:
-                potential_entity_ids = [vocab.get_token_index(str(x), 'entity_ids') for x in potential_entities]
+                potential_entity_ids = torch.tensor([vocab.get_token_index(str(x), 'entity_ids') for x in potential_entities],
+                                                    dtype=torch.int64,
+                                                    requires_grad=False)
                 self._token_id_to_entity_id_lookup.append(potential_entity_ids)
         self._num_entities = vocab.get_vocab_size('entity_ids')  # Needed to get one-hot vector length
 
         self.is_tensorized = True
+
+        logger.debug('Done tensorizing AliasDatabase')
 
     def lookup(self, entity_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Looks up alias tokens for the given entities."""
@@ -178,11 +184,13 @@ class AliasDatabase:
     def reverse_lookup(self, tokens: torch.Tensor) -> torch.Tensor:
         """Looks up potential entity matches for the given token."""
         batch_size, sequence_length = tokens.shape
-        output = tokens.new_zeros(batch_size, sequence_length, self._num_entities, dtype=torch.uint8)
+        logger.debug('Performing reverse lookup')
+        output = tokens.new_zeros(batch_size, sequence_length, self._num_entities,
+                                  dtype=torch.uint8,
+                                  requires_grad=False)
         for i in range(batch_size):
             for j in range(sequence_length):
                 token_id = tokens[i, j]
-                for k in self._token_id_to_entity_id_lookup[token_id]:
-                    output[i, j, k] = 1
-
+                potential_entities = self._token_id_to_entity_id_lookup[token_id]
+                output[i, j, potential_entities] = 1
         return output
