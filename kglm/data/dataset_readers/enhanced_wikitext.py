@@ -27,6 +27,9 @@ MAX_PARENTS = 10
 def _flatten(nested: Iterable[str]):
     return [x for seq in nested for x in seq]
 
+def _tokenize(iterable: Iterable[str]):
+    return [Token(x) for x in iterable]
+
 
 @DatasetReader.register('enhanced-wikitext')
 class EnhancedWikitextReader(DatasetReader):
@@ -179,120 +182,151 @@ class EnhancedWikitextKglmReader(DatasetReader):
         with open(file_path, 'r') as f:
             for line in f:
                 data = json.loads(line)
-                yield self.text_to_instance(data)
+
+                # Extract tokens and EOS offset
+                tokens = [x + ['@@END@@'] for x in data['tokens'][1:-1]]
+                eos_offset = [[i] * len(x) for i, x in enumerate(tokens)]
+                tokens = ['@@START@@'] + _flatten(tokens)
+                eos_offset = [0] + _flatten(eos_offset)
+                source = tokens[:-1]
+                if self._mode == 'generative':
+                    target = tokens[1:]
+                else:
+                    target = None
+
+                # Process annotations
+                if 'annotations' not in data:
+                    shortlist = None
+                    reverse_shortlist = None
+                    raw_entity_ids = None
+                    entity_ids = None
+                    relations = None
+                    parent_ids = None
+                    shortlist_inds = None
+                    mention_type = None
+                else:
+                    # We maintain a "shortlist" of observed entities, that is used for baseline models
+                    # that only select entities from the set that appear in the document (as opposed to
+                    # the set of all possible entities).
+                    shortlist = [DEFAULT_PADDING_TOKEN]
+                    reverse_shortlist = {DEFAULT_PADDING_TOKEN: 0}
+                    raw_entity_ids = [DEFAULT_PADDING_TOKEN] * len(source)
+                    entity_ids = [DEFAULT_PADDING_TOKEN] * len(source)
+                    relations = [[DEFAULT_PADDING_TOKEN]] * len(source)
+                    parent_ids = [[DEFAULT_PADDING_TOKEN]] * len(source)
+                    shortlist_inds = np.zeros(shape=(len(source),))
+                    mention_type = np.zeros(shape=(len(source),))
+
+                    if self._mode == "generative":
+                        alias_copy_inds = np.zeros(shape=(len(source),))
+                    else:
+                        alias_copy_inds = None
+
+                    # Process annotations
+                    for annotation in data['annotations']:
+
+                        # Obtain the entity identifier for the annotated span
+                        raw_entity_id = annotation['id']
+                        raw_parent_id = annotation['parent_id']
+                        entity_id = normalize_entity_id(raw_entity_id)
+                        if entity_id is None:
+                            continue
+                        parent_id = [normalize_entity_id(x) for x in raw_parent_id]
+                        assert len(parent_id) == len(raw_parent_id)
+                        relation = annotation['relation']
+                        new_entity = relation == ['@@NEW@@']
+
+                        # If neccessary, update the shortlist. Obtain the index of the entity identifier in
+                        # the shortlist.
+                        if entity_id not in reverse_shortlist:
+                            reverse_shortlist[entity_id] = len(reverse_shortlist)
+                            shortlist.append(entity_id)
+                        shortlist_ind = reverse_shortlist[entity_id]
+
+                        # Update the outputs
+                        # Offset is 0 in generative case, since each timestep is for predicting
+                        # attributes of the next token. In the discriminative case, each timestep
+                        # is for predicting attributes of the current token.
+                        mode_offset = -1 if self._mode == "generative" else 0
+                        span = annotation['span']
+                        eos_offset_adjusted_span = tuple(i + eos_offset[i] for i in span)
+                        for i in range(*eos_offset_adjusted_span):
+                            raw_entity_ids[i+mode_offset] = raw_entity_id
+                            entity_ids[i+mode_offset] = entity_id
+                            mention_type[i+mode_offset] = 3
+                            if new_entity:
+                                shortlist_inds[i+mode_offset] = shortlist_ind
+                            else:
+                                relations[i+mode_offset] = relation[:MAX_PARENTS]
+                                parent_ids[i+mode_offset] = parent_id[:MAX_PARENTS]
+                            if self._mode == "generative":
+                                alias_copy_inds[i+mode_offset] = self._alias_database.token_to_uid(raw_entity_id, tokens[i])
+                        # Now put in proper mention type for first token
+                        start = annotation['span'][0]
+                        if new_entity:
+                            mention_type[start+mode_offset] = 1
+                        else:
+                            mention_type[start+mode_offset] = 2
+
+                yield self.text_to_instance(source,
+                                            target,
+                                            shortlist,
+                                            reverse_shortlist,
+                                            raw_entity_ids,
+                                            entity_ids,
+                                            relations,
+                                            parent_ids,
+                                            shortlist_inds,
+                                            mention_type,
+                                            alias_copy_inds)
 
     @overrides
-    def text_to_instance(self, data: Dict[str, Any]) -> Instance:  # pylint: disable=arguments-differ
-        # Flatten and pad tokens
-        tokens = _flatten(data['tokens'])
-        if len(tokens) == 1:
-            source = [Token(x) for x in tokens]
-        else:
-            source = [Token(x) for x in tokens[:-1]]
-        fields = {
-            'source': TextField(source, self._token_indexers)
-        }
-
-        # If there are no annotations then we are in a predictive situation, and thus don't need
-        # target either.
-        if self._mode == 'generative' and 'annotations' in data:
-            target = [Token(x) for x in tokens[1:]]
-            fields['target'] = TextField(target, self._token_indexers)
-            assert len(source) == len(target)
-
-        meta_fields = {
-            'tokens': tokens,
+    def text_to_instance(self,
+                         source,
+                         target=None,
+                         shortlist=None,
+                         reverse_shortlist=None,
+                         raw_entity_ids=None,
+                         entity_ids=None,
+                         relations=None,
+                         parent_ids=None,
+                         shortlist_inds=None,
+                         mention_type=None,
+                         alias_copy_inds=None) -> Instance:  # pylint: disable=arguments-differ
+        metadata = {
+            'source_tokens': source,
             'alias_database': self._alias_database
         }
+        fields = {
+            'metadata': MetadataField(metadata),
+            'source': TextField(_tokenize(source), self._token_indexers),
+        }
 
-        # Process annotations
-        if 'annotations' in data:
-
-            # We maintain a "shortlist" of observed entities, that is used for baseline models
-            # that only select entities from the set that appear in the document (as opposed to
-            # the set of all possible entities).
-            shortlist = [DEFAULT_PADDING_TOKEN]
-            reverse_shortlist = {DEFAULT_PADDING_TOKEN: 0}
-
-            raw_entity_ids = [DEFAULT_PADDING_TOKEN] * len(source)
-            entity_ids = [DEFAULT_PADDING_TOKEN] * len(source)
-            relations = [[DEFAULT_PADDING_TOKEN]] * len(source)
-            parent_ids = [[DEFAULT_PADDING_TOKEN]] * len(source)
-            shortlist_inds = np.zeros(shape=(len(source),))
-            mention_type = np.zeros(shape=(len(source),))
-
-            if self._mode == "generative":
-                alias_copy_inds = np.zeros(shape=(len(source),))
-
-            # Process annotations
-            for annotation in data['annotations']:
-
-                # Obtain the entity identifier for the annotated span
-                raw_entity_id = annotation['id']
-                raw_parent_id = annotation['parent_id']
-                entity_id = normalize_entity_id(raw_entity_id)
-                if entity_id is None:
-                    continue
-                parent_id = [normalize_entity_id(x) for x in raw_parent_id]
-                assert len(parent_id) == len(raw_parent_id)
-                relation = annotation['relation']
-                new_entity = relation == ['@@NEW@@']
-
-                # If neccessary, update the shortlist. Obtain the index of the entity identifier in
-                # the shortlist.
-                if entity_id not in reverse_shortlist:
-                    reverse_shortlist[entity_id] = len(reverse_shortlist)
-                    shortlist.append(entity_id)
-                shortlist_ind = reverse_shortlist[entity_id]
-
-                # Update the outputs
-                # Offset is 0 in generative case, since each timestep is for predicting
-                # attributes of the next token. In the discriminative case, each timestep
-                # is for predicting attributes of the current token.
-                offset = -1 if self._mode == "generative" else 0
-                for i in range(*annotation['span']):
-                    raw_entity_ids[i+offset] = raw_entity_id
-                    entity_ids[i+offset] = entity_id
-                    mention_type[i+offset] = 3
-                    if new_entity:
-                        shortlist_inds[i+offset] = shortlist_ind
-                    else:
-                        relations[i+offset] = relation[:MAX_PARENTS]
-                        parent_ids[i+offset] = parent_id[:MAX_PARENTS]
-                    if self._mode == "generative":
-                        alias_copy_inds[i+offset] = self._alias_database.token_to_uid(raw_entity_id,
-                                                                                      tokens[i])
-                # Now put in proper mention type for first token
-                start = annotation['span'][0]
-                if new_entity:
-                    mention_type[start+offset] = 1
-                else:
-                    mention_type[start+offset] = 2
-
-            # Convert to fields
-            fields['raw_entity_ids'] = TextField(
-                [Token(x) for x in raw_entity_ids],
-                token_indexers=self._raw_entity_indexers)
-            fields['entity_ids'] = TextField(
-                [Token(x) for x in entity_ids],
-                token_indexers=self._entity_indexers)
+        if target is not None:
+            fields['target'] = TextField(_tokenize(target), self._token_indexers)
+            metadata['target_tokens'] = target
+        if shortlist is not None:
+            fields['shortlist'] = TextField(_tokenize(shortlist), self._entity_indexers)
+        if raw_entity_ids is not None:
+            fields['raw_entity_ids'] = TextField(_tokenize(raw_entity_ids), self._raw_entity_indexers)
+        if entity_ids is not None:
+            fields['entity_ids'] = TextField(_tokenize(entity_ids), self._entity_indexers)
+        if parent_ids is not None:
             fields['parent_ids'] = ListField([
-                TextField([Token(x) for x in sublist],
+                TextField(_tokenize(sublist),
                           token_indexers=self._entity_indexers)
                 for sublist in parent_ids])
+        if relations is not None:
             fields['relations'] = ListField([
-                TextField([Token(x) for x in sublist],
+                TextField(_tokenize(sublist),
                           token_indexers=self._relation_indexers)
                 for sublist in relations])
+        if mention_type is not None:
             fields['mention_type'] = SequentialArrayField(mention_type, dtype=np.int64)
-            fields['shortlist'] = TextField(
-                [Token(x) for x in shortlist],
-                token_indexers=self._entity_indexers)
+        if shortlist_inds is not None:
             fields['shortlist_inds'] = SequentialArrayField(shortlist_inds, dtype=np.int64)
-            if self._mode == "generative":
-                fields['alias_copy_inds'] = SequentialArrayField(alias_copy_inds, dtype=np.int64)
-
-        fields['metadata'] = MetadataField(meta_fields)
+        if alias_copy_inds is not None:
+            fields['alias_copy_inds'] = SequentialArrayField(alias_copy_inds, dtype=np.int64)
 
         return Instance(fields)
 
