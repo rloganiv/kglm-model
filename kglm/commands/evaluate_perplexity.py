@@ -65,6 +65,20 @@ class EvaluatePerplexity(Subcommand):
         return subparser
 
 
+def _decode_sample(sample, vocab):
+    for i in range(5):
+        source_tokens = sample['target']['tokens'][i]
+        source_tokens = [vocab.get_token_from_index(x, 'tokens') for x in
+                        source_tokens.tolist()]
+        mention_types = sample['mention_type'][i].tolist()
+        entity_ids = sample['entity_ids']['entity_ids'][i]
+        entity_ids = [vocab.get_token_from_index(x, 'entity_ids') for x in
+                      entity_ids.tolist()]
+        string = ' '.join('%s (%i, %s)' % x if x[1]!=0 else '%s' % x[0] for x
+                          in zip(source_tokens, mention_types, entity_ids))
+        logger.debug(string)
+
+
 def evaluate_perplexity(model: Model,
                         sampler: Model,
                         num_samples: int,
@@ -103,12 +117,17 @@ def evaluate_perplexity(model: Model,
                 sample_logp = sampler_output['logp']
                 sample = sampler_output['sample']
 
+                _decode_sample(sample, sampler.vocab)
+
                 # Evaluate on sample
                 model_output = model(**sample)
                 model_logp = model_output['logp']
                 model_penalized_logp = model_output['penalized_logp']
                 summand += (model_logp - sample_logp).item()
                 penalized_summand += (model_penalized_logp - sample_logp).item()
+
+                print('Temp PPL: %f' % math.exp(-summand / denom))
+                print('Temp UPP: %f' % math.exp(-penalized_summand / denom))
 
             summands.append(summand)
             penalized_summands.append(penalized_summand)

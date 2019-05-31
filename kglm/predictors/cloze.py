@@ -100,7 +100,7 @@ class ClozePredictor(Predictor):
             generative_batch = util.move_to_device(generative_batch.as_tensor_dict(), cuda_device)
 
             # Sample annotations and generate next token
-            self._model._use_shortlist = True
+            # self._model._use_shortlist = True
             conditioning_output = self._model.sample(**conditioning_batch, emit_tokens=False)
             logger.debug('clears condition generation')
             # self._model(**conditioning_output)  # Shouldn't need to do this, but just in case
