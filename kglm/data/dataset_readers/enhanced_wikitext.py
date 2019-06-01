@@ -81,8 +81,10 @@ class EnhancedWikitextEntityNlmReader(DatasetReader):
     @overrides
     def text_to_instance(self, data: Dict[str, Any]) -> Instance:  # pylint: disable=arguments-differ
         # Flatten and pad tokens
-        tokens = _flatten(data['tokens'])
-        tokens = [*tokens]
+        tokens = [x + ['@@END@@'] for x in data['tokens'][1:-1]]
+        eos_offset = [[i] * len(x) for i, x in enumerate(tokens)]
+        tokens = ['@@START@@'] + _flatten(tokens)
+        eos_offset = [0] + _flatten(eos_offset)
         tokens = [Token(x) for x in tokens]
         fields = {'tokens': TextField(tokens, self._token_indexers)}
 
@@ -101,8 +103,10 @@ class EnhancedWikitextEntityNlmReader(DatasetReader):
                 seen_entities.add(annotation['id'])
                 start, end = annotation['span']
                 length = end - start
+                span = annotation['span']
+                eos_offset_adjusted_span = tuple(i + eos_offset[i] for i in span)
 
-                for i in range(*annotation['span']):
+                for i in range(*eos_offset_adjusted_span):
                     # Note: +1 offset to account for start token.
                     entity_types[i] = 1
                     entity_ids[i] = len(seen_entities)
