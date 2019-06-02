@@ -4,6 +4,7 @@ from allennlp.common.testing import ModelTestCase
 import numpy as np
 import torch
 
+from kglm.training import LmTrainer
 from kglm.common.testing import KglmModelTestCase
 from kglm.data.dataset_readers.enhanced_wikitext import EnhancedWikitextEntityNlmReader
 from kglm.models.entity_nlm import EntityNLM

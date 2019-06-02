@@ -1,72 +1,52 @@
 {
-    "vocabulary": {
-        "type": "extended",
-        "max_vocab_size": {"tokens": 33278},
-        "min_count": {"tokens": 3},
-    },
     "dataset_reader": {
-        "type": "enhanced-wikitext",
-        "enumerate_entities": true,
+        "type": "enhanced-wikitext-entity-nlm"
     },
-    "train_data_path": "data/mini.train.jsonl",
-    "validation_data_path": "data/final.valid.jsonl",
-    "datasets_for_vocab_creation": ["train"],
+    "iterator": {
+        "type": "fancy",
+        "batch_size": 60,
+        "split_size": 70,
+        "splitting_keys": [
+            "source",
+            "entity_types",
+            "entity_ids",
+            "mention_lengths"
+        ]
+    },
     "model": {
         "type": "entitynlm",
+        "dropout_rate": 0.5,
+        "embedding_dim": 400,
+        "hidden_size": 1150,
+        "max_embeddings": 3000,
+        "max_mention_length": 100,
+        "num_layers": 3,
         "text_field_embedder": {
             "token_embedders": {
                 "tokens": {
                     "type": "embedding",
-                    "embedding_dim": 256,
+                    "embedding_dim": 400,
                     "trainable": true
-                },
-            },
+                }
+            }
         },
-        "encoder": {
-            "type": "lstm",
-            "input_size": 256,
-            "hidden_size": 256,
-            "dropout": 0.5,
-            "stateful": true
-        },
-        "embedding_dim": 256,
-        "max_mention_length": 166,
-        "max_embeddings": 1345,
         "tie_weights": true,
-        "dropout_rate": 0.4,
-        "variational_dropout_rate": 0.1
+        "variational_dropout_rate": 0.5
     },
-    "iterator": {
-        "type": "split",
-        "batch_size": 40,
-        "splitter": {
-            "type": "random",
-            "mean_split_size": 70,
-            "min_split_size": 30,
-            "max_split_size": 100,
-            "splitting_keys": [
-                "tokens",
-                "entity_types",
-                "entity_ids",
-                "mention_lengths"
-            ],
-        },
-        "sorting_keys": [["tokens", "num_tokens"]],
-    },
+    "train_data_path": "data/enhanced-wikitext-2/train.jsonl",
+    "validation_data_path": "data/enhanced-wikitext-2/valid.jsonl",
     "trainer": {
-        "num_epochs": 500,
-        "cuda_device": 1,
+        "type": "lm",
+        "cuda_device": 0,
+        "num_epochs": 750,
         "optimizer": {
             "type": "adam",
-            "lr": 1e-3
-        },
-        "learning_rate_scheduler": {
-            "type": "reduce_on_plateau",
-            "mode": "max",
-            "min_lr": 1e-6
-        },
-        "patience": 20,
-        "validation_metric": "-ppl",
-        "should_log_learning_rate": true
+            "lr": 0.0003
+        }
+    },
+    "vocabulary": {
+        "type": "extended",
+        "directory_path": "data/enhanced-wikitext-2/vocab",
+        "extend": false
     }
 }
