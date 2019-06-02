@@ -322,7 +322,7 @@ class EntityNLM(Model):
 
                 # Equation 3 in the paper.
                 entity_type_logits = self._entity_type_projection(current_hidden[predict_all])
-                entity_type_logp = F.softmax(entity_type_logits, -1)
+                entity_type_logp = F.log_softmax(entity_type_logits, -1)
                 _entity_type_loss = -entity_type_logp.gather(-1, next_entity_types[predict_all].long().unsqueeze(-1))
                 entity_type_loss += _entity_type_loss.sum()
 
