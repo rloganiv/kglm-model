@@ -11,12 +11,13 @@ You will need Python 3.5+. Dependencies can be installed by running:
 pip install -r requirements.txt
 ```
 
+
 Data
 ---
 KGLM is trained on the *Linked WikiText-2* dataset which can be downloaded at https://rloganiv.github.io/linked-wikitext-2.
 
 Additionally, you will need embeddings for entities/relations in the [Wikidata](https://www.wikidata.org/) knowledge graph, as well as access to the knowledge graph itself (in order to look up entity aliases/related entities).
-For convenience, we provide pre-trained embeddings and pickled dictionaries containing the relevant portions of Wikidata [here]().
+For convenience, we provide pre-trained embeddings and pickled dictionaries containing the relevant portions of Wikidata [here](https://drive.google.com/file/d/1tvcbUY9CUQ770igxG9pQZA4qjmwFb5Cs/view?usp=sharing).
 
 
 Training
@@ -41,6 +42,7 @@ where:
 - `model_archive_file` - Trained (generative) model checkpoint. This is the model whose perplexity will be evaluated.
 - `sampler_archive_file` - Trained (discriminative) model checkpoint. This is the model used to create annotations during importance sampling. See Section 4 of the paper for more details about importance sampling.
 - `input_data` - Path to dataset to measure perplexity on.
+
 
 Sentence Completion
 ---
