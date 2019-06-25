@@ -36,12 +36,12 @@ To estimate perplexity of a trained model on held-out data run:
 python -m kglm.run evaluate-perplexity \
     [model_archive_file] \
     [sampler_archive_file] \
-    [input_data]
+    [input_file]
 ```
 where:
 - `model_archive_file` - Trained (generative) model checkpoint. This is the model whose perplexity will be evaluated.
 - `sampler_archive_file` - Trained (discriminative) model checkpoint. This is the model used to create annotations during importance sampling. See Section 4 of the paper for more details about importance sampling.
-- `input_data` - Path to dataset to measure perplexity on.
+- `input_file` - Path to dataset to measure perplexity on.
 
 
 Sentence Completion
@@ -52,4 +52,4 @@ allennlp predict --predictor cloze [model_archive_file] [input_file]
 ```
 where
 - `model_archive_file` - Trained (generative) model checkpoint. This is the model whose perplexity will be evaluated.
-- `input_data` - Path to dataset to measure perplexity on.
+- `input_file` - Path to dataset to measure perplexity on.
