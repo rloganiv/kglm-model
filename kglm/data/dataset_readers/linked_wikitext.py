@@ -1,5 +1,5 @@
 """
-Readers for the Linked Wikitext-2 dataset.
+Readers for the Linked WikiText-2 dataset.
 """
 from typing import Any, Dict, Iterable, List, Set
 import json
@@ -31,7 +31,7 @@ def _tokenize(iterable: Iterable[str]):
 
 
 @DatasetReader.register('linked-wikitext')
-class LinkedWikitextReader(DatasetReader):
+class LinkedWikiTextReader(DatasetReader):
     def __init__(self,
                  token_indexers: Dict[str, TokenIndexer] = None,
                  lazy: bool = False) -> None:
@@ -59,7 +59,7 @@ class LinkedWikitextReader(DatasetReader):
 
 
 @DatasetReader.register('linked-wikitext-entity-nlm')
-class LinkedWikitextEntityNlmReader(DatasetReader):
+class LinkedWikiTextEntityNlmReader(DatasetReader):
 
     def __init__(self,
                  token_indexers: Dict[str, TokenIndexer] = None,
@@ -128,7 +128,7 @@ def normalize_entity_id(raw_entity_id: str) -> str:
 
 
 @DatasetReader.register('linked-wikitext-kglm')
-class LinkedWikitextKglmReader(DatasetReader):
+class LinkedWikiTextKglmReader(DatasetReader):
 
     def __init__(self,
                  alias_database_path: str,
@@ -160,19 +160,19 @@ class LinkedWikitextKglmReader(DatasetReader):
         self._relation_indexers = relation_indexers or {'relations': SingleIdTokenIndexer(namespace='relations')}
         if 'tokens' not in self._token_indexers or \
                 not isinstance(self._token_indexers['tokens'], SingleIdTokenIndexer):
-            raise ConfigurationError("LinkedWikitextKglmReader expects 'token_indexers' to contain "
+            raise ConfigurationError("LinkedWikiTextKglmReader expects 'token_indexers' to contain "
                                      "a 'single_id' token indexer called 'tokens'.")
         if 'entity_ids' not in self._entity_indexers or \
                 not isinstance(self._entity_indexers['entity_ids'], SingleIdTokenIndexer):
-            raise ConfigurationError("LinkedWikitextKglmReader expects 'entity_indexers' to contain "
+            raise ConfigurationError("LinkedWikiTextKglmReader expects 'entity_indexers' to contain "
                                      "a 'single_id' token indexer called 'entity_ids'.")
         if 'raw_entity_ids' not in self._raw_entity_indexers or \
                 not isinstance(self._raw_entity_indexers['raw_entity_ids'], SingleIdTokenIndexer):
-            raise ConfigurationError("LinkedWikitextKglmReader expects 'raw_entity_indexers' to contain "
+            raise ConfigurationError("LinkedWikiTextKglmReader expects 'raw_entity_indexers' to contain "
                                      "a 'single_id' token indexer called 'raw_entity_ids'.")
         if 'relations' not in self._relation_indexers or \
                 not isinstance(self._relation_indexers['relations'], SingleIdTokenIndexer):
-            raise ConfigurationError("LinkedWikitextKglmReader expects 'relation_indexers' to contain "
+            raise ConfigurationError("LinkedWikiTextKglmReader expects 'relation_indexers' to contain "
                                      "a 'single_id' token indexer called 'relations'.")
         self._alias_database = AliasDatabase.load(path=alias_database_path)
 
@@ -331,7 +331,7 @@ class LinkedWikitextKglmReader(DatasetReader):
 
 
 @DatasetReader.register('linked-wikitext-simple-kglm')
-class LinkedWikitextSimpleKglmReader(DatasetReader):
+class LinkedWikiTextSimpleKglmReader(DatasetReader):
 
     def __init__(self,
                  token_indexers: Dict[str, TokenIndexer] = None,

@@ -2,7 +2,7 @@ from allennlp.common.testing import AllenNlpTestCase
 from allennlp.models.archival import load_archive
 from allennlp.predictors import Predictor
 
-from kglm.data.dataset_readers import LinkedWikitextKglmReader
+from kglm.data.dataset_readers import LinkedWikiTextKglmReader
 from kglm.models.kglm import Kglm
 from kglm.predictors.cloze import ClozePredictor
 

@@ -1,2 +1,2 @@
-from .linked_wikitext import LinkedWikitextKglmReader, LinkedWikitextEntityNlmReader
+from .linked_wikitext import LinkedWikiTextKglmReader, LinkedWikiTextEntityNlmReader
 from .conll2012 import Conll2012DatasetReader

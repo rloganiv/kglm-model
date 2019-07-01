@@ -3,7 +3,7 @@ import numpy as np
 import torch
 
 from kglm.common.testing import KglmModelTestCase
-from kglm.data.dataset_readers.linked_wikitext import LinkedWikitextReader
+from kglm.data.dataset_readers.linked_wikitext import LinkedWikiTextReader
 from kglm.models.awd_lstm import AwdLstmLanguageModel
 
 
