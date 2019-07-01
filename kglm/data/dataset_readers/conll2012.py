@@ -7,15 +7,12 @@ from typing import DefaultDict, Dict, Iterable, List, Optional, Set, Tuple
 from allennlp.common.file_utils import cached_path
 from allennlp.data.dataset_readers import DatasetReader
 from allennlp.data.dataset_readers.dataset_utils import Ontonotes
-from allennlp.data.fields import Field, TextField
+from allennlp.data.fields import ArrayField, Field, TextField
 from allennlp.data.instance import Instance
 from allennlp.data.token_indexers import TokenIndexer, SingleIdTokenIndexer
 from allennlp.data.tokenizers import Token
 import numpy as np
 from overrides import overrides
-
-from kglm.data.fields import SequentialArrayField
-
 
 def _flatten(nested: Iterable[str]):
     return [x for seq in nested for x in seq]
@@ -121,14 +118,14 @@ class Conll2012DatasetReader(DatasetReader):
         An ``Instance`` containing the following ``Fields``:
             tokens : ``TextField``
                 The text of the full document.
-            entity_types : ``SequentialArrayField``
+            entity_types : ``ArrayField``
                 An array with 1's in positions corresponding to words in entities,
                 and 0's in positions corresponding to words not in entities.
-            entity_ids : ``SequentialArrayField``
+            entity_ids : ``ArrayField``
                 An array with an entity index in positions corresponding to words in
                 entities, and 0's in positions corresponding to words not in entities.
                 Words in coreferring entities share the same entity ID.
-            mention_lengths : ``SequentialArrayField``
+            mention_lengths : ``ArrayField``
                 An array with the remaining words in each entity. For words that aren't
                 in an entity, the corresponding index is "1". Else, the corresponding
                 index has the number of words remaining in the entity. If the entity
@@ -188,9 +185,9 @@ class Conll2012DatasetReader(DatasetReader):
                 # Fill in mention length
                 mention_lengths[cluster[0] + 1:cluster[1] + 1 + 1] = np.arange(entity_length, 0, step=-1)
 
-        fields['entity_ids'] = SequentialArrayField(entity_ids, dtype=np.int64)
-        fields['mention_lengths'] = SequentialArrayField(mention_lengths, dtype=np.int64)
-        fields['entity_types'] = SequentialArrayField(entity_types, dtype=np.uint8)
+        fields['entity_ids'] = ArrayField(entity_ids, dtype=np.int64)
+        fields['mention_lengths'] = ArrayField(mention_lengths, dtype=np.int64)
+        fields['entity_types'] = ArrayField(entity_types, dtype=np.uint8)
         return Instance(fields)
 
     @staticmethod

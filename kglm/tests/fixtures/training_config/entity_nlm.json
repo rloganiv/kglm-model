@@ -2,10 +2,10 @@
     "vocabulary": {
         "type": "extended",
         "extend": false,
-        "directory_path": "kglm/tests/fixtures/enhanced-wikitext-test/vocab"
+        "directory_path": "kglm/tests/fixtures/linked-wikitext-test/vocab"
     },
     "dataset_reader": {
-        "type": "enhanced-wikitext-entity-nlm"
+        "type": "linked-wikitext-entity-nlm"
     },
     "iterator": {
         "type": "split",
@@ -53,8 +53,8 @@
         "tie_weights": true,
         "variational_dropout_rate": 0.1
     },
-    "train_data_path": "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl",
-    "validation_data_path": "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl",
+    "train_data_path": "kglm/tests/fixtures/linked-wikitext-test/train.jsonl",
+    "validation_data_path": "kglm/tests/fixtures/linked-wikitext-test/train.jsonl",
     "trainer": {
         "cuda_device": -1,
         "num_epochs": 2,

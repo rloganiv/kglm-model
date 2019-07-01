@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Tuple
 from allennlp.common.util import JsonDict
 from allennlp.data import DatasetReader, Instance
 from allennlp.data.dataset import Batch
-from allennlp.data.fields import TextField
+from allennlp.data.fields import ArrayField, TextField
 from allennlp.data.tokenizers import Token
 from allennlp.models import Model
 from allennlp.models.archival import Archive, load_archive
@@ -14,8 +14,6 @@ from allennlp.predictors import Predictor
 import numpy as np
 from overrides import overrides
 import torch
-
-from kglm.data import SequentialArrayField
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +53,7 @@ class ClozePredictor(Predictor):
         conditioning_instance = self._dataset_reader.text_to_instance(tokens[:-1])
 
         # Manually add the reset field here
-        reset = SequentialArrayField(np.array(1), dtype=np.uint8)
+        reset = ArrayField(np.array(1), dtype=np.uint8)
         conditioning_instance.add_field('reset', reset)
 
         # Add the shortlist
@@ -72,7 +70,7 @@ class ClozePredictor(Predictor):
         # generative_instance = self._dataset_reader.text_to_instance(data)
         generative_instance = self._dataset_reader.text_to_instance([tokens[-1]])
         # Manually add the reset field here
-        reset = SequentialArrayField(np.array(0), dtype=np.uint8)
+        reset = ArrayField(np.array(0), dtype=np.uint8)
         generative_instance.add_field('reset', reset)
         if 'shortlist' in json_dict:
             generative_instance.add_field('shortlist', conditioning_instance.fields['shortlist'])

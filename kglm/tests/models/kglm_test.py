@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from kglm.common.testing import KglmModelTestCase
-from kglm.data.dataset_readers.enhanced_wikitext import EnhancedWikitextKglmReader
+from kglm.data.dataset_readers.linked_wikitext import LinkedWikitextKglmReader
 from kglm.models.kglm import Kglm
 from kglm.models.kglm_disc import KglmDisc
 
@@ -15,7 +15,7 @@ class KglmTest(KglmModelTestCase):
     def setUp(self):
         super().setUp()
         self.set_up_model("kglm/tests/fixtures/training_config/kglm.json",
-                          "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl")
+                          "kglm/tests/fixtures/linked-wikitext-test/train.jsonl")
 
     def test_model_can_train_save_and_load(self):
         self.ensure_model_can_train_save_and_load(self.param_file)
@@ -25,7 +25,7 @@ class KglmNoShortlistTest(KglmModelTestCase):
     def setUp(self):
         super().setUp()
         self.set_up_model("kglm/tests/fixtures/training_config/kglm.no-shortlist.json",
-                          "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl")
+                          "kglm/tests/fixtures/linked-wikitext-test/train.jsonl")
 
     def test_model_can_train_save_and_load(self):
         self.ensure_model_can_train_save_and_load(self.param_file)
@@ -35,7 +35,7 @@ class KglmDiscTest(KglmModelTestCase):
     def setUp(self):
         super().setUp()
         self.set_up_model("kglm/tests/fixtures/training_config/kglm-disc.json",
-                          "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl")
+                          "kglm/tests/fixtures/linked-wikitext-test/train.jsonl")
 
     def test_model_can_train_save_and_load(self):
         self.ensure_model_can_train_save_and_load(self.param_file, gradients_to_ignore=['_overlap_weight'])
@@ -43,7 +43,7 @@ class KglmDiscTest(KglmModelTestCase):
     def test_sample(self):
         generator_params = Params.from_file("kglm/tests/fixtures/training_config/kglm.json")
         params = Params.from_file(self.param_file)
-        dataset_file = "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl"
+        dataset_file = "kglm/tests/fixtures/linked-wikitext-test/train.jsonl"
 
         # Need instances from 'generative' reader!
         reader_params = generator_params['dataset_reader']
@@ -60,7 +60,7 @@ class KglmDiscNoShortlistTest(KglmModelTestCase):
     def setUp(self):
         super().setUp()
         self.set_up_model("kglm/tests/fixtures/training_config/kglm-disc.no-shortlist.json",
-                          "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl")
+                          "kglm/tests/fixtures/linked-wikitext-test/train.jsonl")
 
     def test_model_can_train_save_and_load(self):
         self.ensure_model_can_train_save_and_load(self.param_file)
@@ -68,7 +68,7 @@ class KglmDiscNoShortlistTest(KglmModelTestCase):
     def test_sample(self):
         generator_params = Params.from_file("kglm/tests/fixtures/training_config/kglm.no-shortlist.json")
         params = Params.from_file(self.param_file)
-        dataset_file = "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl"
+        dataset_file = "kglm/tests/fixtures/linked-wikitext-test/train.jsonl"
 
         # Need instances from 'generative' reader!
         reader_params = generator_params['dataset_reader']

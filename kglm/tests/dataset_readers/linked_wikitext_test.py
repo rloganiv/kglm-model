@@ -2,16 +2,14 @@ from allennlp.common.util import ensure_list
 import numpy as np
 import pytest
 
-from kglm.data.dataset_readers import (
-    EnhancedWikitextEntityNlmReader,
-    EnhancedWikitextKglmReader)
+from kglm.data.dataset_readers import LinkedWikitextEntityNlmReader, LinkedWikitextKglmReader
 
 
-class TestEnhancedWikitextEntityNLMReader:
+class TestLinkedWikitextEntityNLMReader:
     @pytest.mark.parametrize('lazy', (True, False))
     def test_read_from_file(self, lazy):
-        reader = EnhancedWikitextEntityNlmReader(lazy=lazy)
-        fixture_path = 'kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl'
+        reader = LinkedWikitextEntityNlmReader(lazy=lazy)
+        fixture_path = 'kglm/tests/fixtures/linked-wikitext-test/train.jsonl'
         instances = ensure_list(reader.read(fixture_path))
 
         first_instance_tokens = [x.text for x in instances[0]["tokens"].tokens]
@@ -28,16 +26,16 @@ class TestEnhancedWikitextEntityNLMReader:
                                    [1, 1, 1, 1, 1])
 
 
-class TestEnhancedWikitextKglmReader:
+class TestLinkedWikitextKglmReader:
     @pytest.mark.parametrize('lazy', (True, False))
     @pytest.mark.parametrize('mode', ("generative", "discriminative"))
     def test_read_from_file(self, lazy, mode):
         offset = 0 if mode == "generative" else 1
-        alias_database_path = 'kglm/tests/fixtures/enhanced-wikitext-test/alias.pkl'
-        reader = EnhancedWikitextKglmReader(lazy=lazy,
+        alias_database_path = 'kglm/tests/fixtures/linked-wikitext-test/alias.pkl'
+        reader = LinkedWikitextKglmReader(lazy=lazy,
                                             mode=mode,
                                             alias_database_path=alias_database_path)
-        fixture_path = 'kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl'
+        fixture_path = 'kglm/tests/fixtures/linked-wikitext-test/train.jsonl'
         instances = ensure_list(reader.read(fixture_path))
 
         # Test correct number of instances is being created

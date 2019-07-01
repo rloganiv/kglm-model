@@ -1,5 +1,5 @@
 """
-Readers for the enhanced Wikitext dataset.
+Readers for the Linked Wikitext-2 dataset.
 """
 from typing import Any, Dict, Iterable, List, Set
 import json
@@ -8,7 +8,7 @@ import logging
 from allennlp.common.checks import ConfigurationError
 from allennlp.common.file_utils import cached_path
 from allennlp.data.dataset_readers import DatasetReader
-from allennlp.data.fields import ListField, MetadataField, TextField
+from allennlp.data.fields import ArrayField, ListField, MetadataField, TextField
 from allennlp.data.instance import Instance
 from allennlp.data.token_indexers import TokenIndexer, SingleIdTokenIndexer
 from allennlp.data.tokenizers import Token
@@ -17,7 +17,6 @@ import numpy as np
 from overrides import overrides
 
 from kglm.data import AliasDatabase
-from kglm.data.fields import SequentialArrayField
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +30,8 @@ def _tokenize(iterable: Iterable[str]):
     return [Token(x) for x in iterable]
 
 
-@DatasetReader.register('enhanced-wikitext')
-class EnhancedWikitextReader(DatasetReader):
+@DatasetReader.register('linked-wikitext')
+class LinkedWikitextReader(DatasetReader):
     def __init__(self,
                  token_indexers: Dict[str, TokenIndexer] = None,
                  lazy: bool = False) -> None:
@@ -59,8 +58,8 @@ class EnhancedWikitextReader(DatasetReader):
         return Instance(fields)
 
 
-@DatasetReader.register('enhanced-wikitext-entity-nlm')
-class EnhancedWikitextEntityNlmReader(DatasetReader):
+@DatasetReader.register('linked-wikitext-entity-nlm')
+class LinkedWikitextEntityNlmReader(DatasetReader):
 
     def __init__(self,
                  token_indexers: Dict[str, TokenIndexer] = None,
@@ -109,9 +108,9 @@ class EnhancedWikitextEntityNlmReader(DatasetReader):
                     mention_lengths[i] = length
                     length -= 1
 
-            fields['entity_types'] = SequentialArrayField(entity_types, dtype=np.uint8)
-            fields['entity_ids'] = SequentialArrayField(entity_ids, dtype=np.int64)
-            fields['mention_lengths'] = SequentialArrayField(mention_lengths, dtype=np.int64)
+            fields['entity_types'] = ArrayField(entity_types, dtype=np.uint8)
+            fields['entity_ids'] = ArrayField(entity_ids, dtype=np.int64)
+            fields['mention_lengths'] = ArrayField(mention_lengths, dtype=np.int64)
 
         return Instance(fields)
 
@@ -128,8 +127,8 @@ def normalize_entity_id(raw_entity_id: str) -> str:
     return entity_id
 
 
-@DatasetReader.register('enhanced-wikitext-kglm')
-class EnhancedWikitextKglmReader(DatasetReader):
+@DatasetReader.register('linked-wikitext-kglm')
+class LinkedWikitextKglmReader(DatasetReader):
 
     def __init__(self,
                  alias_database_path: str,
@@ -161,19 +160,19 @@ class EnhancedWikitextKglmReader(DatasetReader):
         self._relation_indexers = relation_indexers or {'relations': SingleIdTokenIndexer(namespace='relations')}
         if 'tokens' not in self._token_indexers or \
                 not isinstance(self._token_indexers['tokens'], SingleIdTokenIndexer):
-            raise ConfigurationError("EnhancedWikitextReader expects 'token_indexers' to contain "
+            raise ConfigurationError("LinkedWikitextKglmReader expects 'token_indexers' to contain "
                                      "a 'single_id' token indexer called 'tokens'.")
         if 'entity_ids' not in self._entity_indexers or \
                 not isinstance(self._entity_indexers['entity_ids'], SingleIdTokenIndexer):
-            raise ConfigurationError("EnhancedWikitextReader expects 'entity_indexers' to contain "
+            raise ConfigurationError("LinkedWikitextKglmReader expects 'entity_indexers' to contain "
                                      "a 'single_id' token indexer called 'entity_ids'.")
         if 'raw_entity_ids' not in self._raw_entity_indexers or \
                 not isinstance(self._raw_entity_indexers['raw_entity_ids'], SingleIdTokenIndexer):
-            raise ConfigurationError("EnhancedWikitextReader expects 'raw_entity_indexers' to contain "
+            raise ConfigurationError("LinkedWikitextKglmReader expects 'raw_entity_indexers' to contain "
                                      "a 'single_id' token indexer called 'raw_entity_ids'.")
         if 'relations' not in self._relation_indexers or \
                 not isinstance(self._relation_indexers['relations'], SingleIdTokenIndexer):
-            raise ConfigurationError("EnhancedWikitextReader expects 'relation_indexers' to contain "
+            raise ConfigurationError("LinkedWikitextKglmReader expects 'relation_indexers' to contain "
                                      "a 'single_id' token indexer called 'relations'.")
         self._alias_database = AliasDatabase.load(path=alias_database_path)
 
@@ -322,38 +321,32 @@ class EnhancedWikitextKglmReader(DatasetReader):
                           token_indexers=self._relation_indexers)
                 for sublist in relations])
         if mention_type is not None:
-            fields['mention_type'] = SequentialArrayField(mention_type, dtype=np.int64)
+            fields['mention_type'] = ArrayField(mention_type, dtype=np.int64)
         if shortlist_inds is not None:
-            fields['shortlist_inds'] = SequentialArrayField(shortlist_inds, dtype=np.int64)
+            fields['shortlist_inds'] = ArrayField(shortlist_inds, dtype=np.int64)
         if alias_copy_inds is not None:
-            fields['alias_copy_inds'] = SequentialArrayField(alias_copy_inds, dtype=np.int64)
+            fields['alias_copy_inds'] = ArrayField(alias_copy_inds, dtype=np.int64)
 
         return Instance(fields)
 
 
-@DatasetReader.register('enhanced-wikitext-simple-kglm')
-class EnhancedWikitextSimpleKglmReader(DatasetReader):
+@DatasetReader.register('linked-wikitext-simple-kglm')
+class LinkedWikitextSimpleKglmReader(DatasetReader):
 
     def __init__(self,
                  token_indexers: Dict[str, TokenIndexer] = None,
                  entity_indexers: Dict[str, TokenIndexer] = None,
                  lazy: bool = False) -> None:
-        """
-        Parameters
-        ----------
-        alias_database_path : str
-            Path to the alias database.
-        """
         super().__init__(lazy)
         self._token_indexers = token_indexers or {'tokens': SingleIdTokenIndexer()}
         self._entity_indexers = entity_indexers or {'entity_ids': SingleIdTokenIndexer(namespace='entity_ids')}
         if 'tokens' not in self._token_indexers or \
                 not isinstance(self._token_indexers['tokens'], SingleIdTokenIndexer):
-            raise ConfigurationError("EnhancedWikitextReader expects 'token_indexers' to contain "
+            raise ConfigurationError("Dataset reader expects 'token_indexers' to contain "
                                      "a 'single_id' token indexer called 'tokens'.")
         if 'entity_ids' not in self._entity_indexers or \
                 not isinstance(self._entity_indexers['entity_ids'], SingleIdTokenIndexer):
-            raise ConfigurationError("EnhancedWikitextReader expects 'entity_indexers' to contain "
+            raise ConfigurationError("Dataset reader expects 'entity_indexers' to contain "
                                      "a 'single_id' token indexer called 'entities'.")
 
     @overrides
@@ -429,17 +422,17 @@ class EnhancedWikitextSimpleKglmReader(DatasetReader):
             fields['entity_ids'] = TextField(
                 [Token(x) for x in entity_ids],
                 token_indexers=self._entity_indexers)
-            fields['alias_copy_inds'] = SequentialArrayField(
+            fields['alias_copy_inds'] = ArrayField(
                 alias_copy_inds,
                 dtype=np.int64)
             fields['shortlist'] = TextField(
                 [Token(x) for x in shortlist],
                 token_indexers=self._entity_indexers)
-            fields['shortlist_inds'] = SequentialArrayField(
+            fields['shortlist_inds'] = ArrayField(
                 shortlist_inds,
                 dtype=np.int64)
             fields['alias_tokens'] = ListField(alias_tokens)
-            fields['alias_inds'] = SequentialArrayField(
+            fields['alias_inds'] = ArrayField(
                 alias_ind_array,
                 dtype=np.int64)
 

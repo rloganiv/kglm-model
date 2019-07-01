@@ -4,7 +4,7 @@ from allennlp.common.testing import ModelTestCase
 import numpy as np
 import torch
 
-from kglm.data.dataset_readers.enhanced_wikitext import EnhancedWikitextEntityNlmReader
+from kglm.data.dataset_readers.linked_wikitext import LinkedWikitextEntityNlmReader
 from kglm.models.entity_nlm import EntityNLM
 
 
@@ -13,7 +13,7 @@ class EntityNLMTest(ModelTestCase):
     def setUp(self):
         super().setUp()
         self.set_up_model("kglm/tests/fixtures/training_config/entity_nlm.json",
-                          "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl")
+                          "kglm/tests/fixtures/linked-wikitext-test/train.jsonl")
 
     def test_model_can_train_save_and_load(self):
         # TODO: Construct test cases where we can obtain gradients for these components

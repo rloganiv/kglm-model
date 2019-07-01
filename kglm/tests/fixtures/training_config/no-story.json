@@ -2,14 +2,14 @@
     "vocabulary": {
         "type": "extended",
         "extend": false,
-        "directory_path": "kglm/tests/fixtures/enhanced-wikitext-test/vocab"
+        "directory_path": "kglm/tests/fixtures/linked-wikitext-test/vocab"
     },
     "dataset_reader": {
-        "type": "enhanced-wikitext-kglm",
-        "alias_database_path": "kglm/tests/fixtures/enhanced-wikitext-test/alias.pkl"
+        "type": "linked-wikitext-kglm",
+        "alias_database_path": "kglm/tests/fixtures/linked-wikitext-test/alias.pkl"
     },
-    "train_data_path": "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl",
-    "validation_data_path": "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl",
+    "train_data_path": "kglm/tests/fixtures/linked-wikitext-test/train.jsonl",
+    "validation_data_path": "kglm/tests/fixtures/linked-wikitext-test/train.jsonl",
     "model": {
         "type": "no-story",
         "token_embedder": {

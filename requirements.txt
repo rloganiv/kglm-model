@@ -1,4 +1,5 @@
-git+git://github.com/rloganiv/allennlp.git@pytorch-grad-clip
+# Master
+git+git://github.com/allenai/allennlp.git
 
 # Coverage reports
 pytest-cov

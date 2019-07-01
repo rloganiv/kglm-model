@@ -48,7 +48,7 @@ class AliasDatabaseTest(AllenNlpTestCase):
 
     def test_load(self):
         # Test that the load function has the expected behavior
-        alias_database = AliasDatabase.load('kglm/tests/fixtures/enhanced-wikitext-test/alias.pkl')
+        alias_database = AliasDatabase.load('kglm/tests/fixtures/linked-wikitext-test/alias.pkl')
         test_entity = 'Q156216'  # Benton County
 
         # Check that aliases are tokenized properly

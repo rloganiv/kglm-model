@@ -6,13 +6,11 @@ import random
 from typing import Deque, Dict, Iterable, Iterator, List, Tuple, Union
 
 from allennlp.data.dataset import Batch
-from allennlp.data.fields import Field, ListField, MetadataField, TextField
+from allennlp.data.fields import ArrayField, Field, ListField, MetadataField, TextField
 from allennlp.data.instance import Instance
 from allennlp.data.iterators.data_iterator import add_epoch_number, DataIterator
 import numpy as np
 import torch
-
-from kglm.data.fields import SequentialArrayField
 
 logger = logging.getLogger(__name__)
 
@@ -124,9 +122,9 @@ class FancyIterator(DataIterator):
 
             # Determine whether or not to signal model to reset.
             if i == 0:
-                reset = SequentialArrayField(np.array(1), dtype=np.uint8)
+                reset = ArrayField(np.array(1), dtype=np.uint8)
             else:
-                reset = SequentialArrayField(np.array(0), dtype=np.uint8)
+                reset = ArrayField(np.array(0), dtype=np.uint8)
             chunk_fields['reset'] = reset
 
             # Obtain splits derived from sequence fields.
@@ -136,10 +134,9 @@ class FancyIterator(DataIterator):
                 if isinstance(source_field, TextField):
                     split_field = TextField(source_field.tokens[start:end],
                                             source_field._token_indexers)
-                elif isinstance(source_field, SequentialArrayField):
-                    # TODO: Figure out how to use sequence dim here...
-                    split_field = SequentialArrayField(source_field.array[start:end],
-                                                       dtype=source_field._dtype)
+                elif isinstance(source_field, ArrayField):
+                    split_field = ArrayField(source_field.array[start:end],
+                                             dtype=source_field.dtype)
                 elif isinstance(source_field, ListField):
                     split_field = ListField(source_field.field_list[start:end])
                 else:
