@@ -4,6 +4,7 @@ Readers for the Linked WikiText-2 dataset.
 from typing import Any, Dict, Iterable, List, Set
 import json
 import logging
+import random
 
 from allennlp.common.checks import ConfigurationError
 from allennlp.common.file_utils import cached_path
@@ -20,14 +21,28 @@ from kglm.data import AliasDatabase
 
 logger = logging.getLogger(__name__)
 
-MAX_PARENTS = 10
+MAX_PARENTS = 10  # TODO: Move to config.
 
 
 def _flatten(nested: Iterable[str]):
     return [x for seq in nested for x in seq]
 
+
 def _tokenize(iterable: Iterable[str]):
     return [Token(x) for x in iterable]
+
+
+def normalize_entity_id(raw_entity_id: str) -> str:
+    """Replaces dates and quantities with generic tokens"""
+    if raw_entity_id[0] == 'T':
+        entity_id = '@@DATE@@'
+    elif raw_entity_id[0] == 'V':
+        entity_id = '@@QUANTITY@@'
+    elif raw_entity_id[0] in ['P', 'Q']:
+        entity_id = raw_entity_id
+    else:
+        entity_id = None
+    return entity_id
 
 
 @DatasetReader.register('linked-wikitext')
@@ -115,16 +130,6 @@ class LinkedWikiTextEntityNlmReader(DatasetReader):
         return Instance(fields)
 
 
-def normalize_entity_id(raw_entity_id: str) -> str:
-    if raw_entity_id[0] == 'T':
-        entity_id = '@@DATE@@'
-    elif raw_entity_id[0] == 'V':
-        entity_id = '@@QUANTITY@@'
-    elif raw_entity_id[0] in ['P', 'Q']:
-        entity_id = raw_entity_id
-    else:
-        entity_id = None
-    return entity_id
 
 
 @DatasetReader.register('linked-wikitext-kglm')
@@ -132,7 +137,12 @@ class LinkedWikiTextKglmReader(DatasetReader):
 
     def __init__(self,
                  alias_database_path: str,
-                 mode: str = "generative",
+                 batch_size: int = 60,
+                 shuffle: bool = False,
+                 split_fields: Set[str] = {},
+                 split_length: int = 70,
+                 fuzzy_splits: bool = True,
+                 mode: str = 'generative',
                  token_indexers: Dict[str, TokenIndexer] = None,
                  entity_indexers: Dict[str, TokenIndexer] = None,
                  raw_entity_indexers: Dict[str, TokenIndexer] = None,
@@ -149,9 +159,9 @@ class LinkedWikiTextKglmReader(DatasetReader):
             the model.
         """
         super().__init__(lazy)
-        if mode not in {"discriminative", "generative"}:
-            raise ConfigurationError("Got mode {}, expected one of 'generative'"
-                                     "or 'discriminative'".format(mode))
+        if mode not in {'discriminative', 'generative'}:
+            raise ConfigurationError('Got mode {}, expected one of 'generative''
+                                     'or 'discriminative''.format(mode))
         self._mode = mode
 
         self._token_indexers = token_indexers or {'tokens': SingleIdTokenIndexer()}
@@ -176,108 +186,180 @@ class LinkedWikiTextKglmReader(DatasetReader):
                                      "a 'single_id' token indexer called 'relations'.")
         self._alias_database = AliasDatabase.load(path=alias_database_path)
 
+    def _process_line(self, line) -> Dict[str, Any]:
+        data = json.loads(line)
+
+        # Extract tokens and EOS offset
+        tokens = [x + ['@@END@@'] for x in data['tokens'][1:-1]]
+        eos_offset = [[i] * len(x) for i, x in enumerate(tokens)]
+        tokens = ['@@START@@'] + _flatten(tokens)
+        eos_offset = [0] + _flatten(eos_offset)
+        source = tokens[:-1]
+        if self._mode == 'generative':
+            target = tokens[1:]
+        else:
+            target = None
+
+        # Process annotations
+        if 'annotations' not in data:
+            shortlist = None
+            reverse_shortlist = None
+            raw_entity_ids = None
+            entity_ids = None
+            relations = None
+            parent_ids = None
+            shortlist_inds = None
+            mention_type = None
+        else:
+            # We maintain a "shortlist" of observed entities, that is used for baseline models
+            # that only select entities from the set that appear in the document (as opposed to
+            # the set of all possible entities).
+            shortlist = [DEFAULT_PADDING_TOKEN]
+            reverse_shortlist = {DEFAULT_PADDING_TOKEN: 0}
+            raw_entity_ids = [DEFAULT_PADDING_TOKEN] * len(source)
+            entity_ids = [DEFAULT_PADDING_TOKEN] * len(source)
+            relations = [[DEFAULT_PADDING_TOKEN]] * len(source)
+            parent_ids = [[DEFAULT_PADDING_TOKEN]] * len(source)
+            shortlist_inds = np.zeros(shape=(len(source),))
+            mention_type = np.zeros(shape=(len(source),))
+
+            if self._mode == 'generative':
+                alias_copy_inds = np.zeros(shape=(len(source),))
+            else:
+                alias_copy_inds = None
+
+            # Process annotations
+            for annotation in data['annotations']:
+
+                # Obtain the entity identifier for the annotated span
+                raw_entity_id = annotation['id']
+                raw_parent_id = annotation['parent_id']
+                entity_id = normalize_entity_id(raw_entity_id)
+                if entity_id is None:
+                    continue
+                parent_id = [normalize_entity_id(x) for x in raw_parent_id]
+                assert len(parent_id) == len(raw_parent_id)
+                relation = annotation['relation']
+                new_entity = relation == ['@@NEW@@']
+
+                # If neccessary, update the shortlist. Obtain the index of the entity identifier in
+                # the shortlist.
+                if entity_id not in reverse_shortlist:
+                    reverse_shortlist[entity_id] = len(reverse_shortlist)
+                    shortlist.append(entity_id)
+                shortlist_ind = reverse_shortlist[entity_id]
+
+                # Update the outputs
+                # Offset is 0 in generative case, since each timestep is for predicting
+                # attributes of the next token. In the discriminative case, each timestep
+                # is for predicting attributes of the current token.
+                mode_offset = -1 if self._mode == 'generative' else 0
+                span = annotation['span']
+                eos_offset_adjusted_span = tuple(i + eos_offset[i] for i in span)
+                for i in range(*eos_offset_adjusted_span):
+                    raw_entity_ids[i+mode_offset] = raw_entity_id
+                    entity_ids[i+mode_offset] = entity_id
+                    mention_type[i+mode_offset] = 3
+                    if new_entity:
+                        shortlist_inds[i+mode_offset] = shortlist_ind
+                    else:
+                        relations[i+mode_offset] = relation[:MAX_PARENTS]
+                        parent_ids[i+mode_offset] = parent_id[:MAX_PARENTS]
+                    if self._mode == 'generative':
+                        alias_copy_inds[i+mode_offset] = self._alias_database.token_to_uid(raw_entity_id, tokens[i])
+
+                # Now put in proper mention type for first token
+                start = annotation['span'][0]
+                if new_entity:
+                    mention_type[start+mode_offset] = 1
+                else:
+                    mention_type[start+mode_offset] = 2
+
+        return {
+            'source': source,
+            'target': target,
+            'shortlist': shortlist,
+            'reverse_shortlist': reverse_shortlist,
+            'raw_entity_ids': raw_entity_ids,
+            'entity_ids': entity_ids,
+            'relations': relations,
+            'parent_ids': parent_ids,
+            'shortlist_inds': shortlist_inds,
+            'mention_type': mention_type,
+            'alias_copy_inds': alias_copy_inds
+        }
+
+    def _greedy_batch(self, processed: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+        """
+        To avoid excess padding, greedily batch sequences so that they all end approximately at
+        the same time.
+        """
+        batch = [[] * self.batch_size]
+        lengths = np.zeros(shape=(self.batch_size,))
+        for sequence in processed:
+            index = np.argmin(lengths)
+            batch[index].append(sequence)
+            lengths[index] += len(sequence['source'])
+        return batch
+
+    def _split(self, batch: List[List[Dict[str, Any]]]) -> List[List[Dict[str, Any]]]:
+        """
+        Split sequences in batch into smaller pieces.
+        """
+        split_batch = [[] * self.batch_size]
+        active = [sequences.pop() for sequences in batch]
+
+        while not all(len(sequences) == 0 for sequences in batch):
+            # Compute split size
+            if self.fuzzy_splits:
+                split_size = self.split_size if np.random.random() < 0.95 else self.split_size // 2
+                split_size = max(5, int(np.random.normal(split_size, 5)))
+            else:
+                split_size = self.split_size
+
+            # Split each sequence at chosen split size
+            for i, sequence in enumerate(active):
+                split = {}
+                remainder = {}
+                for key, value in sequence:
+                    if key in self.split_fields:
+                        split[key] = value[:split_size]
+                        remainder[key] = value[split_size:]
+                    else:
+                        split[key] = value
+                        remainder[key] = value
+                split_batch[i].append(split)
+                # If there is no remainder, fetch a new sequence.
+                if any(len(x)==0 for x in remainder.values()):
+                    try:
+                        active[i] = batch[i].pop()
+                    except IndexError:
+                        active[i] = remainder
+
+        return split_batch
+
+
+
+
+
+
+
     @overrides
     def _read(self, file_path: str) -> Iterable[Instance]:
+        # Process the data into lists / arrays
         with open(file_path, 'r') as f:
-            for line in f:
-                data = json.loads(line)
+            processed = [self._process_line(line) for line in f]
 
-                # Extract tokens and EOS offset
-                tokens = [x + ['@@END@@'] for x in data['tokens'][1:-1]]
-                eos_offset = [[i] * len(x) for i, x in enumerate(tokens)]
-                tokens = ['@@START@@'] + _flatten(tokens)
-                eos_offset = [0] + _flatten(eos_offset)
-                source = tokens[:-1]
-                if self._mode == 'generative':
-                    target = tokens[1:]
-                else:
-                    target = None
+        # Shuffle the data
+        if self.shuffle:
+            random.shuffle(processed)
 
-                # Process annotations
-                if 'annotations' not in data:
-                    shortlist = None
-                    reverse_shortlist = None
-                    raw_entity_ids = None
-                    entity_ids = None
-                    relations = None
-                    parent_ids = None
-                    shortlist_inds = None
-                    mention_type = None
-                else:
-                    # We maintain a "shortlist" of observed entities, that is used for baseline models
-                    # that only select entities from the set that appear in the document (as opposed to
-                    # the set of all possible entities).
-                    shortlist = [DEFAULT_PADDING_TOKEN]
-                    reverse_shortlist = {DEFAULT_PADDING_TOKEN: 0}
-                    raw_entity_ids = [DEFAULT_PADDING_TOKEN] * len(source)
-                    entity_ids = [DEFAULT_PADDING_TOKEN] * len(source)
-                    relations = [[DEFAULT_PADDING_TOKEN]] * len(source)
-                    parent_ids = [[DEFAULT_PADDING_TOKEN]] * len(source)
-                    shortlist_inds = np.zeros(shape=(len(source),))
-                    mention_type = np.zeros(shape=(len(source),))
+        #
+        #
 
-                    if self._mode == "generative":
-                        alias_copy_inds = np.zeros(shape=(len(source),))
-                    else:
-                        alias_copy_inds = None
 
-                    # Process annotations
-                    for annotation in data['annotations']:
 
-                        # Obtain the entity identifier for the annotated span
-                        raw_entity_id = annotation['id']
-                        raw_parent_id = annotation['parent_id']
-                        entity_id = normalize_entity_id(raw_entity_id)
-                        if entity_id is None:
-                            continue
-                        parent_id = [normalize_entity_id(x) for x in raw_parent_id]
-                        assert len(parent_id) == len(raw_parent_id)
-                        relation = annotation['relation']
-                        new_entity = relation == ['@@NEW@@']
 
-                        # If neccessary, update the shortlist. Obtain the index of the entity identifier in
-                        # the shortlist.
-                        if entity_id not in reverse_shortlist:
-                            reverse_shortlist[entity_id] = len(reverse_shortlist)
-                            shortlist.append(entity_id)
-                        shortlist_ind = reverse_shortlist[entity_id]
-
-                        # Update the outputs
-                        # Offset is 0 in generative case, since each timestep is for predicting
-                        # attributes of the next token. In the discriminative case, each timestep
-                        # is for predicting attributes of the current token.
-                        mode_offset = -1 if self._mode == "generative" else 0
-                        span = annotation['span']
-                        eos_offset_adjusted_span = tuple(i + eos_offset[i] for i in span)
-                        for i in range(*eos_offset_adjusted_span):
-                            raw_entity_ids[i+mode_offset] = raw_entity_id
-                            entity_ids[i+mode_offset] = entity_id
-                            mention_type[i+mode_offset] = 3
-                            if new_entity:
-                                shortlist_inds[i+mode_offset] = shortlist_ind
-                            else:
-                                relations[i+mode_offset] = relation[:MAX_PARENTS]
-                                parent_ids[i+mode_offset] = parent_id[:MAX_PARENTS]
-                            if self._mode == "generative":
-                                alias_copy_inds[i+mode_offset] = self._alias_database.token_to_uid(raw_entity_id, tokens[i])
-                        # Now put in proper mention type for first token
-                        start = annotation['span'][0]
-                        if new_entity:
-                            mention_type[start+mode_offset] = 1
-                        else:
-                            mention_type[start+mode_offset] = 2
-
-                yield self.text_to_instance(source,
-                                            target,
-                                            shortlist,
-                                            reverse_shortlist,
-                                            raw_entity_ids,
-                                            entity_ids,
-                                            relations,
-                                            parent_ids,
-                                            shortlist_inds,
-                                            mention_type,
-                                            alias_copy_inds)
 
     @overrides
     def text_to_instance(self,
