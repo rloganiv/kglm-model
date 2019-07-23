@@ -52,8 +52,7 @@ class EnhancedWikitextReader(DatasetReader):
     @overrides
     def text_to_instance(self, data: Dict[str, Any]) -> Instance:  # pylint: disable=arguments-differ
         # Flatten and pad tokens
-        tokens = [x + ['@@END@@'] for x in data['tokens']]
-        tokens = _flatten(tokens)
+        tokens = data['tokens']
         tokens = [Token(x) for x in tokens]
         fields = {'tokens': TextField(tokens, self._token_indexers)}
         return Instance(fields)
@@ -81,8 +80,7 @@ class EnhancedWikitextEntityNlmReader(DatasetReader):
     @overrides
     def text_to_instance(self, data: Dict[str, Any]) -> Instance:  # pylint: disable=arguments-differ
         # Flatten and pad tokens
-        tokens = _flatten(data['tokens'])
-        tokens = [*tokens]
+        tokens = data['tokens']
         tokens = [Token(x) for x in tokens]
         fields = {'tokens': TextField(tokens, self._token_indexers)}
 
@@ -183,11 +181,8 @@ class EnhancedWikitextKglmReader(DatasetReader):
             for line in f:
                 data = json.loads(line)
 
-                # Extract tokens and EOS offset
-                tokens = [x + ['@@END@@'] for x in data['tokens'][1:-1]]
-                eos_offset = [[i] * len(x) for i, x in enumerate(tokens)]
-                tokens = ['@@START@@'] + _flatten(tokens)
-                eos_offset = [0] + _flatten(eos_offset)
+                # Extract tokens
+                tokens = data['tokens']
                 source = tokens[:-1]
                 if self._mode == 'generative':
                     target = tokens[1:]
@@ -249,8 +244,7 @@ class EnhancedWikitextKglmReader(DatasetReader):
                         # is for predicting attributes of the current token.
                         mode_offset = -1 if self._mode == "generative" else 0
                         span = annotation['span']
-                        eos_offset_adjusted_span = tuple(i + eos_offset[i] for i in span)
-                        for i in range(*eos_offset_adjusted_span):
+                        for i in range(*span):
                             raw_entity_ids[i+mode_offset] = raw_entity_id
                             entity_ids[i+mode_offset] = entity_id
                             mention_type[i+mode_offset] = 3
