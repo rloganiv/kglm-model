@@ -5,7 +5,7 @@ Knowledge Graph Language Model
 This repo contains an implementation of the KGLM model described in "Barack's Wife Hillary: Using Knowledge Graphs for Fact-Aware Language Modeling", Robert L. Logan IV, Nelson F. Liu, Matthew E. Peters, Matt Gardner and Sameer Singh, ACL 2019 [[arXiv]](https://arxiv.org/abs/1906.07241).
 
 
-<span style="color:red">**Warning:**</span> To avoid confusion regarding placement of '@@END@@' tokens, we have explicitly added the '@@END@@' tokens to the Linked WikiText-2 dataset and removed preprocessing steps from the dataset reader. If you are using an old version of the dataset, you will need to download a current version for this codebase to work.
+<span style="color:red">**Warning:**</span> To avoid confusion regarding placement of '@@END@@' tokens, we have explicitly added the '@@END@@' tokens to the Linked WikiText-2 dataset and removed preprocessing steps from the dataset reader. If you are using an old version of the dataset, you will need to download the current version [here](https://drive.google.com/file/d/1odypT9EDwtAYqzvRYnA2B_97hN_BWFnr/view?usp=sharing) for this codebase to work.
 
 
 Setup
@@ -21,7 +21,7 @@ Data
 KGLM is trained on the *Linked WikiText-2* dataset which can be downloaded at https://rloganiv.github.io/linked-wikitext-2.
 
 Additionally, you will need embeddings for entities/relations in the [Wikidata](https://www.wikidata.org/) knowledge graph, as well as access to the knowledge graph itself (in order to look up entity aliases/related entities).
-For convenience, we provide pre-trained embeddings and pickled dictionaries containing the relevant portions of Wikidata [here](https://drive.google.com/file/d/1pF37DLUiBvR89IHA-be0rAEoSOMFf5RN/view?usp=sharing).
+For convenience, we provide pre-trained embeddings and pickled dictionaries containing the relevant portions of Wikidata [here](https://drive.google.com/file/d/1odypT9EDwtAYqzvRYnA2B_97hN_BWFnr/view?usp=sharing).
 
 
 Training
