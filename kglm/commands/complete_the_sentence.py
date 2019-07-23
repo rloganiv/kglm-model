@@ -1,3 +1,6 @@
+"""
+For running complete the sentence experiments.
+"""
 from typing import List, Iterator, Optional
 import argparse
 import sys
@@ -10,14 +13,14 @@ from allennlp.models.archival import load_archive
 from allennlp.predictors.predictor import Predictor, JsonDict
 from allennlp.data import Instance
 
-from kglm.predictors import ClozePredictor
+from kglm.predictors import CompleteTheSentencePredictor
 
-class Generate(Subcommand):
+class CompleteTheSentence(Subcommand):
     def add_subparser(self, name: str, parser: argparse._SubParsersAction) -> argparse.ArgumentParser:
         # pylint: disable=protected-access
-        description = '''Run the specified model against a JSON-lines input file.'''
+        description = '''Run complete the sentence experiments.'''
         subparser = parser.add_parser(
-                name, description=description, help='Use a trained model to make predictions.')
+                name, description=description, help='Use a trained model to complete sentences.')
 
         subparser.add_argument('model_archive_file', type=str, help='the archived model to make predictions with')
         subparser.add_argument('sampler_archive_file', type=str, help='the archived model to make samples with')
@@ -45,13 +48,10 @@ class Generate(Subcommand):
                                default="",
                                help='a JSON structure used to override the experiment configuration')
 
-        subparser.add_argument('--predictor',
-                               type=str,
-                               help='optionally specify a specific predictor to use')
-
         subparser.set_defaults(func=_predict)
 
         return subparser
+
 
 def _get_predictor(args: argparse.Namespace) -> Predictor:
     check_for_gpu(args.cuda_device)
@@ -64,7 +64,8 @@ def _get_predictor(args: argparse.Namespace) -> Predictor:
                            cuda_device=args.cuda_device,
                            overrides=args.overrides)
 
-    return ClozePredictor.from_archive(model, sampler, args.predictor)
+    return CompleteTheSentencePredictor.from_archive(model, sampler,
+                                                     'complete-the-sentence')
 
 
 class _PredictManager:

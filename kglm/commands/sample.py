@@ -1,3 +1,8 @@
+"""
+CURRENTLY NOT WORKING.
+
+Sample sentences from the langauge model.
+"""
 import argparse
 import json
 import logging

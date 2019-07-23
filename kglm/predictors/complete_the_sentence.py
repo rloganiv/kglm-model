@@ -20,9 +20,12 @@ from kglm.data import SequentialArrayField
 logger = logging.getLogger(__name__)
 
 
-@Predictor.register('cloze')
-class ClozePredictor(Predictor):
+@Predictor.register('complete-the-sentence')
+class CompleteTheSentencePredictor(Predictor):
     def __init__(self, model: Model, dataset_reader: DatasetReader):
+        logger.warning('CompleteTheSentencePredictor is meant to be used with '
+                       '`kglm.run complete-the-sentence`, if you are using '
+                       '`allennlp predict` then results may be incorrect.')
         self._model = model
         self._dataset_reader = dataset_reader
 
@@ -168,3 +171,4 @@ class ClozePredictor(Predictor):
 
         words, probs = zip(*prob_list[:1000])
         return {'words': words, 'probs': probs}
+

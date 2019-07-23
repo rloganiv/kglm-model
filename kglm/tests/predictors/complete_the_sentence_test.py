@@ -4,10 +4,10 @@ from allennlp.predictors import Predictor
 
 from kglm.data.dataset_readers import EnhancedWikitextKglmReader
 from kglm.models.kglm import Kglm
-from kglm.predictors.cloze import ClozePredictor
+from kglm.predictors.complete_the_sentence import CompleteTheSentencePredictor
 
 
-class ClozePredictorTest(AllenNlpTestCase):
+class CompleteTheSentencePredictorTest(AllenNlpTestCase):
     def test_works(self):
         inputs = {
             "prefix": ["Benton", "Brindge", "is", "in"],
@@ -16,7 +16,7 @@ class ClozePredictorTest(AllenNlpTestCase):
             "entity_indices": [0, 2],
             "shortlist": ["Q4890550", "Q35657"]
         }
-        archive = load_archive('kglm/tests/fixtures/kglm.model.tar.gz')
-        predictor = Predictor.from_archive(archive, 'cloze')
+        model_archive = load_archive('kglm/tests/fixtures/kglm.model.tar.gz')
+        predictor = CompleteTheSentencePredictor.from_archive(model_archive, 'complete-the-sentence')
         predictor.predict_json(inputs)
         predictor.predict_json(inputs)

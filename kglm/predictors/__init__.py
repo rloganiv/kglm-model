@@ -1,1 +1,1 @@
-from .cloze import ClozePredictor
+from .complete_the_sentence import CompleteTheSentencePredictor
