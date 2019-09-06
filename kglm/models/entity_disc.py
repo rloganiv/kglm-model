@@ -11,12 +11,13 @@ from allennlp.modules.input_variational_dropout import InputVariationalDropout
 from allennlp.modules.text_field_embedders import TextFieldEmbedder
 from allennlp.modules.seq2seq_encoders import Seq2SeqEncoder
 from allennlp.nn import InitializerApplicator
+from allennlp.nn.util import masked_softmax
 from allennlp.training.metrics import CategoricalAccuracy
 from overrides import overrides
 import torch
 import torch.nn.functional as F
 
-from kglm.modules import DynamicEmbedding
+from kglm.modules import DynamicEmbedding,  WeightDrop
 from kglm.nn.util import sample_from_logp
 
 logger = logging.getLogger(__name__)
@@ -57,8 +58,9 @@ class EntityNLMDiscriminator(Model):
     def __init__(self,
                  vocab: Vocabulary,
                  text_field_embedder: TextFieldEmbedder,
-                 encoder: Seq2SeqEncoder,
                  embedding_dim: int,
+                 hidden_size: int,
+                 num_layers: int,
                  max_mention_length: int,
                  max_embeddings: int,
                  variational_dropout_rate: float = 0.0,
@@ -67,10 +69,26 @@ class EntityNLMDiscriminator(Model):
         super(EntityNLMDiscriminator, self).__init__(vocab)
 
         self._text_field_embedder = text_field_embedder
-        self._encoder = encoder
         self._embedding_dim = embedding_dim
+        self._hidden_size = hidden_size
+        self._num_layers = num_layers
         self._max_mention_length = max_mention_length
         self._max_embeddings = max_embeddings
+
+        #  Rnn Encoders.
+        rnns: List[torch.nn.Module] = []
+        for i in range(num_layers):
+            if i == 0:
+                input_size = embedding_dim
+            else:
+                input_size = hidden_size
+            if (i == num_layers - 1):
+                output_size = embedding_dim
+            else:
+                output_size = hidden_size
+            rnns.append(torch.nn.LSTM(input_size, output_size, batch_first=True))
+        rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=variational_dropout_rate) for rnn in rnns]
+        self.rnns = torch.nn.ModuleList(rnns)
 
         self._state: Optional[StateDict] = None
 
@@ -97,11 +115,11 @@ class EntityNLMDiscriminator(Model):
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
-                tokens: Dict[str, torch.Tensor],
+                source: Dict[str, torch.Tensor],
                 entity_types: Optional[torch.Tensor] = None,
                 entity_ids: Optional[torch.Tensor] = None,
                 mention_lengths: Optional[torch.Tensor] = None,
-                reset: bool = False)-> Dict[str, torch.Tensor]:
+                reset: torch.ByteTensor=None)-> Dict[str, torch.Tensor]:
         """
         Computes the loss during training / validation.
 
@@ -119,7 +137,7 @@ class EntityNLMDiscriminator(Model):
         mention_lengths : ``torch.Tensor``
             A tensor of shape ``(batch_size, sequence_length)`` tracking how many remaining
             tokens (including the current one) there are in the mention.
-        reset : ``bool``
+        reset : ``torch.ByteTensor``
             Whether or not to reset the model's state. This should be done at the start of each
             new sequence.
 
@@ -129,12 +147,11 @@ class EntityNLMDiscriminator(Model):
         loss : ``torch.Tensor``
             The combined loss.
         """
+        tokens = source  # MONKEY PATCH
         batch_size = tokens['tokens'].shape[0]
 
-        if reset:
-            self.reset_states(batch_size)
-        else:
-            self.detach_states()
+        if reset is not None:
+            self.reset_states(reset)
 
         if entity_types is not None:
             output_dict = self._forward_loop(tokens=tokens,
@@ -144,10 +161,13 @@ class EntityNLMDiscriminator(Model):
         else:
             output_dict = {}
 
+        self.detach_states()
+
         return output_dict
 
     def sample(self,
-               tokens: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+               source: Dict[str, torch.Tensor],
+               reset: torch.ByteTensor=None) -> Dict[str, torch.Tensor]:
         """
         Generates a sample from the discriminative model.
 
@@ -156,9 +176,12 @@ class EntityNLMDiscriminator(Model):
 
         Parameters
         ----------
-        tokens : ``Dict[str, torch.Tensor]``
+        source : ``Dict[str, torch.Tensor]``
             A tensor of shape ``(batch_size, sequence_length)`` containing the sequence of
             tokens.
+        reset : ``torch.ByteTensor``
+            Whether or not to reset the model's state. This should be done at the start of each
+            new sequence.
 
         Returns
         -------
@@ -175,34 +198,53 @@ class EntityNLMDiscriminator(Model):
             A tensor of shape ``(batch_size, sequence_length)`` tracking how many remaining
             tokens (including the current one) there are in the mention.
         """
-        batch_size, sequence_length = tokens['tokens'].shape
+        batch_size, sequence_length = source['tokens'].shape
+        if reset is not None:
+            self.reset_states(reset)
 
-        # We will use a standard iterator during evaluation instead of a split iterator. Otherwise
-        # it will be a pain to handle generating multiple samples for a sequence since there's no
-        # way to get back to the first split.
-        self.reset_states(batch_size)
+        if self._state is None:
+            prev_mention_lengths = source['tokens'].new_ones(batch_size)
+        else:
+            prev_mention_lengths = self._state['prev_mention_lengths']
 
         # Embed tokens and get RNN hidden state.
-        mask = get_text_field_mask(tokens)
-        embeddings = self._text_field_embedder(tokens)
-        hidden = self._encoder(embeddings, mask)
-        prev_mention_lengths = tokens['tokens'].new_ones(batch_size)
+        mask = get_text_field_mask(source)
+        embeddings = self._text_field_embedder(source)
+        current_input = embeddings
+        hidden_list = []
+        for layer, rnn in enumerate(self.rnns):
+            # Retrieve previous hidden state for layer.
+            if self._state is not None:
+                prev_hidden = self._state['layer_%i' % layer]
+            else:
+                prev_hidden = None
+            # Forward-pass.
+            output, hidden = rnn(current_input, prev_hidden)
+            output = output.contiguous()
+            # Update hidden state for layer.
+            hidden = tuple(h.detach() for h in hidden)
+            hidden_list.append(hidden)
+            current_input = output
+        hidden = current_input
+
+        self._state = {'layer_%i' % i: h for i, h in enumerate(hidden_list)}
 
         # Initialize outputs
         logp = hidden.new_zeros(batch_size) # Track total logp for **each** generated sample
-        entity_types = torch.zeros_like(tokens['tokens'], dtype=torch.uint8)
-        entity_ids = torch.zeros_like(tokens['tokens'])
-        mention_lengths = torch.ones_like(tokens['tokens'])
+        entity_types = torch.zeros_like(source['tokens'], dtype=torch.uint8)
+        entity_ids = torch.zeros_like(source['tokens'])
+        mention_lengths = torch.ones_like(source['tokens'])
 
         # Generate outputs
+        prev_mention_lengths = torch.ones(mask.size(0)).to(mask.device)
         for timestep in range(sequence_length):
 
             current_hidden = hidden[:, timestep]
 
             # We only predict types / ids / lengths if the previous mention is terminated.
             predict_mask = prev_mention_lengths == 1
-            predict_mask = predict_mask * mask[:, timestep].byte()
-            if predict_mask.sum() > 0:
+            predict_mask = predict_mask & mask[:, timestep].byte()
+            if predict_mask.any():
 
                 # Predict entity types
                 entity_type_logits = self._entity_type_projection(current_hidden[predict_mask])
@@ -213,14 +255,19 @@ class EntityNLMDiscriminator(Model):
                 logp[predict_mask] += entity_type_prediction_logp
 
                 # Only predict entity and mention lengths if we predicted that there was a mention
-                predict_em = entity_types[:, timestep] * predict_mask
+                predict_em = entity_types[:, timestep] & predict_mask
                 if predict_em.sum() > 0:
                     # Predict entity ids
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
                                                                             mask=predict_em)
                     entity_id_logits = entity_id_prediction_outputs['logits']
-                    entity_id_logp = F.log_softmax(entity_id_logits, dim=-1)
-                    entity_id_prediction_logp, entity_id_predictions = sample_from_logp(entity_id_logp)
+                    entity_id_mask = entity_id_prediction_outputs['logit_mask']
+                    entity_id_probs = masked_softmax(entity_id_logits,
+                                                     entity_id_mask)
+                    entity_id_predictions = torch.multinomial(entity_id_probs, 1)
+                    entity_id_prediction_logp = entity_id_probs.gather(-1, entity_id_predictions).log()
+                    entity_id_predictions = entity_id_predictions.squeeze(-1)
+                    entity_id_prediction_logp = entity_id_prediction_logp.squeeze(-1)
 
                     # Predict mention lengths - we do this before writing the
                     # entity id predictions since we'll need to reindex the new
@@ -264,9 +311,14 @@ class EntityNLMDiscriminator(Model):
             # Update mention lengths for next timestep
             prev_mention_lengths = mention_lengths[:, timestep]
 
+        # Update state
+        self._state['prev_mention_lengths'] = prev_mention_lengths.detach()
+
         return {
                 'logp': logp,
                 'sample': {
+                        'source': source,
+                        'reset': reset,
                         'entity_types': entity_types,
                         'entity_ids': entity_ids,
                         'mention_lengths': mention_lengths
@@ -320,7 +372,24 @@ class EntityNLMDiscriminator(Model):
         mask = get_text_field_mask(tokens)
         embeddings = self._text_field_embedder(tokens)
         embeddings = self._variational_dropout(embeddings)
-        hidden = self._encoder(embeddings, mask)
+        current_input = embeddings
+        hidden_list = []
+        for layer, rnn in enumerate(self.rnns):
+            # Retrieve previous hidden state for layer.
+            if self._state is not None:
+                prev_hidden = self._state['layer_%i' % layer]
+            else:
+                prev_hidden = None
+            # Forward-pass.
+            output, hidden = rnn(current_input, prev_hidden)
+            output = output.contiguous()
+            # Update hidden state for layer.
+            hidden = tuple(h.detach() for h in hidden)
+            hidden_list.append(hidden)
+            current_input = output
+        hidden = current_input
+
+        self._state = {'layer_%i' % i: h for i, h in enumerate(hidden_list)}
 
         # Initialize losses
         entity_type_loss = torch.tensor(0.0, requires_grad=True, device=hidden.device)
@@ -344,10 +413,10 @@ class EntityNLMDiscriminator(Model):
 
                 # Equation 3 in the paper.
                 entity_type_logits = self._entity_type_projection(current_hidden[predict_all])
-                entity_type_loss = entity_type_loss + F.cross_entropy(
-                        entity_type_logits,
-                        current_entity_types[predict_all].long(),
-                        reduction='sum')
+                entity_type_logp = F.log_softmax(entity_type_logits, -1)
+                _entity_type_loss = -entity_type_logp.gather(-1, current_entity_types[predict_all].long().unsqueeze(-1))
+                entity_type_loss = entity_type_loss + _entity_type_loss.sum()
+
                 self._entity_type_accuracy(predictions=entity_type_logits,
                                            gold_labels=current_entity_types[predict_all].long())
 
@@ -363,7 +432,8 @@ class EntityNLMDiscriminator(Model):
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
                                                                             target=modified_entity_ids,
                                                                             mask=predict_em)
-                    entity_id_loss = entity_id_loss + entity_id_prediction_outputs['loss'].sum()
+                    _entity_id_loss = -entity_id_prediction_outputs['loss']
+                    entity_id_loss = entity_id_loss + _entity_id_loss.sum()
                     self._entity_id_accuracy(predictions=entity_id_prediction_outputs['logits'],
                                              gold_labels=modified_entity_ids[predict_em])
 
@@ -371,10 +441,11 @@ class EntityNLMDiscriminator(Model):
                     predicted_entity_embeddings = self._dynamic_embeddings.embeddings[predict_em, modified_entity_ids[predict_em]]
                     predicted_entity_embeddings = self._dropout(predicted_entity_embeddings)
                     concatenated = torch.cat((current_hidden[predict_em], predicted_entity_embeddings), dim=-1)
+
                     mention_length_logits = self._mention_length_projection(concatenated)
-                    mention_length_loss = mention_length_loss + F.cross_entropy(
-                            mention_length_logits,
-                            current_mention_lengths[predict_em])
+                    mention_length_logp = F.log_softmax(mention_length_logits, -1)
+                    _mention_length_loss = -mention_length_logp.gather(-1, current_mention_lengths[predict_em].unsqueeze(-1))
+                    mention_length_loss = mention_length_loss + _mention_length_loss.sum()
                     self._mention_length_accuracy(predictions=mention_length_logits,
                                                   gold_labels=current_mention_lengths[predict_em])
 
@@ -396,6 +467,8 @@ class EntityNLMDiscriminator(Model):
         entity_type_loss = entity_type_loss / mask.sum()
         entity_id_loss = entity_id_loss / mask.sum()
         mention_length_loss = mention_length_loss / mask.sum()
+        logger.debug('et: %f, eid: %f, ml: %f', entity_type_loss.item(),
+                     entity_id_loss.item(), mention_length_loss.item())
         total_loss = entity_type_loss + entity_id_loss + mention_length_loss
 
         output_dict = {
@@ -406,17 +479,25 @@ class EntityNLMDiscriminator(Model):
         }
 
         # Update state
-        self._state = {
-                'prev_mention_lengths': prev_mention_lengths.detach()
-        }
+        # Update the model state
+        self._state['prev_mention_lengths'] = mention_lengths[:, -1].detach()
 
         return output_dict
 
-    def reset_states(self, batch_size: int) -> None:
+    def reset_states(self, reset: torch.ByteTensor) -> None:
         """Resets the model's internals. Should be called at the start of a new batch."""
-        self._encoder.reset_states()
-        self._dynamic_embeddings.reset_states(batch_size)
-        self._state = None
+        if reset.any() and (self._state is not None):
+            # Zero out any previous elements
+            self._state['prev_mention_lengths'][reset].zero_()
+            # Zero out the hidden state
+            for layer in range(self._num_layers):
+                h, c = self._state['layer_%i' % layer]
+                h[:, reset, :] = torch.zeros_like(h[:, reset, :])
+                c[:, reset, :] = torch.zeros_like(c[:, reset, :])
+                self._state['layer_%i' % layer] = (h, c)
+
+        # Reset the dynamic embeddings
+        self._dynamic_embeddings.reset_states(reset)
 
     def detach_states(self):
         """Detaches the model's state to enforce truncated backpropagation."""
@@ -429,3 +510,4 @@ class EntityNLMDiscriminator(Model):
                 'eid_acc': self._entity_id_accuracy.get_metric(reset),
                 'ml_acc': self._mention_length_accuracy.get_metric(reset)
         }
+

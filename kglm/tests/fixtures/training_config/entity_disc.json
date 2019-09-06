@@ -1,14 +1,11 @@
 {
-    "vocabulary": {
-        "type": "extended",
-        "extend": false,
-        "directory_path": "kglm/tests/fixtures/enhanced-wikitext-test/vocab"
-    },
     "dataset_reader": {
         "type": "enhanced-wikitext-entity-nlm"
     },
+    "train_data_path": "kglm/tests/fixtures/enhanced-wikitext.jsonl",
+    "validation_data_path": "kglm/tests/fixtures/enhanced-wikitext.jsonl",
     "model": {
-        "type": "entitynlm",
+        "type": "entitydisc",
         "dropout_rate": 0.4,
         "embedding_dim": 10,
         "num_layers": 2,
@@ -20,16 +17,12 @@
                 "tokens": {
                     "type": "embedding",
                     "embedding_dim": 10,
-                    "trainable": true,
-                    "vocab_namespace": "tokens"
+                    "trainable": true
                 }
             }
         },
-        "tie_weights": true,
         "variational_dropout_rate": 0.1
     },
-    "train_data_path": "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl",
-    "validation_data_path": "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl",
     "trainer": {
         "type": "lm",
         "cuda_device": -1,

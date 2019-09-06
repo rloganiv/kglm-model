@@ -4,6 +4,7 @@ from allennlp.data import DataIterator, DatasetReader
 import numpy as np
 import torch
 
+from kglm.training import LmTrainer
 from kglm.common.testing import KglmModelTestCase
 from kglm.data.dataset_readers.enhanced_wikitext import EnhancedWikitextKglmReader
 from kglm.models.kglm import Kglm

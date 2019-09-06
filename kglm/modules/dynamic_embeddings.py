@@ -5,6 +5,8 @@ import torch
 from torch.nn import Module, Parameter
 import torch.nn.functional as F
 
+from allennlp.nn.util import masked_log_softmax
+
 
 class DynamicEmbedding(Module):
     """Dynamic embedding module.
@@ -44,7 +46,7 @@ class DynamicEmbedding(Module):
         self.num_embeddings: torch.Tensor = None  # Tracks how many embeddings are in use
         self.last_seen: torch.Tensor = None  # Tracks last time embedding was seen
 
-    def reset_states(self, batch_size: int) -> None:
+    def reset_states(self, reset: torch.ByteTensor) -> None:
         """
         Resets the DynamicEmbedding module for use on a new batch of sequences.
 
@@ -53,11 +55,24 @@ class DynamicEmbedding(Module):
         batch_size : ``int``
             The batch_size of the new sequence.
         """
-        self.embeddings = self._initial_embedding.new_zeros(batch_size, self._max_embeddings,
-                                                            self._embedding_dim)
-        self.num_embeddings = self._initial_embedding.new_zeros(batch_size, dtype=torch.int64)
-        self.last_seen = self._initial_embedding.new_zeros(batch_size, self._max_embeddings,
-                                                           dtype=torch.int64)
+        batch_size = reset.shape[0]
+        if self.embeddings is not None:
+            if (batch_size != self.embeddings.shape[0]) and not reset.all():
+                raise RuntimeError('Changing the batch size without resetting all internal states is '
+                                   'undefined.')
+
+        # If everything is being reset, then we treat as if the Module has just been initialized.
+        # This simplifies the case where the batch_size has been
+        if reset.all():
+            self.embeddings = self._initial_embedding.new_zeros(batch_size, self._max_embeddings,
+                                                                self._embedding_dim)
+            self.num_embeddings = self._initial_embedding.new_zeros(batch_size, dtype=torch.int64)
+            self.last_seen = self._initial_embedding.new_zeros(batch_size, self._max_embeddings,
+                                                               dtype=torch.int64)
+        else:
+            self.embeddings[reset].zero_()
+            self.num_embeddings[reset].zero_()
+            self.last_seen[reset].zero_()
         self.add_embeddings(0)
 
     def detach_states(self) -> None:
@@ -203,7 +218,7 @@ class DynamicEmbedding(Module):
         num_embeddings = self.num_embeddings[mask].unsqueeze(1)
         arange = torch.arange(self._max_embeddings, device=num_embeddings.device).repeat(mask.sum(), 1)
         logit_mask = arange.lt(num_embeddings)
-        logits[logit_mask != 1] = -float('inf')
+        logits[logit_mask != 1] = 1e-34
 
         out = {
                 'logits': logits,
@@ -211,8 +226,10 @@ class DynamicEmbedding(Module):
         }
 
         if target is not None:
-            target = target[mask]
-            loss = F.cross_entropy(logits, target, reduction='none')
+            target = target[mask].unsqueeze(-1)
+            log_probs = masked_log_softmax(logits, logit_mask)
+            loss = log_probs.gather(-1, target)
             out['loss'] = loss
 
         return out
+

@@ -54,6 +54,11 @@ class EvaluatePerplexity(Subcommand):
                                type=str,
                                default="",
                                help='If non-empty, name of metric used to weight the loss on a per-batch basis.')
+
+        subparser.add_argument('--num-samples',
+                               type=int,
+                               default=100,
+                               help='Number of importance samples to draw.')
         subparser.set_defaults(func=evaluate_from_args)
 
         subparser.add_argument('--num-samples',

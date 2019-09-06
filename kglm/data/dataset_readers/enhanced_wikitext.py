@@ -82,7 +82,7 @@ class EnhancedWikitextEntityNlmReader(DatasetReader):
         # Flatten and pad tokens
         tokens = data['tokens']
         tokens = [Token(x) for x in tokens]
-        fields = {'tokens': TextField(tokens, self._token_indexers)}
+        fields = {'source': TextField(tokens, self._token_indexers)}  # MONKEY PATCH
 
         # If annotations are provided, process them into arrays.
         if 'annotations' in data:
@@ -99,6 +99,8 @@ class EnhancedWikitextEntityNlmReader(DatasetReader):
                 seen_entities.add(annotation['id'])
                 start, end = annotation['span']
                 length = end - start
+                span = annotation['span']
+                eos_offset_adjusted_span = tuple(i + eos_offset[i] for i in span)
 
                 for i in range(*annotation['span']):
                     # Note: +1 offset to account for start token.

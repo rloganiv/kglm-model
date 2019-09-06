@@ -17,7 +17,7 @@ import torch
 from torch.nn import Parameter
 import torch.nn.functional as F
 
-from kglm.modules import DynamicEmbedding
+from kglm.modules import DynamicEmbedding, WeightDrop
 # from kglm.training.metrics import Perplexity, UnknownPenalizedPerplexity
 
 logger = logging.getLogger(__name__)
@@ -60,8 +60,9 @@ class EntityNLM(Model):
     def __init__(self,
                  vocab: Vocabulary,
                  text_field_embedder: TextFieldEmbedder,
-                 encoder: Seq2SeqEncoder,
                  embedding_dim: int,
+                 hidden_size: int,
+                 num_layers: int,
                  max_mention_length: int,
                  max_embeddings: int,
                  tie_weights: bool,
@@ -71,13 +72,29 @@ class EntityNLM(Model):
         super(EntityNLM, self).__init__(vocab)
 
         self._text_field_embedder = text_field_embedder
-        self._encoder = encoder
         self._embedding_dim = embedding_dim
+        self._hidden_size = hidden_size
+        self._num_layers = num_layers
         self._max_mention_length = max_mention_length
         self._max_embeddings = max_embeddings
         self._tie_weights = tie_weights
         self._variational_dropout_rate = variational_dropout_rate
         self._dropout_rate = dropout_rate
+
+        #  Rnn Encoders.
+        rnns: List[torch.nn.Module] = []
+        for i in range(num_layers):
+            if i == 0:
+                input_size = embedding_dim
+            else:
+                input_size = hidden_size
+            if (i == num_layers - 1):
+                output_size = embedding_dim
+            else:
+                output_size = hidden_size
+            rnns.append(torch.nn.LSTM(input_size, output_size, batch_first=True))
+        rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=variational_dropout_rate) for rnn in rnns]
+        self.rnns = torch.nn.ModuleList(rnns)
 
         self._state: Optional[StateDict] = None
 
@@ -122,11 +139,11 @@ class EntityNLM(Model):
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
-                tokens: Dict[str, torch.Tensor],
+                source: Dict[str, torch.Tensor],
                 entity_types: Optional[torch.Tensor] = None,
                 entity_ids: Optional[torch.Tensor] = None,
                 mention_lengths: Optional[torch.Tensor] = None,
-                reset: bool = False)-> Dict[str, torch.Tensor]:
+                reset: torch.ByteTensor=None)-> Dict[str, torch.Tensor]:
         """
         Computes the loss during training / validation.
 
@@ -154,12 +171,11 @@ class EntityNLM(Model):
         loss : ``torch.Tensor``
             The combined loss.
         """
+        tokens = source  # MONKEY PATCH
         batch_size = tokens['tokens'].shape[0]
 
-        if reset:
-            self.reset_states(batch_size)
-        else:
-            self.detach_states()
+        if reset is not None:
+            self.reset_states(reset)
 
         if entity_types is not None:
             output_dict = self._forward_loop(tokens=tokens,
@@ -169,9 +185,7 @@ class EntityNLM(Model):
         else:
             output_dict = {}
 
-        if not self.training:
-            # TODO Some evaluation stuff
-            pass
+        self.detach_states()
 
         return output_dict
 
@@ -233,14 +247,32 @@ class EntityNLM(Model):
         mask = get_text_field_mask(tokens)
         embeddings = self._text_field_embedder(tokens)
         embeddings = self._variational_dropout(embeddings)
-        hidden = self._encoder(embeddings, mask)
+
+        current_input = embeddings
+        hidden_list = []
+        for layer, rnn in enumerate(self.rnns):
+            # Retrieve previous hidden state for layer.
+            if self._state is not None:
+                prev_hidden = self._state['layer_%i' % layer]
+            else:
+                prev_hidden = None
+            # Forward-pass.
+            output, hidden = rnn(current_input, prev_hidden)
+            output = output.contiguous()
+            # Update hidden state for layer.
+            hidden = tuple(h.detach() for h in hidden)
+            hidden_list.append(hidden)
+            current_input = output
+        hidden = current_input
+
+        self._state = {'layer_%i' % i: h for i, h in enumerate(hidden_list)}
 
         # Initialize losses
         entity_type_loss = 0.0
         entity_id_loss = 0.0
         mention_length_loss = 0.0
         vocab_loss = 0.0
-        logp = hidden.new_zeros(batch_size)
+        # logp = hidden.new_zeros(batch_size)
 
         # We dynamically add entities and update their representations in sequence. The following
         # loop is designed to imitate as closely as possible lines 219-313 in:
@@ -290,14 +322,13 @@ class EntityNLM(Model):
 
                 # Equation 3 in the paper.
                 entity_type_logits = self._entity_type_projection(current_hidden[predict_all])
-                _entity_type_loss = F.cross_entropy(entity_type_logits,
-                                                    next_entity_types[predict_all].long(),
-                                                    reduction='none')
+                entity_type_logp = F.log_softmax(entity_type_logits, -1)
+                _entity_type_loss = -entity_type_logp.gather(-1, next_entity_types[predict_all].long().unsqueeze(-1))
                 entity_type_loss += _entity_type_loss.sum()
 
-                entity_type_logp = torch.zeros_like(next_entity_types, dtype=torch.float32)
-                entity_type_logp[predict_all] = -_entity_type_loss
-                logp += entity_type_logp
+                # entity_type_logp = torch.zeros_like(next_entity_types, dtype=torch.float32)
+                # entity_type_logp[predict_all] = -_entity_type_loss
+                # logp += entity_type_logp
 
                 self._entity_type_accuracy(predictions=entity_type_logits,
                                            gold_labels=next_entity_types[predict_all].long())
@@ -309,12 +340,12 @@ class EntityNLM(Model):
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
                                                                             target=next_entity_ids,
                                                                             mask=predict_em)
-                    _entity_id_loss = entity_id_prediction_outputs['loss']
+                    _entity_id_loss = -entity_id_prediction_outputs['loss']
                     entity_id_loss += _entity_id_loss.sum()
 
-                    entity_id_logp = torch.zeros_like(next_entity_ids, dtype=torch.float32)
-                    entity_id_logp[predict_em] = -_entity_id_loss
-                    logp += entity_id_logp
+                    # entity_id_logp = torch.zeros_like(next_entity_ids, dtype=torch.float32)
+                    # entity_id_logp[predict_em] = -_entity_id_loss
+                    # logp += entity_id_logp
 
                     self._entity_id_accuracy(predictions=entity_id_prediction_outputs['logits'],
                                              gold_labels=next_entity_ids[predict_em])
@@ -324,14 +355,16 @@ class EntityNLM(Model):
                     next_entity_embeddings = self._dropout(next_entity_embeddings)
                     concatenated = torch.cat((current_hidden[predict_em], next_entity_embeddings), dim=-1)
                     mention_length_logits = self._mention_length_projection(concatenated)
-                    _mention_length_loss = F.cross_entropy(mention_length_logits,
-                                                           next_mention_lengths[predict_em],
-                                                           reduction='none')
+                    mention_length_logp = F.log_softmax(mention_length_logits, -1)
+                    _mention_length_loss = -mention_length_logp.gather(-1, next_mention_lengths[predict_em].unsqueeze(-1))
+                    # _mention_length_loss = F.cross_entropy(mention_length_logits,
+                    #                                        next_mention_lengths[predict_em],
+                    #                                        reduction='none')
                     mention_length_loss += _mention_length_loss.sum()
 
-                    mention_length_logp = torch.zeros_like(next_mention_lengths, dtype=torch.float32)
-                    mention_length_logp[predict_em] = -_mention_length_loss
-                    logp += mention_length_logp
+                    # mention_length_logp = torch.zeros_like(next_mention_lengths, dtype=torch.float32)
+                    # mention_length_logp[predict_em] = -_mention_length_loss
+                    # logp += mention_length_logp
 
                     self._mention_length_accuracy(predictions=mention_length_logits,
                                                   gold_labels=next_mention_lengths[predict_em])
@@ -349,12 +382,14 @@ class EntityNLM(Model):
                 vocab_features[next_entity_types] = vocab_features[next_entity_types] + entity_embeddings
             if (1 - next_entity_types.sum()) > 0:
                 vocab_features[1 - next_entity_types] = vocab_features[1 - next_entity_types] + context_embeddings
-            vocab_logits = self._vocab_projection(vocab_features)
+            vocab_logits = self._vocab_projection(vocab_features[next_mask.byte()])
+            vocab_logp = F.log_softmax(vocab_logits, -1)
+            _vocab_loss = -vocab_logp.gather(-1, next_tokens[next_mask.byte()].unsqueeze(-1))
 
-            _vocab_loss = F.cross_entropy(vocab_logits, next_tokens, reduction='none')
-            _vocab_loss = _vocab_loss * next_mask.float()
+            # _vocab_loss = F.cross_entropy(vocab_logits, next_tokens, reduction='none')
+            # _vocab_loss = _vocab_loss * next_mask.float()
             vocab_loss += _vocab_loss.sum()
-            logp += -_vocab_loss
+            # logp += -_vocab_loss
 
             # self._perplexity(logits=vocab_logits,
             #                  labels=next_tokens,
@@ -368,9 +403,13 @@ class EntityNLM(Model):
 
         # Normalize the losses
         entity_type_loss /= mask.sum()
+        logger.debug('Entity type loss: %0.4f', entity_type_loss)
         entity_id_loss /= mask.sum()
+        logger.debug('Entity id loss: %0.4f', entity_id_loss)
         mention_length_loss /= mask.sum()
+        logger.debug('Mention length loss: %0.4f', mention_length_loss)
         vocab_loss /= mask.sum()
+        logger.debug('Vocab loss: %0.4f', vocab_loss)
         total_loss = entity_type_loss + entity_id_loss + mention_length_loss + vocab_loss
 
         output_dict = {
@@ -379,29 +418,54 @@ class EntityNLM(Model):
                 'mention_length_loss': mention_length_loss,
                 'vocab_loss': vocab_loss,
                 'loss': total_loss,
-                'logp': logp
+                'logp': -total_loss * mask.sum()
         }
 
         # Update the model state
-        self._state = {
-                'prev_tokens': {field: tokens[field][:, -1].unsqueeze(1).detach() for field in tokens},
-                'prev_entity_types': entity_types[:, -1].unsqueeze(1).detach(),
-                'prev_entity_ids': entity_ids[:, -1].unsqueeze(1).detach(),
-                'prev_mention_lengths': mention_lengths[:, -1].unsqueeze(1).detach(),
-                'prev_contexts': contexts.detach()
-        }
+        self._state['prev_tokens'] = {field: tokens[field][:, -1].unsqueeze(1).detach() for field in tokens}
+        self._state['prev_entity_types'] = entity_types[:, -1].unsqueeze(1).detach()
+        self._state['prev_entity_ids'] = entity_ids[:, -1].unsqueeze(1).detach()
+        self._state['prev_mention_lengths'] = mention_lengths[:, -1].unsqueeze(1).detach()
+        self._state['prev_contexts'] = contexts.detach()
 
         return output_dict
 
-    def reset_states(self, batch_size: int) -> None:
+    def reset_states(self, reset: torch.ByteTensor) -> None:
         """Resets the model's internals. Should be called at the start of a new batch."""
-        self._encoder.reset_states()
-        self._dynamic_embeddings.reset_states(batch_size)
-        self._state = None
+        if reset.any() and (self._state is not None):
+            # Zero out any previous elements
+            self._state['prev_entity_types'][reset].zero_()
+            self._state['prev_entity_ids'][reset].zero_()
+            self._state['prev_mention_lengths'][reset].zero_()
+            self._state['prev_contexts'][reset].zero_()
+            # Zero out the hidden state
+            for layer in range(self._num_layers):
+                h, c = self._state['layer_%i' % layer]
+                h[:, reset, :] = torch.zeros_like(h[:, reset, :])
+                c[:, reset, :] = torch.zeros_like(c[:, reset, :])
+                self._state['layer_%i' % layer] = (h, c)
+
+        # Reset the dynamic embeddings
+        self._dynamic_embeddings.reset_states(reset)
 
     def detach_states(self):
         """Detaches the model's state to enforce truncated backpropagation."""
         self._dynamic_embeddings.detach_states()
+
+    @overrides
+    def train(self, mode=True):
+        # TODO: This is a temporary hack to ensure that the internal state resets when the model
+        # switches from training to evaluation. The complication arises from potentially differing
+        # batch sizes (e.g. the `reset` tensor will not be the right size). In future
+        # implementations this should be handled more robustly.
+        super().train(mode)
+        self._state = None
+
+    @overrides
+    def eval(self):
+        # TODO: See train.
+        super().eval()
+        self._state = None
 
     @overrides
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
@@ -412,3 +476,4 @@ class EntityNLM(Model):
                 'eid_acc': self._entity_id_accuracy.get_metric(reset),
                 'ml_acc': self._mention_length_accuracy.get_metric(reset)
         }
+
