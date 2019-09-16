@@ -2,8 +2,8 @@
     "dataset_reader": {
         "type": "enhanced-wikitext-entity-nlm"
     },
-    "train_data_path": "kglm/tests/fixtures/enhanced-wikitext.jsonl",
-    "validation_data_path": "kglm/tests/fixtures/enhanced-wikitext.jsonl",
+    "train_data_path": "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl",
+    "validation_data_path": "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl",
     "model": {
         "type": "entitydisc",
         "dropout_rate": 0.4,

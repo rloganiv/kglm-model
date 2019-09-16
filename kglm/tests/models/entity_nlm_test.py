@@ -27,7 +27,7 @@ class EntityDiscTest(KglmModelTestCase):
     def setUp(self):
         super().setUp()
         self.set_up_model("kglm/tests/fixtures/training_config/entity_disc.json",
-                          "kglm/tests/fixtures/enhanced-wikitext.jsonl")
+                          "kglm/tests/fixtures/enhanced-wikitext-test/train.jsonl")
 
     def test_model_can_train_save_and_load(self):
         self.ensure_model_can_train_save_and_load(self.param_file,

@@ -2,6 +2,8 @@
 Readers for the CoNLL 2012 dataset.
 """
 import collections
+import json
+import logging
 from typing import DefaultDict, Dict, Iterable, List, Optional, Set, Tuple
 
 from allennlp.common.file_utils import cached_path
@@ -15,6 +17,8 @@ import numpy as np
 from overrides import overrides
 
 from kglm.data.fields import SequentialArrayField
+
+logger = logging.getLogger(__name__)
 
 
 def _flatten(nested: Iterable[str]):
@@ -51,6 +55,15 @@ def canonicalize_clusters(clusters: DefaultDict[int, List[Tuple[int, int]]]) -> 
         else:
             merged_clusters.append(set(cluster))
     return [list(c) for c in merged_clusters]
+
+
+def _normalize_word(word, replace_numbers: bool) -> str:
+    if word in ["/.", "/?"]:
+        return word[1:]
+    if replace_numbers:
+        if word.replace('.', '', 1).isdigit():
+            return "@@NUM@@"
+    return word
 
 
 @DatasetReader.register('conll2012')
@@ -158,13 +171,13 @@ class Conll2012DatasetReader(DatasetReader):
         # Sort the gold clusters, so the earlier-occurring clusters are earlier in the list
         filtered_gold_clusters = sorted(filtered_gold_clusters, key=lambda x: sorted(x)[0][0])
 
-        flattened_sentences = [self._normalize_word(word, self._replace_numbers)
+        flattened_sentences = [_normalize_word(word, self._replace_numbers)
                                for sentence in sentences
                                for word in sentence]
         tokens = ['@@START@@', *flattened_sentences, '@@END@@']
         text_field = TextField([Token(word) for word in tokens],
                                self._token_indexers)
-        fields: Dict[str, Field] = {"tokens": text_field}
+        fields: Dict[str, Field] = {"source": text_field}
 
         cluster_dict = {}
         if filtered_gold_clusters is not None:
@@ -193,11 +206,50 @@ class Conll2012DatasetReader(DatasetReader):
         fields['entity_types'] = SequentialArrayField(entity_types, dtype=np.uint8)
         return Instance(fields)
 
-    @staticmethod
-    def _normalize_word(word, replace_numbers: bool) -> str:
-        if word in ["/.", "/?"]:
-            return word[1:]
-        if replace_numbers:
-            if word.replace('.', '', 1).isdigit():
-                return "@@NUM@@"
-        return word
+
+@DatasetReader.register('conll2012_jsonl')
+class Conll2012JsonlReader(DatasetReader):
+    def __init__(self,
+                 token_indexers: Dict[str, TokenIndexer] = None,
+                 replace_numbers: bool = True,
+                 lazy: bool = False) -> None:
+        super().__init__(lazy)
+        self._replace_numbers = replace_numbers
+        self._token_indexers = token_indexers or {"tokens": SingleIdTokenIndexer()}
+
+    @overrides
+    def _read(self, file_path: str):
+        file_path = cached_path(file_path)
+        with open(file_path, 'r') as f:
+            for line in f:
+                data = json.loads(line)
+                instance = self.text_to_instance(data['tokens'], data['clusters'])
+                yield instance
+
+    @overrides
+    def text_to_instance(self,
+                         tokens: List[str],
+                         clusters: Dict[str, List[Tuple[int, int]]]) -> Instance:
+        # pylint: disable=arguments-differ
+        tokens = [_normalize_word(x, self._replace_numbers) for x in tokens]
+        tokens = ['@@START@@', *tokens, '@@END@@']
+        fields = {'source': TextField([Token(x) for x in tokens], self._token_indexers)}
+
+        entity_types = np.zeros(shape=(len(tokens),))
+        entity_ids = np.zeros(shape=(len(tokens),))
+        mention_lengths = np.ones(shape=(len(tokens),))
+
+        max_i = 0
+        for i, cluster in enumerate(clusters.values()):
+            for span in cluster:
+                start, end = span
+                entity_types[(start + 1):(end + 1)] = 1 # TODO: Double check: +1 due to added '@@START@@' token
+                entity_ids[(start + 1):(end + 1)] = i + 1
+                mention_lengths[(start + 1):(end + 1)] = np.arange(end - start, 0, step=-1)
+            max_i = max(max_i, i)
+
+        fields['entity_ids'] = SequentialArrayField(entity_ids, dtype=np.int64)
+        fields['mention_lengths'] = SequentialArrayField(mention_lengths, dtype=np.int64)
+        fields['entity_types'] = SequentialArrayField(entity_types, dtype=np.uint8)
+
+        return Instance(fields)

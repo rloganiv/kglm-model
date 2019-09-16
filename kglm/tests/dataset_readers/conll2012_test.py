@@ -2,7 +2,7 @@ from allennlp.common.util import ensure_list
 import numpy as np
 import pytest
 
-from kglm.data.dataset_readers import Conll2012DatasetReader
+from kglm.data.dataset_readers import Conll2012DatasetReader, Conll2012JsonlReader
 
 
 class TestConll2012DatasetReader:
@@ -15,7 +15,7 @@ class TestConll2012DatasetReader:
         instances = ensure_list(reader.read(fixture_path))
         assert len(instances) == 2
 
-        first_instance_tokens = [x.text for x in instances[0]["tokens"].tokens]
+        first_instance_tokens = [x.text for x in instances[0]["source"].tokens]
         assert first_instance_tokens == [
                 '@@START@@', 'In', 'the', 'summer', 'of', '@@NUM@@', ',', 'a', 'picture', 'that',
                 'people', 'have', 'long', 'been', 'looking', 'forward', 'to',
@@ -59,3 +59,29 @@ class TestConll2012DatasetReader:
                                     1, 1, 1, 6, 5, 4, 3, 2, 1, 1, 1, 1, 2, 1, 1,
                                     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
                                     1, 1, 1, 1, 1, 1, 1])
+
+class TestConll2012JsonlReader:
+    def test_read_from_file(self):
+        reader = Conll2012JsonlReader()
+        fixture_path = 'kglm/tests/fixtures/conll2012.jsonl'
+        instances = ensure_list(reader.read(fixture_path))
+        assert len(instances) == 2
+
+        first_instance_tokens = [x.text for x in instances[0]['source'].tokens]
+        assert first_instance_tokens[:5] == ["@@START@@", "Jesus", "left", "and", "went"]
+        assert first_instance_tokens[-5:] == [ "long", "ago", ".", "''", "@@END@@"]
+
+        second_instance_entity_ids = instances[1]['entity_ids'].array
+        second_instance_mention_lengths = instances[1]['mention_lengths'].array
+        second_instance_entity_types = instances[1]['entity_types'].array
+
+        np.testing.assert_allclose(second_instance_entity_types[1:3],
+                                   np.array([1,0], dtype=np.uint8))
+        np.testing.assert_allclose(second_instance_entity_ids[1:2],
+                                   np.array([1], dtype=np.int64))
+        np.testing.assert_allclose(second_instance_entity_ids[8:9],
+                                   np.array([1], dtype=np.int64))
+        np.testing.assert_allclose(second_instance_entity_ids[30:32],
+                                   np.array([1, 1], dtype=np.int64))
+        np.testing.assert_allclose(second_instance_mention_lengths[30:32],
+                                   np.array([2, 1], dtype=np.int64))

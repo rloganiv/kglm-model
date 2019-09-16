@@ -316,7 +316,7 @@ class EntityNLMDiscriminator(Model):
 
         return {
                 'logp': logp,
-                'sample': {
+                'logp': logp.sum(),
                         'source': source,
                         'reset': reset,
                         'entity_types': entity_types,
@@ -430,6 +430,7 @@ class EntityNLMDiscriminator(Model):
                     modified_entity_ids = current_entity_ids.clone()
                     modified_entity_ids[modified_entity_ids == self._dynamic_embeddings.num_embeddings] = 0
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
+                                                                            timestep=timestep,
                                                                             target=modified_entity_ids,
                                                                             mask=predict_em)
                     _entity_id_loss = -entity_id_prediction_outputs['loss']

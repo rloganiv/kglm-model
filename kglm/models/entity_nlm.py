@@ -18,6 +18,7 @@ from torch.nn import Parameter
 import torch.nn.functional as F
 
 from kglm.modules import DynamicEmbedding, WeightDrop
+from kglm.training.metrics import Ppl
 # from kglm.training.metrics import Perplexity, UnknownPenalizedPerplexity
 
 logger = logging.getLogger(__name__)
@@ -475,5 +476,6 @@ class EntityNLM(Model):
                 'et_acc': self._entity_type_accuracy.get_metric(reset),
                 'eid_acc': self._entity_id_accuracy.get_metric(reset),
                 'ml_acc': self._mention_length_accuracy.get_metric(reset)
-        }
+                'ml_acc': self._mention_length_accuracy.get_metric(reset),
+                'ppl': self._perplexity.get_metric(reset)
 

@@ -61,11 +61,6 @@ class EvaluatePerplexity(Subcommand):
                                help='Number of importance samples to draw.')
         subparser.set_defaults(func=evaluate_from_args)
 
-        subparser.add_argument('--num-samples',
-                               type=int,
-                               default=100,
-                               help='Number of importance samples to draw.')
-        subparser.set_defaults(func=evaluate_from_args)
 
         return subparser
 
