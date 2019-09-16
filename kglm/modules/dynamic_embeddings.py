@@ -1,4 +1,5 @@
 from typing import Dict, Optional
+import logging
 
 from overrides import overrides
 import torch
@@ -6,6 +7,8 @@ from torch.nn import Module, Parameter
 import torch.nn.functional as F
 
 from allennlp.nn.util import masked_log_softmax
+
+logger = logging.getLogger(__name__)
 
 
 class DynamicEmbedding(Module):
@@ -70,10 +73,11 @@ class DynamicEmbedding(Module):
             self.last_seen = self._initial_embedding.new_zeros(batch_size, self._max_embeddings,
                                                                dtype=torch.int64)
         else:
-            self.embeddings[reset].zero_()
-            self.num_embeddings[reset].zero_()
-            self.last_seen[reset].zero_()
-        self.add_embeddings(0)
+            self.embeddings[reset] = 0
+            self.num_embeddings[reset] = 0
+            self.last_seen[reset] = 0
+
+        self.add_embeddings(0, reset)
 
     def detach_states(self) -> None:
         """
@@ -100,7 +104,7 @@ class DynamicEmbedding(Module):
         if mask is None:
             batch_size = self.num_embeddings.shape[0]
             mask = self.num_embeddings.new_ones(batch_size, dtype=torch.uint8)
-        elif mask.sum() == 0:
+        elif not mask.any():
             return
 
         # Embeddings are initialized by adding a small amount of random noise to the initial
@@ -113,6 +117,10 @@ class DynamicEmbedding(Module):
         self.embeddings[mask, self.num_embeddings[mask]] = normalized.squeeze()
         self.last_seen[mask, self.num_embeddings[mask]] = timestep
         self.num_embeddings[mask] += 1
+
+        if self.num_embeddings.max() == (self._max_embeddings - 1):
+            logger.warning('Embeddings full')
+
 
     def update_embeddings(self,
                           hidden: torch.Tensor,
@@ -166,6 +174,7 @@ class DynamicEmbedding(Module):
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
                 hidden: torch.Tensor,
+                timestep: torch.Tensor,
                 target: Optional[torch.Tensor] = None,
                 mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """
@@ -209,7 +218,7 @@ class DynamicEmbedding(Module):
         bilinear = bilinear.view(batch_size, -1)
 
         # Second half of equation 4.
-        distance_score = torch.exp(self._distance_scalar * self.last_seen[mask].float())
+        distance_score = torch.exp(self._distance_scalar * (timestep - self.last_seen[mask].float()))
         logits = bilinear + distance_score
 
         # Since we pre-allocate the embedding array, logits includes scores for all of the
