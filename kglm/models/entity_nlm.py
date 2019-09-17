@@ -132,6 +132,7 @@ class EntityNLM(Model):
         self._entity_type_accuracy = CategoricalAccuracy()
         self._entity_id_accuracy = CategoricalAccuracy()
         self._mention_length_accuracy = CategoricalAccuracy()
+        self._perplexity = Ppl()
 
         if tie_weights:
             self._vocab_projection.weight = self._text_field_embedder._token_embedders['tokens'].weight  # pylint: disable=W0212
@@ -173,7 +174,6 @@ class EntityNLM(Model):
             The combined loss.
         """
         tokens = source  # MONKEY PATCH
-        batch_size = tokens['tokens'].shape[0]
 
         if reset is not None:
             self.reset_states(reset)
@@ -339,6 +339,7 @@ class EntityNLM(Model):
                 if predict_em.sum() > 0:
                     # Equation 4 in the paper.
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
+                                                                            timestep=timestep,
                                                                             target=next_entity_ids,
                                                                             mask=predict_em)
                     _entity_id_loss = -entity_id_prediction_outputs['loss']
@@ -403,6 +404,7 @@ class EntityNLM(Model):
             contexts = current_hidden
 
         # Normalize the losses
+        self._perplexity(vocab_loss, mask.sum())
         entity_type_loss /= mask.sum()
         logger.debug('Entity type loss: %0.4f', entity_type_loss)
         entity_id_loss /= mask.sum()
@@ -419,7 +421,8 @@ class EntityNLM(Model):
                 'mention_length_loss': mention_length_loss,
                 'vocab_loss': vocab_loss,
                 'loss': total_loss,
-                'logp': -total_loss * mask.sum()
+                'logp': -total_loss * mask.sum(),
+                'penalized_logp': -total_loss * mask.sum()
         }
 
         # Update the model state
@@ -475,7 +478,6 @@ class EntityNLM(Model):
                 # 'upp': self._unknown_penalized_perplexity.get_metric(reset),
                 'et_acc': self._entity_type_accuracy.get_metric(reset),
                 'eid_acc': self._entity_id_accuracy.get_metric(reset),
-                'ml_acc': self._mention_length_accuracy.get_metric(reset)
                 'ml_acc': self._mention_length_accuracy.get_metric(reset),
                 'ppl': self._perplexity.get_metric(reset)
-
+        }

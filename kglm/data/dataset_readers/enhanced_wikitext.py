@@ -100,7 +100,6 @@ class EnhancedWikitextEntityNlmReader(DatasetReader):
                 start, end = annotation['span']
                 length = end - start
                 span = annotation['span']
-                eos_offset_adjusted_span = tuple(i + eos_offset[i] for i in span)
 
                 for i in range(*annotation['span']):
                     # Note: +1 offset to account for start token.
