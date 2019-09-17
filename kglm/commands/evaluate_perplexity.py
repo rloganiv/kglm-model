@@ -59,6 +59,10 @@ class EvaluatePerplexity(Subcommand):
                                type=int,
                                default=100,
                                help='Number of importance samples to draw.')
+
+        subparser.add_argument('--temperature',
+                               type=float,
+                               default=1.0)
         subparser.set_defaults(func=evaluate_from_args)
 
 
@@ -70,7 +74,8 @@ def evaluate_perplexity(model: Model,
                         num_samples: int,
                         instances: Iterator[Instance],
                         data_iterator: DataIterator,
-                        cuda_device: int) -> Dict[str, Any]:
+                        cuda_device: int,
+                        temperature: float = 1.0) -> Dict[str, Any]:
     check_for_gpu(cuda_device)
 
     logger.info('Iterating over dataset')
@@ -99,7 +104,7 @@ def evaluate_perplexity(model: Model,
                 denom += n_tokens
 
                 # Draw a sample
-                sampler_output = sampler.sample(**batch)
+                sampler_output = sampler.sample(**batch, temperature=temperature)
                 sample_logp = sampler_output['logp']
                 sample = sampler_output['sample']
 
@@ -161,7 +166,8 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     iterator = DataIterator.from_params(iterator_params)
     iterator.index_with(model.vocab)
     iterator.eval()
-    metrics = evaluate_perplexity(model, sampler, args.num_samples, instances, iterator, args.cuda_device)
+    metrics = evaluate_perplexity(model, sampler, args.num_samples, instances,
+                                  iterator, args.cuda_device, args.temperature)
 
     logger.info('Finished evaluating.')
     logger.info('Metrics:')

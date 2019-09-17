@@ -2,7 +2,7 @@
 Discriminative version of EntityNLM for importance sampling.
 """
 import logging
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 
 from allennlp.nn.util import get_text_field_mask
 from allennlp.data.vocabulary import Vocabulary
@@ -167,7 +167,9 @@ class EntityNLMDiscriminator(Model):
 
     def sample(self,
                source: Dict[str, torch.Tensor],
-               reset: torch.ByteTensor=None) -> Dict[str, torch.Tensor]:
+               reset: torch.ByteTensor = None,
+               temperature: float = 1.0,
+               **kwargs) -> Dict[str, torch.Tensor]:
         """
         Generates a sample from the discriminative model.
 
@@ -247,7 +249,7 @@ class EntityNLMDiscriminator(Model):
             if predict_mask.any():
 
                 # Predict entity types
-                entity_type_logits = self._entity_type_projection(current_hidden[predict_mask])
+                entity_type_logits = self._entity_type_projection(current_hidden[predict_mask]) / temperature
                 entity_type_logp = F.log_softmax(entity_type_logits, dim=-1)
                 entity_type_prediction_logp, entity_type_predictions = sample_from_logp(entity_type_logp)
                 entity_type_predictions = entity_type_predictions.byte()
@@ -259,8 +261,9 @@ class EntityNLMDiscriminator(Model):
                 if predict_em.sum() > 0:
                     # Predict entity ids
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
+                                                                            timestep=timestep,
                                                                             mask=predict_em)
-                    entity_id_logits = entity_id_prediction_outputs['logits']
+                    entity_id_logits = entity_id_prediction_outputs['logits'] / temperature
                     entity_id_mask = entity_id_prediction_outputs['logit_mask']
                     entity_id_probs = masked_softmax(entity_id_logits,
                                                      entity_id_mask)
@@ -274,7 +277,7 @@ class EntityNLMDiscriminator(Model):
                     # entities, but need the null embeddings here.
                     predicted_entity_embeddings = self._dynamic_embeddings.embeddings[predict_em, entity_id_predictions]
                     concatenated = torch.cat((current_hidden[predict_em], predicted_entity_embeddings), dim=-1)
-                    mention_length_logits = self._mention_length_projection(concatenated)
+                    mention_length_logits = self._mention_length_projection(concatenated) / temperature
                     mention_length_logp = F.log_softmax(mention_length_logits, dim=-1)
                     mention_length_prediction_logp, mention_length_predictions = sample_from_logp(mention_length_logp)
 
@@ -315,8 +318,8 @@ class EntityNLMDiscriminator(Model):
         self._state['prev_mention_lengths'] = prev_mention_lengths.detach()
 
         return {
-                'logp': logp,
                 'logp': logp.sum(),
+                'sample': {
                         'source': source,
                         'reset': reset,
                         'entity_types': entity_types,
