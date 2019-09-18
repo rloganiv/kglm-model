@@ -237,8 +237,6 @@ class EntityNLMDiscriminator(Model):
         entity_ids = torch.zeros_like(source['tokens'])
         mention_lengths = torch.ones_like(source['tokens'])
 
-        # Generate outputs
-        prev_mention_lengths = torch.ones(mask.size(0)).to(mask.device)
         for timestep in range(sequence_length):
 
             current_hidden = hidden[:, timestep]
@@ -514,4 +512,3 @@ class EntityNLMDiscriminator(Model):
                 'eid_acc': self._entity_id_accuracy.get_metric(reset),
                 'ml_acc': self._mention_length_accuracy.get_metric(reset)
         }
-
