@@ -316,7 +316,7 @@ class EntityNLMDiscriminator(Model):
 
         return {
                 'logp': logp,
-                'logp': logp.sum(),
+                'sample': {
                         'source': source,
                         'reset': reset,
                         'entity_types': entity_types,
