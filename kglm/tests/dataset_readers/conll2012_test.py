@@ -61,8 +61,10 @@ class TestConll2012DatasetReader:
                                     1, 1, 1, 1, 1, 1, 1])
 
 class TestConll2012JsonlReader:
-    def test_read_from_file(self):
-        reader = Conll2012JsonlReader()
+    @pytest.mark.parametrize('lazy', (True, False))
+    @pytest.mark.parametrize('offset', (0, 1))
+    def test_read_from_file(self, lazy, offset):
+        reader = Conll2012JsonlReader(lazy=lazy, offset=offset)
         fixture_path = 'kglm/tests/fixtures/conll2012.jsonl'
         instances = ensure_list(reader.read(fixture_path))
         assert len(instances) == 2
@@ -75,13 +77,13 @@ class TestConll2012JsonlReader:
         second_instance_mention_lengths = instances[1]['mention_lengths'].array
         second_instance_entity_types = instances[1]['entity_types'].array
 
-        np.testing.assert_allclose(second_instance_entity_types[1:3],
+        np.testing.assert_allclose(second_instance_entity_types[(1 - offset):(3 - offset)],
                                    np.array([1,0], dtype=np.uint8))
-        np.testing.assert_allclose(second_instance_entity_ids[1:2],
+        np.testing.assert_allclose(second_instance_entity_ids[(1 - offset):(2 - offset)],
                                    np.array([1], dtype=np.int64))
-        np.testing.assert_allclose(second_instance_entity_ids[8:9],
+        np.testing.assert_allclose(second_instance_entity_ids[(8 - offset):(9 - offset)],
                                    np.array([1], dtype=np.int64))
-        np.testing.assert_allclose(second_instance_entity_ids[30:32],
+        np.testing.assert_allclose(second_instance_entity_ids[(30 - offset):(32 - offset)],
                                    np.array([1, 1], dtype=np.int64))
-        np.testing.assert_allclose(second_instance_mention_lengths[30:32],
+        np.testing.assert_allclose(second_instance_mention_lengths[(30 - offset):(32 - offset)],
                                    np.array([2, 1], dtype=np.int64))
