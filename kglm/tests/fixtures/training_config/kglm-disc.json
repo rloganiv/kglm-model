@@ -62,7 +62,8 @@
                 "parent_ids",
                 "relations",
                 "shortlist_inds"
-        ]
+        ],
+        "truncate": false
     },
     "trainer": {
         "type": "lm",
