@@ -5,6 +5,7 @@ import itertools
 import random
 from typing import Deque, Dict, Iterable, Iterator, List, Tuple, Union
 
+from allennlp.common.checks import ConfigurationError
 from allennlp.data.dataset import Batch
 from allennlp.data.fields import Field, ListField, MetadataField, TextField
 from allennlp.data.instance import Instance
@@ -23,34 +24,43 @@ TensorDict = Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]]  # pylint: 
 class FancyIterator(DataIterator):
     """Fancy cause it's really expensive."""
     def __init__(self,
-                 splitting_keys: List[str],
+                 batch_size: int,
                  split_size: int,
-                 batch_size: int = 32,
+                 splitting_keys: List[str],
+                 truncate: bool = True,
                  instances_per_epoch: int = None,
                  max_instances_in_memory: int = None,
                  cache_instances: bool = False,
                  track_epoch: bool = False,
                  maximum_samples_per_batch: Tuple[str, int] = None) -> None:
         super(FancyIterator, self).__init__(
-                batch_size=batch_size,
-                instances_per_epoch=instances_per_epoch,
-                max_instances_in_memory=max_instances_in_memory,
-                cache_instances=cache_instances,
-                track_epoch=track_epoch,
-                maximum_samples_per_batch=maximum_samples_per_batch)
+            batch_size=batch_size,
+            instances_per_epoch=instances_per_epoch,
+            max_instances_in_memory=max_instances_in_memory,
+            cache_instances=cache_instances,
+            track_epoch=track_epoch,
+            maximum_samples_per_batch=maximum_samples_per_batch)
         self._splitting_keys = splitting_keys
         self._split_size = split_size
-        self._eval = False
-
-    def eval(self):
-        self._eval = True
+        self._truncate = truncate
 
     def __call__(self,
                  instances: Iterable[Instance],
                  num_epochs: int = None,
                  shuffle: bool = False) -> Iterator[TensorDict]:
+
         key = id(instances)
         starting_epoch = self._epochs[key]
+
+        # In order to ensure that we are (almost) constantly streaming data to the model we
+        # need to have all of the instances in memory ($$$)
+        instance_list = list(instances)
+
+        if (self._batch_size > len(instance_list)) and self._truncate:
+            raise ConfigurationError('FancyIterator will not return any data when the batch size '
+                                     'is larger than number of instances and truncation is enabled. '
+                                     'To fix this either use a smaller batch size (better for '
+                                     'training) or disable truncation (better for validation).')
 
         if num_epochs is None:
             epochs: Iterable[int] = itertools.count(starting_epoch)
@@ -59,9 +69,6 @@ class FancyIterator(DataIterator):
 
         for epoch in epochs:
 
-            # In order to ensure that we are (almost) constantly streaming data to the model we
-            # need to have all of the instances in memory ($$$)
-            instance_list = list(instances)
             if shuffle:
                 random.shuffle(instance_list)
 
@@ -104,7 +111,11 @@ class FancyIterator(DataIterator):
     def _split(self, instance: Instance) -> Tuple[List[Instance], int]:
         # Determine the size of the sequence inside the instance.
         true_length = len(instance['source'])
-        padded_length = self._split_size * (true_length // self._split_size)
+        if (true_length % self._split_size) != 0:
+            offset = 1
+        else:
+            offset = 0
+        padded_length = self._split_size * (true_length // self._split_size + offset)
 
         # Determine the split indices.
         split_indices = list(range(0, true_length, self._split_size))
@@ -162,7 +173,7 @@ class FancyIterator(DataIterator):
                 except IndexError:  # A queue is depleted
                     # If we're training, we break to avoid densely padded inputs (since this biases
                     # the model to overfit the longer sequences).
-                    if not self._eval:
+                    if self._truncate:
                         return
                     # But if we're evaluating we do want the padding, so that we don't skip anything.
                     else:

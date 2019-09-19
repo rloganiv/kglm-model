@@ -68,7 +68,8 @@
                 "relations",
                 "shortlist_inds",
                 "alias_copy_inds"
-        ]
+        ],
+        "truncate": false
     },
     "trainer": {
         "type": "lm",
