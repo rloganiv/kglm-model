@@ -111,8 +111,6 @@ class KglmDisc(Model):
             if tie_weights:
                 self._fc_new_entity.weight = self._entity_embedder.weight
 
-        self._overlap_weight = torch.nn.Parameter(torch.tensor([1.]))
-
         self._state: Optional[Dict[str, Any]] = None
 
         # Metrics
@@ -190,9 +188,7 @@ class KglmDisc(Model):
             _new_entity_logp = new_entity_probs.gather(-1, shortlist_inds.unsqueeze(-1)).log()
             new_entity_samples = shortlist['entity_ids'].gather(1, shortlist_inds)
         else:
-            # Get overlap feature
-            overlap_feature = alias_database.reverse_lookup(target['tokens'])
-            new_entity_logits = new_entity_logits + self._overlap_weight * overlap_feature.float()
+            new_entity_logits = new_entity_logits
             # If not using shortlist, then samples are indexed w.r.t to the global vocab
             new_entity_probs = F.softmax(new_entity_logits, dim=-1)
             new_entity_samples = parallel_sample(new_entity_probs)
@@ -457,7 +453,6 @@ class KglmDisc(Model):
 
     def _new_entity_loss(self,
                          encoded: torch.Tensor,
-                         overlap_feature: torch.Tensor,
                          target_inds: torch.Tensor,
                          shortlist: torch.Tensor,
                          target_mask: torch.Tensor) -> torch.Tensor:
@@ -473,7 +468,7 @@ class KglmDisc(Model):
             shortlist_mask = get_text_field_mask(shortlist)
             log_probs = masked_log_softmax(logits, shortlist_mask)
         else:
-            logits = logits + self._overlap_weight * overlap_feature.float()
+            logits = logits
             log_probs = F.log_softmax(logits, dim=-1)
             num_categories = log_probs.shape[-1]
             log_probs = log_probs.view(-1, num_categories)
@@ -637,16 +632,13 @@ class KglmDisc(Model):
 
         # For new mentions, predict which entity (among those in the supplied shortlist) will be
         # mentioned.
-        overlap_feature = alias_database.reverse_lookup(source)
         if self._use_shortlist:
             new_entity_loss = self._new_entity_loss(encoded_head + encoded_relation,
-                                                    overlap_feature,
                                                     shortlist_inds,
                                                     shortlist,
                                                     target_mask)
         else:
             new_entity_loss = self._new_entity_loss(encoded_head + encoded_relation,
-                                                    overlap_feature,
                                                     entity_ids,
                                                     None,
                                                     target_mask)
