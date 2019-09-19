@@ -245,7 +245,7 @@ class EntityNLM(Model):
             contexts = self._dummy_context_embedding.repeat(batch_size, 1)
 
         # Embed tokens and get RNN hidden state.
-        mask = get_text_field_mask(tokens)
+        mask = get_text_field_mask(tokens).byte()
         embeddings = self._text_field_embedder(tokens)
         embeddings = self._variational_dropout(embeddings)
 
@@ -318,8 +318,8 @@ class EntityNLM(Model):
             # We only predict the types / ids / lengths of the next mention if we are not currently
             # in the process of generating it (e.g. if the current remaining mention length is 1).
             # Indexing / masking with ``predict_all`` makes it possible to do this in batch.
-            predict_all = (current_mention_lengths == 1) * next_mask.byte()
-            if predict_all.sum() > 0:
+            predict_all = (current_mention_lengths == 1) & next_mask
+            if predict_all.any():
 
                 # Equation 3 in the paper.
                 entity_type_logits = self._entity_type_projection(current_hidden[predict_all])
@@ -335,8 +335,8 @@ class EntityNLM(Model):
                                            gold_labels=next_entity_types[predict_all].long())
 
                 # Only proceed to predict entity and mention length if there is in fact an entity.
-                predict_em = next_entity_types * predict_all
-                if predict_em.sum() > 0:
+                predict_em = next_entity_types & predict_all
+                if predict_em.any():
                     # Equation 4 in the paper.
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
                                                                             timestep=timestep,
@@ -380,13 +380,13 @@ class EntityNLM(Model):
             # The checks in the following block of code are required to prevent adding empty
             # tensors to vocab_features (which causes a floating point error).
             vocab_features = current_hidden.clone()
-            if next_entity_types.sum() > 0:
+            if next_entity_types.any():
                 vocab_features[next_entity_types] = vocab_features[next_entity_types] + entity_embeddings
-            if (1 - next_entity_types.sum()) > 0:
-                vocab_features[1 - next_entity_types] = vocab_features[1 - next_entity_types] + context_embeddings
-            vocab_logits = self._vocab_projection(vocab_features[next_mask.byte()])
+            if (~next_entity_types).any():
+                vocab_features[~next_entity_types] = vocab_features[~next_entity_types] + context_embeddings
+            vocab_logits = self._vocab_projection(vocab_features[next_mask])
             vocab_logp = F.log_softmax(vocab_logits, -1)
-            _vocab_loss = -vocab_logp.gather(-1, next_tokens[next_mask.byte()].unsqueeze(-1))
+            _vocab_loss = -vocab_logp.gather(-1, next_tokens[next_mask].unsqueeze(-1))
 
             # _vocab_loss = F.cross_entropy(vocab_logits, next_tokens, reduction='none')
             # _vocab_loss = _vocab_loss * next_mask.float()
@@ -403,8 +403,11 @@ class EntityNLM(Model):
             # Lastly update contexts
             contexts = current_hidden
 
-        # Normalize the losses
         self._perplexity(vocab_loss, mask.sum())
+
+        logp =  -(entity_type_loss + entity_id_loss + mention_length_loss + vocab_loss)
+
+        # Normalize the losses
         entity_type_loss /= mask.sum()
         logger.debug('Entity type loss: %0.4f', entity_type_loss)
         entity_id_loss /= mask.sum()
@@ -421,7 +424,7 @@ class EntityNLM(Model):
                 'mention_length_loss': mention_length_loss,
                 'vocab_loss': vocab_loss,
                 'loss': total_loss,
-                'logp': -total_loss * mask.sum(),
+                'logp': logp,
                 'penalized_logp': -total_loss * mask.sum()
         }
 

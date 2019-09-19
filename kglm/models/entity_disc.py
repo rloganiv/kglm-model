@@ -244,6 +244,7 @@ class EntityNLMDiscriminator(Model):
             # We only predict types / ids / lengths if the previous mention is terminated.
             predict_mask = prev_mention_lengths == 1
             predict_mask = predict_mask & mask[:, timestep].byte()
+
             if predict_mask.any():
 
                 # Predict entity types
@@ -256,7 +257,7 @@ class EntityNLMDiscriminator(Model):
 
                 # Only predict entity and mention lengths if we predicted that there was a mention
                 predict_em = entity_types[:, timestep] & predict_mask
-                if predict_em.sum() > 0:
+                if predict_em.any():
                     # Predict entity ids
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
                                                                             timestep=timestep,
@@ -286,6 +287,7 @@ class EntityNLMDiscriminator(Model):
                     entity_ids[predict_em, timestep] = entity_id_predictions
                     logp[predict_em] += entity_id_prediction_logp
 
+
                     mention_lengths[predict_em, timestep] = mention_length_predictions
                     logp[predict_em] += mention_length_prediction_logp
 
@@ -303,11 +305,11 @@ class EntityNLMDiscriminator(Model):
             # not need to add anything to logp since these 'predictions' have probability 1 under
             # the model.
             deterministic_mask = prev_mention_lengths > 1
-            deterministic_mask = deterministic_mask * mask[:, timestep].byte()
-            if deterministic_mask.sum() > 1:
+            deterministic_mask = deterministic_mask & mask[:, timestep].byte()
+            if deterministic_mask.any():
                 entity_types[deterministic_mask, timestep] = entity_types[deterministic_mask, timestep - 1]
                 entity_ids[deterministic_mask, timestep] = entity_ids[deterministic_mask, timestep - 1]
-                mention_lengths[deterministic_mask, timestep] = mention_lengths[deterministic_mask, timestep - 1] - 1
+                mention_lengths[deterministic_mask, timestep] = prev_mention_lengths[deterministic_mask] - 1
 
             # Update mention lengths for next timestep
             prev_mention_lengths = mention_lengths[:, timestep]
@@ -409,8 +411,8 @@ class EntityNLMDiscriminator(Model):
             # generating a mention (e.g. if the previous remaining mention length is 1). Indexing /
             # masking with ``predict_all`` makes it possible to do this in batch.
             predict_all = prev_mention_lengths == 1
-            predict_all = predict_all * mask[:, timestep].byte()
-            if predict_all.sum() > 0:
+            predict_all = predict_all & mask[:, timestep].byte()
+            if predict_all.any():
 
                 # Equation 3 in the paper.
                 entity_type_logits = self._entity_type_projection(current_hidden[predict_all])
@@ -422,9 +424,9 @@ class EntityNLMDiscriminator(Model):
                                            gold_labels=current_entity_types[predict_all].long())
 
                 # Only proceed to predict entity and mention length if there is in fact an entity.
-                predict_em = current_entity_types * predict_all
+                predict_em = current_entity_types & predict_all
 
-                if predict_em.sum() > 0:
+                if predict_em.any():
                     # Equation 4 in the paper. We want new entities to correspond to a prediction of
                     # zero, their embedding should be added after they've been predicted for the first
                     # time.
