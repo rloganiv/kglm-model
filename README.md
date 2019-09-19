@@ -1,6 +1,7 @@
 Knowledge Graph Language Model
 ===
 
+[![Build Status](https://travis-ci.org/rloganiv/kglm-model.svg?branch=master)](https://travis-ci.org/rloganiv/kglm-model)
 
 This repo contains an implementation of the KGLM model described in "Barack's Wife Hillary: Using Knowledge Graphs for Fact-Aware Language Modeling", Robert L. Logan IV, Nelson F. Liu, Matthew E. Peters, Matt Gardner and Sameer Singh, ACL 2019 [[arXiv]](https://arxiv.org/abs/1906.07241).
 
