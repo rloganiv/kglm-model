@@ -478,10 +478,11 @@ class KglmDisc(Model):
         mask = ~target_inds.eq(0)
         target_log_probs[~mask] = 0
 
-        self._new_entity_accuracy(predictions=log_probs[mask],
-                                  gold_labels=target_inds[mask])
-        self._new_entity_accuracy20(predictions=log_probs[mask],
+        if mask.any():
+            self._new_entity_accuracy(predictions=log_probs[mask],
                                     gold_labels=target_inds[mask])
+            self._new_entity_accuracy20(predictions=log_probs[mask],
+                                        gold_labels=target_inds[mask])
 
         return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
 
