@@ -14,6 +14,7 @@ from allennlp.data.iterators import BasicIterator, DataIterator
 from allennlp.models import Model
 from allennlp.models.archival import load_archive
 from allennlp.nn import util
+import numpy as np
 import torch
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,11 @@ class EvaluatePerplexity(Subcommand):
                                type=int,
                                default=None,
                                help='Batch size (default: whatever iterator was set to)')
+
+        subparser.add_argument('--split-size',
+                               type=int,
+                               default=None,
+                               help='Split size (default: whatever iterator was set to)')
 
         subparser.add_argument('--num-samples',
                                type=int,
@@ -106,6 +112,8 @@ def evaluate_perplexity(model: Model,
 
     summands = []
     penalized_summands = []
+    trajectory = np.zeros(num_samples)
+    individual_estimates = np.zeros(num_samples)
 
     for i in range(num_samples):
         iterator = data_iterator(instances, num_epochs=1, shuffle=False)
@@ -154,8 +162,8 @@ def evaluate_perplexity(model: Model,
             t = summand.unsqueeze(0)
             p = penalized_summand.unsqueeze(0)
         else:
-            t = torch.cat(summands, dim=0)
-            p = torch.cat(penalized_summands, dim=0)
+            t = torch.stack(summands, dim=0)
+            p = torch.stack(penalized_summands, dim=0)
         t_sum = torch.logsumexp(t, dim=0)
         p_sum = torch.logsumexp(p, dim=0)
         sum_logp = (t_sum - math.log(i+1)).item()
@@ -163,10 +171,14 @@ def evaluate_perplexity(model: Model,
         ppl = math.exp(-sum_logp / denom)
         upp = math.exp(-sum_logp_penalized / denom)
 
+        trajectory[i] = ppl
+        individual_estimates[i] = math.exp(-summand.item() / denom)
+
         print('PPL: %f' % ppl)
         print('UPP: %f' % upp)
 
-    metrics = {'ppl': ppl, 'upp': upp}
+    metrics = {'ppl': ppl, 'upp': upp, 'trajectory': trajectory,
+               'individual_estimates': individual_estimates}
     return metrics
 
 def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
@@ -202,9 +214,11 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     iterator_params = config.pop('iterator', 'None')
     if args.batch_size is not None:
         iterator_params['batch_size'] = args.batch_size
+    if args.split_size is not None:
+        iterator_params['split_size'] = args.split_size
+    iterator_params['truncate'] = False
     iterator = DataIterator.from_params(iterator_params)
     iterator.index_with(model.vocab)
-    iterator.eval()
     metrics = evaluate_perplexity(model, sampler, args.num_samples, instances,
                                   iterator, args.cuda_device, args.temperature,
                                   args.offset)
@@ -216,7 +230,7 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
 
     output_file = args.output_file
     if output_file:
-        with open(output_file, 'w') as f:
-            json.dump(metrics, f, indent=4)
+        np.save(output_file + 'trajectory.npy', metrics['trajectory'])
+        np.save(output_file + 'individual_estimates.npy', metrics['individual_estimates'])
     return metrics
 
