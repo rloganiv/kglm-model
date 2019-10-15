@@ -1,8 +1,5 @@
 language: python
 
-services:
-  - docker
-
 matrix:
   include:
     # This environment tests that the code works on Python 3.6
@@ -19,9 +16,6 @@ branches:
 
 # Trying something new here...
 # install: source build_tools/travis/install.sh
-before_install:
-  - docker pull python/python:3.6.8-stretch
-
 install:
   - pip install -r requirements.txt
 
