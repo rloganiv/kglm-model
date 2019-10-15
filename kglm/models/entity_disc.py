@@ -74,6 +74,8 @@ class EntityNLMDiscriminator(Model):
         self._num_layers = num_layers
         self._max_mention_length = max_mention_length
         self._max_embeddings = max_embeddings
+        self._sos_token = self.vocab.get_token_index('@@START@@', 'tokens')
+        self._eos_token = self.vocab.get_token_index('@@END@@', 'tokens')
 
         #  Rnn Encoders.
         rnns: List[torch.nn.Module] = []
@@ -169,6 +171,7 @@ class EntityNLMDiscriminator(Model):
                source: Dict[str, torch.Tensor],
                reset: torch.ByteTensor = None,
                temperature: float = 1.0,
+               offset: bool = False,
                **kwargs) -> Dict[str, torch.Tensor]:
         """
         Generates a sample from the discriminative model.
@@ -211,6 +214,19 @@ class EntityNLMDiscriminator(Model):
 
         # Embed tokens and get RNN hidden state.
         mask = get_text_field_mask(source)
+
+        # If not offsetting, we need to ignore contribution of @@START@@ token annotation since it
+        # is never used.
+
+        if not offset:
+            sos_mask = source['tokens'].ne(self._sos_token)
+            mask = mask.byte() & sos_mask
+        # If offsetting, we need to ignore contribution of @@END@@ token annotation since it is
+        # never used.
+        if offset:
+            eos_mask = source['tokens'].ne(self._eos_token)
+            mask = mask.byte() & eos_mask
+
         embeddings = self._text_field_embedder(source)
         current_input = embeddings
         hidden_list = []
@@ -318,7 +334,7 @@ class EntityNLMDiscriminator(Model):
         self._state['prev_mention_lengths'] = prev_mention_lengths.detach()
 
         return {
-                'logp': logp.sum(),
+                'logp': logp,
                 'sample': {
                         'source': source,
                         'reset': reset,
@@ -492,7 +508,7 @@ class EntityNLMDiscriminator(Model):
         """Resets the model's internals. Should be called at the start of a new batch."""
         if reset.any() and (self._state is not None):
             # Zero out any previous elements
-            self._state['prev_mention_lengths'][reset].zero_()
+            self._state['prev_mention_lengths'][reset] = 1
             # Zero out the hidden state
             for layer in range(self._num_layers):
                 h, c = self._state['layer_%i' % layer]
