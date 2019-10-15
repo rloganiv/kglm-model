@@ -1,6 +1,9 @@
 torch==1.1.0
 git+git://github.com/rloganiv/allennlp.git@pytorch-grad-clip
 
+# Testing stuff
+pytest
+
 # Coverage reports
 pytest-cov
 codecov
