@@ -1,10 +1,6 @@
 language: python
 
-matrix:
-  include:
-    # This environment tests that the code works on Python 3.6
-    # and prints a coverage report at the end.
-    - env: PYTHON_VERSION="3.6" COVERAGE="true"
+cache: pip
 
 notifications:
   email: false
