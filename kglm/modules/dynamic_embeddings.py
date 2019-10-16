@@ -218,7 +218,7 @@ class DynamicEmbedding(Module):
         bilinear = bilinear.view(batch_size, -1)
 
         # Second half of equation 4.
-        distance_score = torch.exp(self._distance_scalar * (timestep - self.last_seen[mask].float()))
+        distance_score = torch.exp(self._distance_scalar * (self.last_seen[mask].float() - timestep))
         logits = bilinear + distance_score
 
         # Since we pre-allocate the embedding array, logits includes scores for all of the

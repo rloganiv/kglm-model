@@ -2,7 +2,7 @@
     "vocabulary": {
         "type": "extended",
         "extend": false,
-        "directory_path": "data/vocabulary"
+        "directory_path": "data/vocabulary-mini"
     },
     "dataset_reader": {
         "type": "conll2012_jsonl",
@@ -13,8 +13,8 @@
             }
         }
     },
-    "train_data_path": "data/conll-2012/processed/train.jsonl",
-    "validation_data_path": "data/conll-2012/processed/dev.jsonl",
+    "train_data_path": "data/conll-2012/processed/train-mini.jsonl",
+    "validation_data_path": "data/conll-2012/processed/dev-mini.jsonl",
     "model": {
         "type": "entitydisc",
         "text_field_embedder": {
@@ -29,15 +29,15 @@
         "embedding_dim": 256,
         "hidden_size": 256,
         "num_layers": 1,
-        "max_mention_length": 100,
-        "max_embeddings": 100,
+        "max_mention_length": 50,
+        "max_embeddings": 10,
         "dropout_rate": 0.4,
         "variational_dropout_rate": 0.1
     },
     "iterator": {
         "type": "fancy",
-        "batch_size": 343,
-        "split_size": 30,
+        "batch_size": 16,
+        "split_size": 15,
         "splitting_keys": [
             "source",
             "entity_types",
@@ -47,8 +47,8 @@
     },
     "validation_iterator": {
         "type": "fancy",
-        "batch_size": 343,
-        "split_size": 128,
+        "batch_size": 16,
+        "split_size": 15,
         "splitting_keys": [
             "source",
             "entity_types",

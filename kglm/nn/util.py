@@ -58,6 +58,10 @@ def sample_from_logp(logp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     cdf = torch.cumsum(pdf, dim=-1)
     rng = torch.rand(logp.shape[:-1], device=logp.device).unsqueeze(-1)
     selected_idx = cdf.lt(rng).sum(dim=-1)
+    # Sigh
+    if (selected_idx >= pdf.shape[-1]).any():
+        selected_idx[selected_idx >= pdf.shape[-1]] = pdf.shape[-1] - 1
+
     hack = torch.ones(logp.shape[:-1], device=logp.device, dtype=torch.uint8)
     selected_logp = logp[hack, selected_idx[hack]]
     return selected_logp, selected_idx

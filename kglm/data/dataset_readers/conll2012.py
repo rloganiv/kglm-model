@@ -212,9 +212,11 @@ class Conll2012JsonlReader(DatasetReader):
     def __init__(self,
                  token_indexers: Dict[str, TokenIndexer] = None,
                  replace_numbers: bool = True,
+                 offset: int = 0,
                  lazy: bool = False) -> None:
         super().__init__(lazy)
         self._replace_numbers = replace_numbers
+        self._offset = offset
         self._token_indexers = token_indexers or {"tokens": SingleIdTokenIndexer()}
 
     @overrides
@@ -239,17 +241,15 @@ class Conll2012JsonlReader(DatasetReader):
         entity_ids = np.zeros(shape=(len(tokens),))
         mention_lengths = np.ones(shape=(len(tokens),))
 
-        max_i = 0
         for i, cluster in enumerate(clusters.values()):
             for span in cluster:
                 start, end = span
-                entity_types[(start + 1):(end + 1)] = 1 # TODO: Double check: +1 due to added '@@START@@' token
-                entity_ids[(start + 1):(end + 1)] = i + 1
-                mention_lengths[(start + 1):(end + 1)] = np.arange(end - start, 0, step=-1)
-            max_i = max(max_i, i)
+                entity_types[(start + 1 - self._offset):(end + 1 - self._offset)] = 1
+                entity_ids[(start + 1 - self._offset):(end + 1 - self._offset)] = i + 1
+                mention_lengths[(start + 1 - self._offset):(end + 1 - self._offset)] = np.arange(end - start, 0, step=-1)
 
+        fields['entity_types'] = SequentialArrayField(entity_types, dtype=np.uint8)
         fields['entity_ids'] = SequentialArrayField(entity_ids, dtype=np.int64)
         fields['mention_lengths'] = SequentialArrayField(mention_lengths, dtype=np.int64)
-        fields['entity_types'] = SequentialArrayField(entity_types, dtype=np.uint8)
 
         return Instance(fields)

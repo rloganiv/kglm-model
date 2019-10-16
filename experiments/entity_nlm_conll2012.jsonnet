@@ -1,11 +1,8 @@
 {
     "vocabulary": {
         "type": "extended",
-        "max_vocab_size": {
-            // This does not count the @@UNKNOWN@@ token, which
-            // ends up being our 10,000th token.
-            "tokens": 9999
-        }
+        "extend": false,
+        "directory_path": "data/vocabulary"
     },
     "dataset_reader": {
         "type": "conll2012_jsonl",
@@ -41,14 +38,26 @@
     },
     "iterator": {
         "type": "fancy",
-        "batch_size": 16,
-        "split_size": 30,
+        "batch_size": 512,
+        "split_size": 15,
         "splitting_keys": [
             "source",
             "entity_types",
             "entity_ids",
             "mention_lengths"
         ],
+    },
+    "validation_iterator": {
+        "type": "fancy",
+        "batch_size": 512,
+        "split_size": 15,
+        "splitting_keys": [
+            "source",
+            "entity_types",
+            "entity_ids",
+            "mention_lengths"
+        ],
+        "truncate": false
     },
     "trainer": {
         "type": "lm",

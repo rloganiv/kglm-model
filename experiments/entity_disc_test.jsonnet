@@ -2,7 +2,7 @@
     "vocabulary": {
         "type": "extended",
         "extend": false,
-        "directory_path": "./results/entity-nlm-wt2.fixed-vocab.dropout.2/vocabulary"
+        "directory_path": "data/vocabulary"
     },
     "dataset_reader": {
         "type": "enhanced-wikitext",

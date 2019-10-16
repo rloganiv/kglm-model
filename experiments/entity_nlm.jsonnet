@@ -4,7 +4,7 @@
     },
     "iterator": {
         "type": "fancy",
-        "batch_size": 60,
+        "batch_size": 30,
         "split_size": 70,
         "splitting_keys": [
             "source",
@@ -12,6 +12,18 @@
             "entity_ids",
             "mention_lengths"
         ]
+    },
+    "validation_iterator": {
+        "type": "fancy",
+        "batch_size": 30,
+        "split_size": 70,
+        "splitting_keys": [
+            "source",
+            "entity_types",
+            "entity_ids",
+            "mention_lengths"
+        ],
+        "truncate": false
     },
     "model": {
         "type": "entitynlm",

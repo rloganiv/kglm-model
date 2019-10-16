@@ -2,7 +2,7 @@
 Discriminative version of EntityNLM for importance sampling.
 """
 import logging
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 
 from allennlp.nn.util import get_text_field_mask
 from allennlp.data.vocabulary import Vocabulary
@@ -74,6 +74,8 @@ class EntityNLMDiscriminator(Model):
         self._num_layers = num_layers
         self._max_mention_length = max_mention_length
         self._max_embeddings = max_embeddings
+        self._sos_token = self.vocab.get_token_index('@@START@@', 'tokens')
+        self._eos_token = self.vocab.get_token_index('@@END@@', 'tokens')
 
         #  Rnn Encoders.
         rnns: List[torch.nn.Module] = []
@@ -167,7 +169,10 @@ class EntityNLMDiscriminator(Model):
 
     def sample(self,
                source: Dict[str, torch.Tensor],
-               reset: torch.ByteTensor=None) -> Dict[str, torch.Tensor]:
+               reset: torch.ByteTensor = None,
+               temperature: float = 1.0,
+               offset: bool = False,
+               **kwargs) -> Dict[str, torch.Tensor]:
         """
         Generates a sample from the discriminative model.
 
@@ -209,6 +214,19 @@ class EntityNLMDiscriminator(Model):
 
         # Embed tokens and get RNN hidden state.
         mask = get_text_field_mask(source)
+
+        # If not offsetting, we need to ignore contribution of @@START@@ token annotation since it
+        # is never used.
+
+        if not offset:
+            sos_mask = source['tokens'].ne(self._sos_token)
+            mask = mask.byte() & sos_mask
+        # If offsetting, we need to ignore contribution of @@END@@ token annotation since it is
+        # never used.
+        if offset:
+            eos_mask = source['tokens'].ne(self._eos_token)
+            mask = mask.byte() & eos_mask
+
         embeddings = self._text_field_embedder(source)
         current_input = embeddings
         hidden_list = []
@@ -235,8 +253,6 @@ class EntityNLMDiscriminator(Model):
         entity_ids = torch.zeros_like(source['tokens'])
         mention_lengths = torch.ones_like(source['tokens'])
 
-        # Generate outputs
-        prev_mention_lengths = torch.ones(mask.size(0)).to(mask.device)
         for timestep in range(sequence_length):
 
             current_hidden = hidden[:, timestep]
@@ -244,10 +260,11 @@ class EntityNLMDiscriminator(Model):
             # We only predict types / ids / lengths if the previous mention is terminated.
             predict_mask = prev_mention_lengths == 1
             predict_mask = predict_mask & mask[:, timestep].byte()
+
             if predict_mask.any():
 
                 # Predict entity types
-                entity_type_logits = self._entity_type_projection(current_hidden[predict_mask])
+                entity_type_logits = self._entity_type_projection(current_hidden[predict_mask]) / temperature
                 entity_type_logp = F.log_softmax(entity_type_logits, dim=-1)
                 entity_type_prediction_logp, entity_type_predictions = sample_from_logp(entity_type_logp)
                 entity_type_predictions = entity_type_predictions.byte()
@@ -256,11 +273,12 @@ class EntityNLMDiscriminator(Model):
 
                 # Only predict entity and mention lengths if we predicted that there was a mention
                 predict_em = entity_types[:, timestep] & predict_mask
-                if predict_em.sum() > 0:
+                if predict_em.any():
                     # Predict entity ids
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
+                                                                            timestep=timestep,
                                                                             mask=predict_em)
-                    entity_id_logits = entity_id_prediction_outputs['logits']
+                    entity_id_logits = entity_id_prediction_outputs['logits'] / temperature
                     entity_id_mask = entity_id_prediction_outputs['logit_mask']
                     entity_id_probs = masked_softmax(entity_id_logits,
                                                      entity_id_mask)
@@ -274,7 +292,7 @@ class EntityNLMDiscriminator(Model):
                     # entities, but need the null embeddings here.
                     predicted_entity_embeddings = self._dynamic_embeddings.embeddings[predict_em, entity_id_predictions]
                     concatenated = torch.cat((current_hidden[predict_em], predicted_entity_embeddings), dim=-1)
-                    mention_length_logits = self._mention_length_projection(concatenated)
+                    mention_length_logits = self._mention_length_projection(concatenated) / temperature
                     mention_length_logp = F.log_softmax(mention_length_logits, dim=-1)
                     mention_length_prediction_logp, mention_length_predictions = sample_from_logp(mention_length_logp)
 
@@ -284,6 +302,7 @@ class EntityNLMDiscriminator(Model):
                     entity_id_predictions[new_entity_mask] = new_entity_labels[new_entity_mask]
                     entity_ids[predict_em, timestep] = entity_id_predictions
                     logp[predict_em] += entity_id_prediction_logp
+
 
                     mention_lengths[predict_em, timestep] = mention_length_predictions
                     logp[predict_em] += mention_length_prediction_logp
@@ -302,11 +321,11 @@ class EntityNLMDiscriminator(Model):
             # not need to add anything to logp since these 'predictions' have probability 1 under
             # the model.
             deterministic_mask = prev_mention_lengths > 1
-            deterministic_mask = deterministic_mask * mask[:, timestep].byte()
-            if deterministic_mask.sum() > 1:
+            deterministic_mask = deterministic_mask & mask[:, timestep].byte()
+            if deterministic_mask.any():
                 entity_types[deterministic_mask, timestep] = entity_types[deterministic_mask, timestep - 1]
                 entity_ids[deterministic_mask, timestep] = entity_ids[deterministic_mask, timestep - 1]
-                mention_lengths[deterministic_mask, timestep] = mention_lengths[deterministic_mask, timestep - 1] - 1
+                mention_lengths[deterministic_mask, timestep] = prev_mention_lengths[deterministic_mask] - 1
 
             # Update mention lengths for next timestep
             prev_mention_lengths = mention_lengths[:, timestep]
@@ -408,8 +427,8 @@ class EntityNLMDiscriminator(Model):
             # generating a mention (e.g. if the previous remaining mention length is 1). Indexing /
             # masking with ``predict_all`` makes it possible to do this in batch.
             predict_all = prev_mention_lengths == 1
-            predict_all = predict_all * mask[:, timestep].byte()
-            if predict_all.sum() > 0:
+            predict_all = predict_all & mask[:, timestep].byte()
+            if predict_all.any():
 
                 # Equation 3 in the paper.
                 entity_type_logits = self._entity_type_projection(current_hidden[predict_all])
@@ -421,9 +440,9 @@ class EntityNLMDiscriminator(Model):
                                            gold_labels=current_entity_types[predict_all].long())
 
                 # Only proceed to predict entity and mention length if there is in fact an entity.
-                predict_em = current_entity_types * predict_all
+                predict_em = current_entity_types & predict_all
 
-                if predict_em.sum() > 0:
+                if predict_em.any():
                     # Equation 4 in the paper. We want new entities to correspond to a prediction of
                     # zero, their embedding should be added after they've been predicted for the first
                     # time.
@@ -489,7 +508,7 @@ class EntityNLMDiscriminator(Model):
         """Resets the model's internals. Should be called at the start of a new batch."""
         if reset.any() and (self._state is not None):
             # Zero out any previous elements
-            self._state['prev_mention_lengths'][reset].zero_()
+            self._state['prev_mention_lengths'][reset] = 1
             # Zero out the hidden state
             for layer in range(self._num_layers):
                 h, c = self._state['layer_%i' % layer]
@@ -511,4 +530,3 @@ class EntityNLMDiscriminator(Model):
                 'eid_acc': self._entity_id_accuracy.get_metric(reset),
                 'ml_acc': self._mention_length_accuracy.get_metric(reset)
         }
-

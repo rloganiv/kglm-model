@@ -94,6 +94,7 @@ class FancyIterator(DataIterator):
                     new_fields[name] = field
                 else:
                     new_fields[name] = field.empty_field()
+            new_fields['reset'] = SequentialArrayField(np.array(1), dtype=np.uint8)  # Always reset blank instances
             blank_instance = Instance(new_fields)
 
             for batch in self._generate_batches(queues, blank_instance):
