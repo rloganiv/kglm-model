@@ -4,4 +4,4 @@ from .knowledge_graph_lookup import KnowledgeGraphLookup
 from .locked_dropout import LockedDropout
 from .recent_entities import RecentEntities
 from .splitcross import SplitCrossEntropyLoss
-from .weight_drop import WeightDrop
+from .weight_drop import WeightDrop, WeightDroppedLstm
