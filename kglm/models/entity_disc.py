@@ -2,7 +2,7 @@
 Discriminative version of EntityNLM for importance sampling.
 """
 import logging
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from allennlp.nn.util import get_text_field_mask
 from allennlp.data.vocabulary import Vocabulary
@@ -17,7 +17,7 @@ from overrides import overrides
 import torch
 import torch.nn.functional as F
 
-from kglm.modules import DynamicEmbedding,  WeightDrop
+from kglm.modules import DynamicEmbedding,  WeightDroppedLstm
 from kglm.nn.util import sample_from_logp
 
 logger = logging.getLogger(__name__)
@@ -76,22 +76,7 @@ class EntityNLMDiscriminator(Model):
         self._max_embeddings = max_embeddings
         self._sos_token = self.vocab.get_token_index('@@START@@', 'tokens')
         self._eos_token = self.vocab.get_token_index('@@END@@', 'tokens')
-
-        #  Rnn Encoders.
-        rnns: List[torch.nn.Module] = []
-        for i in range(num_layers):
-            if i == 0:
-                input_size = embedding_dim
-            else:
-                input_size = hidden_size
-            if (i == num_layers - 1):
-                output_size = embedding_dim
-            else:
-                output_size = hidden_size
-            rnns.append(torch.nn.LSTM(input_size, output_size, batch_first=True))
-        rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=variational_dropout_rate) for rnn in rnns]
-        self.rnns = torch.nn.ModuleList(rnns)
-
+        self._rnn = WeightDroppedLstm(num_layers, embedding_dim, hidden_size, variational_dropout_rate)
         self._state: Optional[StateDict] = None
 
         # Input variational dropout
@@ -109,6 +94,7 @@ class EntityNLMDiscriminator(Model):
         self._mention_length_projection = torch.nn.Linear(in_features=2*embedding_dim,
                                                           out_features=max_mention_length)
 
+        # Metrics
         self._entity_type_accuracy = CategoricalAccuracy()
         self._entity_id_accuracy = CategoricalAccuracy()
         self._mention_length_accuracy = CategoricalAccuracy()
@@ -167,7 +153,7 @@ class EntityNLMDiscriminator(Model):
 
         return output_dict
 
-    def sample(self,
+    def sample(self,  # pylint: disable=unused-argument
                source: Dict[str, torch.Tensor],
                reset: torch.ByteTensor = None,
                temperature: float = 1.0,
@@ -228,24 +214,7 @@ class EntityNLMDiscriminator(Model):
             mask = mask.byte() & eos_mask
 
         embeddings = self._text_field_embedder(source)
-        current_input = embeddings
-        hidden_list = []
-        for layer, rnn in enumerate(self.rnns):
-            # Retrieve previous hidden state for layer.
-            if self._state is not None:
-                prev_hidden = self._state['layer_%i' % layer]
-            else:
-                prev_hidden = None
-            # Forward-pass.
-            output, hidden = rnn(current_input, prev_hidden)
-            output = output.contiguous()
-            # Update hidden state for layer.
-            hidden = tuple(h.detach() for h in hidden)
-            hidden_list.append(hidden)
-            current_input = output
-        hidden = current_input
-
-        self._state = {'layer_%i' % i: h for i, h in enumerate(hidden_list)}
+        hidden = self._rnn(embeddings)
 
         # Initialize outputs
         logp = hidden.new_zeros(batch_size) # Track total logp for **each** generated sample
@@ -344,6 +313,54 @@ class EntityNLMDiscriminator(Model):
                 }
         }
 
+    def _beam_step_fn(self,
+                      candidates: torch.Tensor,
+                      prev_state: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor]:
+        pass
+
+
+    def predict_top_k(self,
+                      source: Dict[str, torch.Tensor],
+                      reset: torch.ByteTensor,
+                      k: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Obtain the top-k (approximately) most likely predictions from the model using beam
+        search. Unlike typical beam search all of the beam states are returned instead of just
+        the most likely.
+
+        The returned candidates are intended to be marginalized over to obtain an upper bound for
+        the token-level perplexity of the EntityNLM.
+
+        Parameters
+        ==========
+        source : ``Dict[str, torch.Tensor]``
+            A tensor of shape ``(batch_size, sequence_length)`` containing the sequence of
+            tokens.
+        reset : ``torch.ByteTensor``
+            Whether or not to reset the model's state. This should be done at the start of each
+            new sequence.
+        k : ``int``
+            Number of predictions to return.
+
+        Returns
+        =======
+        predictions : ``torch.Tensor``
+            A tensor of shape ``(batch_size * k, sequence_length)`` containing the top-k
+            predictions.
+        logp : ``torch.Tensor``
+            The log-probabilities of each prediction. WARNING: These are returned purely for
+            diagnostic purposes and should not be factored in the the perplexity calculation.
+        """
+        batch_size = source['tokens'].shape[0]
+
+        # Reset
+        if reset is not None:
+            self.reset_states(reset)
+
+        # Figure out WTF to do...
+
+
+
     def _forward_loop(self,
                       tokens: Dict[str, torch.Tensor],
                       entity_types: torch.Tensor,
@@ -391,24 +408,7 @@ class EntityNLMDiscriminator(Model):
         mask = get_text_field_mask(tokens)
         embeddings = self._text_field_embedder(tokens)
         embeddings = self._variational_dropout(embeddings)
-        current_input = embeddings
-        hidden_list = []
-        for layer, rnn in enumerate(self.rnns):
-            # Retrieve previous hidden state for layer.
-            if self._state is not None:
-                prev_hidden = self._state['layer_%i' % layer]
-            else:
-                prev_hidden = None
-            # Forward-pass.
-            output, hidden = rnn(current_input, prev_hidden)
-            output = output.contiguous()
-            # Update hidden state for layer.
-            hidden = tuple(h.detach() for h in hidden)
-            hidden_list.append(hidden)
-            current_input = output
-        hidden = current_input
-
-        self._state = {'layer_%i' % i: h for i, h in enumerate(hidden_list)}
+        hidden = self._rnn(embeddings)
 
         # Initialize losses
         entity_type_loss = torch.tensor(0.0, requires_grad=True, device=hidden.device)
@@ -498,9 +498,10 @@ class EntityNLMDiscriminator(Model):
                 'loss': total_loss
         }
 
-        # Update state
         # Update the model state
-        self._state['prev_mention_lengths'] = mention_lengths[:, -1].detach()
+        self._state = {
+            'prev_mention_lengths': mention_lengths[:, -1].detach()
+        }
 
         return output_dict
 
@@ -509,15 +510,10 @@ class EntityNLMDiscriminator(Model):
         if reset.any() and (self._state is not None):
             # Zero out any previous elements
             self._state['prev_mention_lengths'][reset] = 1
-            # Zero out the hidden state
-            for layer in range(self._num_layers):
-                h, c = self._state['layer_%i' % layer]
-                h[:, reset, :] = torch.zeros_like(h[:, reset, :])
-                c[:, reset, :] = torch.zeros_like(c[:, reset, :])
-                self._state['layer_%i' % layer] = (h, c)
 
-        # Reset the dynamic embeddings
+        # Reset the dynamic embeddings and lstm
         self._dynamic_embeddings.reset_states(reset)
+        self._rnn.reset(reset)
 
     def detach_states(self):
         """Detaches the model's state to enforce truncated backpropagation."""
@@ -526,7 +522,7 @@ class EntityNLMDiscriminator(Model):
     @overrides
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         return {
-                'et_acc': self._entity_type_accuracy.get_metric(reset),
-                'eid_acc': self._entity_id_accuracy.get_metric(reset),
-                'ml_acc': self._mention_length_accuracy.get_metric(reset)
+            'et_acc': self._entity_type_accuracy.get_metric(reset),
+            'eid_acc': self._entity_id_accuracy.get_metric(reset),
+            'ml_acc': self._mention_length_accuracy.get_metric(reset)
         }
