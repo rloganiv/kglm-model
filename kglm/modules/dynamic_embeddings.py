@@ -241,4 +241,3 @@ class DynamicEmbedding(Module):
             out['loss'] = loss
 
         return out
-
