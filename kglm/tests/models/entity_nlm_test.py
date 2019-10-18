@@ -33,14 +33,25 @@ class EntityDiscTest(KglmModelTestCase):
         self.ensure_model_can_train_save_and_load(self.param_file,
                                                   gradients_to_ignore=['_dummy_context_embedding'])
 
-    def test_beam_step_fn(self):
+    def test_annotation_logp(self):
         batch_size = 2
 
         # Need to reset the states
         reset = torch.ByteTensor([1] * batch_size)
         self.model.reset_states(reset)
 
-        # First time step
+        # Apply to random hidden state
         hidden = torch.randn(batch_size, self.model._embedding_dim)
-        self.model._beam_step_fn(hidden, 0, k=10)
+        logp = self.model._annotation_logp(hidden, timestep=0)
 
+        # Check that output has correct shape
+        assert tuple(logp.shape) == (batch_size, self.model.num_possible_annotations)
+
+        # Check that state dict can be fed to function...
+        state_dict = {
+            'dynamic_embeddings_state_dict': self.model._dynamic_embeddings.state_dict()
+        }
+        logp_prime = self.model._annotation_logp(hidden, timestep=0, state_dict=state_dict)
+
+        # ...and that output is the same as before
+        assert torch.allclose(logp, logp_prime)
