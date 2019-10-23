@@ -429,16 +429,16 @@ class EntityNLMDiscriminator(Model):
         lookup_indices = flat_indices.gather(-1, top_indices)
 
         # Use lookup indices to get the top annotation variables
-        top_entity_types = self.entity_type_lookup.take(lookup_indices)
-        top_entity_ids = self.entity_id_lookup.take(lookup_indices)
-        top_mention_lengths = self.mention_length_lookup.take(lookup_indices)
+        entity_types = self.entity_type_lookup.take(lookup_indices)
+        entity_ids = self.entity_id_lookup.take(lookup_indices)
+        mention_lengths = self.mention_length_lookup.take(lookup_indices)
 
         output = {
             'logp': top_logp,
             'backpointers': backpointers,
-            'entity_types': self.entity_type_lookup.take(lookup_indices),
-            'entity_ids': self.entity_id_lookup.take(lookup_indices),
-            'mention_lengths': self.mention_length_lookup.take(lookup_indices)
+            'entity_types': entity_types,
+            'entity_ids': entity_ids,
+            'mention_lengths': mention_lengths
         }
         return output
 
@@ -452,7 +452,6 @@ class EntityNLMDiscriminator(Model):
         this we need to follow the backpointers to assemble correct tensors of the entity embeddings.
 
         """
-
         logp = output['logp']
         backpointers = output['backpointers']
         batch_size, k = logp.shape
@@ -494,7 +493,39 @@ class EntityNLMDiscriminator(Model):
                             reset: torch.ByteTensor,
                             k: int,
                             predictions: List[Dict[str, torch.Tensor]]) -> Dict[str, Any]:
-        pass
+        batch_size, seq_length = source['tokens'].shape
+
+        new_reset = reset.repeat(1, k).view(batch_size * k)
+        new_source = {key: value.repeat(1, k, 1).view(batch_size * k, -1) for key, value in source.items()}
+
+        entity_types = []
+        entity_ids = []
+        mention_lengths = []
+        backpointer = None
+
+        for prediction in reversed(predictions):
+            if backpointer is None:
+                entity_types.append(prediction['entity_types'])
+                entity_ids.append(prediction['entity_ids'])
+                mention_lengths.append(prediction['mention_lengths'])
+            else:
+                entity_types.append(prediction['entity_types'].gather(1, backpointer))
+                entity_ids.append(prediction['entity_ids'].gather(1, backpointer))
+                mention_lengths.append(prediction['mention_lengths'].gather(1, backpointer))
+            backpointer = prediction['backpointers']
+
+        entity_types = torch.stack(entity_types[::-1], dim=-1).view(batch_size * k, -1)
+        entity_ids = torch.stack(entity_ids[::-1], dim=-1).view(batch_size * k, -1)
+        mention_lengths = torch.stack(mention_lengths[::-1], dim=-1).view(batch_size * k , -1)
+
+        return {
+            'reset': new_reset,
+            'source': new_source,
+            'entity_types': entity_types,
+            'entity_ids': entity_ids,
+            'mention_lengths': mention_lengths
+        }
+
 
     def beam_search(self,
                     source: Dict[str, torch.Tensor],
@@ -563,7 +594,7 @@ class EntityNLMDiscriminator(Model):
             predictions.append(output)
 
         # Trace backpointers to get annotation.
-        annotation = self._trace_backpointers(source, reset, k, output)
+        annotation = self._trace_backpointers(source, reset, k, predictions)
 
         return annotation
 
