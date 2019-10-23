@@ -279,7 +279,6 @@ class EntityNLMDiscriminator(Model):
                 # Add / update entity embeddings
                 new_entities = entity_ids[:, timestep] == self._dynamic_embeddings.num_embeddings
                 self._dynamic_embeddings.add_embeddings(timestep, new_entities)
-
                 self._dynamic_embeddings.update_embeddings(hidden=current_hidden,
                                                            update_indices=entity_ids[:, timestep],
                                                            timestep=timestep,
@@ -325,18 +324,18 @@ class EntityNLMDiscriminator(Model):
 
     @property
     def entity_id_lookup(self):
-        entity_id_lookup = [0] + list(range(self._max_embeddings) * self._max_mention_length)
+        entity_id_lookup = [0] + list(range(self._max_embeddings)) * self._max_mention_length
         return torch.LongTensor(entity_id_lookup)
 
     @property
     def mention_length_lookup(self):
-        mention_length_lookup = [1] + list([i] * self._max_embeddings for i in range(self._max_mention_length))
+        mention_length_lookup = [1] + [i  for i in range(self._max_mention_length) for _ in range(self._max_embeddings)]
         return torch.LongTensor(mention_length_lookup)
 
     def _annotation_logp(self,
                          hidden: torch.FloatTensor,
                          timestep: int,
-                         state_dict: Dict[str, Any] = None) -> torch.Tensor:
+                         beam_states: List[Dict[str, Any]]) -> torch.Tensor:
         """Computes the log-probability of all possible annotations for a single beam state.
 
         Parameters
@@ -348,33 +347,55 @@ class EntityNLMDiscriminator(Model):
         A tensor of log-probabilities for the possible annotations of shape
         (batch_size, num_annotations).
         """
-        batch_size, hidden_dim =  hidden.shape
-        if state_dict is not None:
-            self._dynamic_embeddings.load_state_dict(state_dict['dynamic_embeddings_state_dict'])
-        elif timestep > 0:
-            raise RuntimeError('Dynamic embedding state_dict required.')
+        batch_size, hidden_dim = hidden.shape
+        logp = hidden.new_zeros((batch_size, len(beam_states), self.num_possible_annotations))
 
-        # Entity type log probabilities: (batch_size, 2)
-        entity_type_logits = self._entity_type_projection(hidden)
-        entity_type_logp = F.log_softmax(entity_type_logits, -1)
+        for i, beam_state in enumerate(beam_states):
+            self._dynamic_embeddings.load_state_dict(beam_state)
 
-        # Entity id log probabilities: (batch_size, max_embeddings)
-        entity_id_logits = self._dynamic_embeddings(hidden, timestep)['logits']
-        entity_id_logp = F.log_softmax(entity_id_logits, -1)
+            # Entity type log probabilities: (batch_size, 2)
+            entity_type_logits = self._entity_type_projection(hidden)
+            entity_type_logp = F.log_softmax(entity_type_logits, -1)
 
-        # Mention length log probabilites: (batch_size, max_embeddings x max_mention_lengths)
-        # NOTE: Entity id is guaranteed to be zero at initialization
-        embeddings = self._dynamic_embeddings.embeddings
-        concatenated = torch.cat((hidden.unsqueeze(1).expand_as(embeddings), embeddings), dim=-1)
-        mention_length_logits = self._mention_length_projection(concatenated)
-        mention_length_logp = F.log_softmax(mention_length_logits, -1).view(batch_size, -1)
+            # Entity id log probabilities: (batch_size, max_embeddings)
+            entity_id_logits = self._dynamic_embeddings(hidden, timestep)['logits']
+            entity_id_logp = F.log_softmax(entity_id_logits, -1)
 
-        # Add together log probabilities
-        logp = torch.zeros((batch_size, self.num_possible_annotations))
-        logp[:, 0] += entity_type_logp[:, 0]
-        logp[:, 1:] += entity_type_logp[:, 1:]
-        logp[:, 1:] += entity_id_logp.repeat((1, self._max_mention_length))
-        logp[:, 1:] += mention_length_logp
+            # Mention length log probabilites: (batch_size, max_embeddings x max_mention_lengths)
+            # NOTE: Entity id is guaranteed to be zero at initialization
+            embeddings = self._dynamic_embeddings.embeddings
+            concatenated = torch.cat((hidden.unsqueeze(1).expand_as(embeddings), embeddings), dim=-1)
+            mention_length_logits = self._mention_length_projection(concatenated)
+            mention_length_logp = F.log_softmax(mention_length_logits, -1).view(batch_size, -1)
+
+            logp[:, i, 0] += entity_type_logp[:, 0]
+            logp[:, i, 1:] += entity_type_logp[:, 1:]
+            logp[:, i, 1:] += entity_id_logp.repeat((1, self._max_mention_length))
+            logp[:, i ,1:] += mention_length_logp
+
+        return logp
+
+    def _adjust_for_ongoing_mentions(self,
+                                     logp: torch.FloatTensor,
+                                     output: Dict[str, torch.FloatTensor] = None) -> torch.FloatTensor:
+        """Fixes logp so that ongoing mentions are deterministic."""
+        if output is None:
+            return logp
+
+        mention_lengths = output['mention_lengths']
+        entity_ids = output['entity_ids']
+
+        # Find ongoing mentions.
+        ongoing = mention_lengths > 1
+
+        # Make probability zero for all ongoing entries...
+        logp[ongoing] = -float('inf')
+
+        # ...except the deterministic output
+        new_lengths = mention_lengths[ongoing] - 1
+        entity_ids = entity_ids[ongoing]
+        annotation_idx = 1 + entity_ids + new_lengths * self._max_embeddings
+        logp[ongoing, annotation_idx] = 0
 
         return logp
 
@@ -387,106 +408,98 @@ class EntityNLMDiscriminator(Model):
             A (batch_size, beam_width, num_annotations tensor)
         """
         batch_size = logp.shape[0]
-        # Get the top canidates from each beam (makes math much eaiser)
+        # Get the top canidates from each beam
+        # (batch_size, beam_width, k)
         top_logp, top_indices = logp.topk(k, dim=-1)
 
         # Next flatten
+        # (batch_size, beam_width * k)
         flat_logp = top_logp.view(batch_size, -1)
         flat_indices = top_indices.view(batch_size, -1)
 
-        # Next get the top-k overall
-        top_logp = flat_logp.topk(k, dim=-1)
-        output_dict = {
-            'entity_types': self.entity_type_lookup.take(top_indices),
-            'entity_ids': self.entity_id_lookup.take(top_indices),
-            'mention_lengths': self.mention_length_lookup.take(top_indices)
+        # Get the true top k
+        # (batch_size, k)
+        top_logp, top_indices = flat_logp.topk(k, dim=-1)
+
+        # Retrieve backpointers from the indices
+        # (batch_size, k)
+        backpointers = top_indices // self.num_possible_annotations
+
+        # Also need to index correctly into the lookup
+        lookup_indices = flat_indices.gather(-1, top_indices)
+
+        # Use lookup indices to get the top annotation variables
+        top_entity_types = self.entity_type_lookup.take(lookup_indices)
+        top_entity_ids = self.entity_id_lookup.take(lookup_indices)
+        top_mention_lengths = self.mention_length_lookup.take(lookup_indices)
+
+        output = {
+            'logp': top_logp,
+            'backpointers': backpointers,
+            'entity_types': self.entity_type_lookup.take(lookup_indices),
+            'entity_ids': self.entity_id_lookup.take(lookup_indices),
+            'mention_lengths': self.mention_length_lookup.take(lookup_indices)
         }
-        return top_logp, output_dict
+        return output
 
-    def _beam_step_fn(self,
-                      hidden: torch.FloatTensor,
-                      timestep: int,
-                      k: int,
-                      last_predictions: Optional[Dict[str, torch.Tensor]] = None,
-                      state: Optional[Dict[str, Any]] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _update_beam_states(self,
+                            hidden: torch.FloatTensor,
+                            timestep: int,
+                            beam_states: List[Dict[str, Any]],
+                            output: Dict[str, torch.Tensor]) -> List[Dict[str, Any]]:
         """
-        This function computes the top-k most likely next states for the beam.
+        Given the new beam predictions we need to add/update entity embeddings. Before we can do
+        this we need to follow the backpointers to assemble correct tensors of the entity embeddings.
 
-        Parameters
-        ==========
-
-        Returns
-        =======
-        A tuple comprised of:
-            next
         """
-        batch_size, hidden_dim =  hidden.shape
 
-        # Initial predictions are a special case since we only have to consider batch_size inputs
-        # and don't need to deal with ongoing mentions.
-        if last_predictions is None:
-            # Step 1 - Compute type of next token
-            entity_type_logits = self._entity_type_projection(hidden)
+        logp = output['logp']
+        backpointers = output['backpointers']
+        batch_size, k = logp.shape
 
-            # shape: (batch_size, 2)
-            entity_type_logp = F.log_softmax(entity_type_logits, -1)
+        # Concat all the dynamic entity embeddings and trace backpointers to make sure the proper
+        # embeddings are loaded for each beam.
+        all_prev_entity_embeddings = logp.new_zeros(batch_size, len(beam_states), self._max_embeddings, self._embedding_dim)
+        all_prev_num_entities = backpointers.new_zeros(batch_size, len(beam_states))
+        all_prev_last_seen = backpointers.new_zeros(batch_size, len(beam_states), self._max_embeddings)
+        for i, beam_state in enumerate(beam_states):
+            self._dynamic_embeddings.load_state_dict(beam_state)
+            all_prev_entity_embeddings[:, i] = self._dynamic_embeddings.embeddings
+            all_prev_num_entities[:, i] = self._dynamic_embeddings.num_embeddings
+            all_prev_last_seen[:, i] = self._dynamic_embeddings.last_seen
 
-            # Step 2 - Compute probabilities for each entity
-            # TODO: Take this shit out - its obvious...
-            entity_id_prediction_outputs = self._dynamic_embeddings(hidden=hidden,
-                                                                    timestep=timestep)
-            entity_id_logits = entity_id_prediction_outputs['logits']
+        new_beam_states: List[Dict[str, Any]] = []
+        for i in range(k):
+            # Trace backpointers to get correct params
+            self._dynamic_embeddings.embeddings = all_prev_entity_embeddings[torch.arange(batch_size), backpointers[:, i]]
+            self._dynamic_embeddings.num_entities = all_prev_num_entities[torch.arange(batch_size), backpointers[:, i]]
+            self._dynamic_embeddings.last_seen = all_prev_last_seen[torch.arange(batch_size), backpointers[:, i]]
 
-            # shape: (batch_size, num_entities)
-            entity_id_logp = F.log_softmax(entity_id_logits, -1)  # Technically should mask
+            # Add and update embeddings
+            entity_ids = output['entity_ids'][:, i]
+            entity_types = output['entity_types'][:, i]
+            new_entities = entity_ids == self._dynamic_embeddings.num_embeddings
+            self._dynamic_embeddings.add_embeddings(timestep, new_entities)
+            self._dynamic_embeddings.update_embeddings(hidden=hidden,
+                                                       update_indices=entity_ids,
+                                                       timestep=timestep,
+                                                       mask=entity_types)
 
-            # Step 3 - Compute mention length probabilities for each entity
+            new_beam_states.append(self._dynamic_embeddings.state_dict())
 
-            # shape: (batch_size, num_entities, embedding_dim)
-            embeddings = self._dynamic_embeddings.embeddings[:, :1]  # Only one entity right now
+        return new_beam_states
 
-            concatenated = torch.cat((hidden.unsqueeze(1), embeddings), dim=-1)
-            mention_length_logits = self._mention_length_projection(concatenated)
+    @staticmethod
+    def _trace_backpointers(source: Dict[str, torch.Tensor],
+                            reset: torch.ByteTensor,
+                            k: int,
+                            predictions: List[Dict[str, torch.Tensor]]) -> Dict[str, Any]:
+        pass
 
-            # shape: (batch_size, num_entities, max_mention_length)
-            mention_length_logp = F.log_softmax(mention_length_logits, -1)
-
-            # Step 4 - Combine log probabilities
-
-            # Use meshgrid to get the Cartesian product of entity id and mention length options.
-            # shape: (num_entities, max_mention_length)
-            entity_ids, mention_lengths = torch.meshgrid(torch.arange(1, dtype=torch.int64),
-                                                         torch.arange(self._max_mention_length, dtype=torch.int64))
-            entity_ids = entity_ids.view(-1)
-            mention_lengths = mention_lengths.view(-1)
-            entity_types = torch.ones_like(entity_ids, dtype=torch.uint8)
-
-            # When the type is not a mention there is only one possible annotation. Add it.
-            entity_types = torch.cat((torch.ByteTensor([0]), entity_types))
-            entity_ids = torch.cat((torch.LongTensor([0]), entity_ids))
-            mention_lengths = torch.cat((torch.LongTensor([1]), mention_lengths))
-            num_annotations = entity_types.shape[0]
-
-            logp = torch.zeros(size=(batch_size, num_annotations),
-                               dtype=torch.float32,
-                               device=hidden.device)
-            logp[:, 0] = entity_type_logp[:, 0]
-            logp[:, 1:] = entity_type_logp[:, 1].unsqueeze(-1)
-            logp[:, 1:] += entity_id_logp.view(batch_size, -1)
-            logp[:, 1:] += mention_length_logp.view(batch_size, -1)
-
-            top_logp, top_indices = logp.topk(k, dim=-1)
-            output_dict = {
-                'entity_types': torch.take(entity_types, top_indices),
-                'entity_ids': torch.take(entity_ids, top_indices),
-                'mention_lengths': torch.take(mention_lengths, top_indices)
-            }
-            return top_logp, output_dict
-
-    def predict_top_k(self,
-                      source: Dict[str, torch.Tensor],
-                      reset: torch.ByteTensor,
-                      k: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def beam_search(self,
+                    source: Dict[str, torch.Tensor],
+                    reset: torch.ByteTensor,
+                    k: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Obtain the top-k (approximately) most likely predictions from the model using beam
         search. Unlike typical beam search all of the beam states are returned instead of just
@@ -526,26 +539,34 @@ class EntityNLMDiscriminator(Model):
         prev_mention_lengths = source['tokens'].new_ones(batch_size)
 
         # Embed and encode the tokens up front.
-        embeddings = self._text_field_embedder(source['tokens'])
+        embeddings = self._text_field_embedder(source)
         hidden = self._rnn(embeddings)
 
-        # The rest of the code will be a modified version of:
-        #   https://github.com/allenai/allennlp/blob/master/allennlp/nn/beam_search.py
-
-        # List of predictions. One for each time step. Unlike in allennlp's beam search, here each
-        # element is a dictionary of (batch_size, beam_size) tensors whose keys are the annotation
-        # variables.
+        # Beam search logic
         predictions: List[Dict[str, torch.Tensor]] = []
+        beam_states = [self._dynamic_embeddings.state_dict()]
+        output = None
+        for timestep in range(1, sequence_length):
+            # Get log probabilities of annotations
+            # (batch_size, k, num_annotations)
+            logp = self._annotation_logp(hidden[:, timestep], timestep, beam_states)
 
-        # List of (batch_size, beam_size) tensors. One for each time step. Stores the index n of
-        # the parent prediction it came from.
-        backpointers: List[torch.LongTensor] = []
+            # Add to cumulative log probabilities of beams (which have shape (batch_size, k))
+            if output:
+                logp += output['logp'].unsqueeze(-1)
 
-        # To keep things simple, we are going to store the beam states
-        for timestep in range(sequence_length):
-            pass
+            # Accout for ongoing mentions
+            logp = self._adjust_for_ongoing_mentions(logp, output)
 
-        # Trace backpointers to get output.
+            output = self._top_k_annotations(logp, k)
+            beam_states = self._update_beam_states(hidden[:, timestep], timestep, beam_states, output)
+            predictions.append(output)
+
+        # Trace backpointers to get annotation.
+        annotation = self._trace_backpointers(source, reset, k, output)
+
+        return annotation
+
 
     def _forward_loop(self,
                       tokens: Dict[str, torch.Tensor],
