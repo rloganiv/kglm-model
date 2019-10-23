@@ -526,7 +526,6 @@ class EntityNLMDiscriminator(Model):
             'mention_lengths': mention_lengths
         }
 
-
     def beam_search(self,
                     source: Dict[str, torch.Tensor],
                     reset: torch.ByteTensor,
@@ -597,7 +596,6 @@ class EntityNLMDiscriminator(Model):
         annotation = self._trace_backpointers(source, reset, k, predictions)
 
         return annotation
-
 
     def _forward_loop(self,
                       tokens: Dict[str, torch.Tensor],
