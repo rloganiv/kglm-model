@@ -227,7 +227,7 @@ class EntityNLMDiscriminator(Model):
             current_hidden = hidden[:, timestep]
 
             # We only predict types / ids / lengths if the previous mention is terminated.
-            predict_mask = prev_mention_lengths == 1
+            predict_mask = prev_mention_lengths == 0
             predict_mask = predict_mask & mask[:, timestep].byte()
 
             if predict_mask.any():
@@ -288,7 +288,7 @@ class EntityNLMDiscriminator(Model):
             # lengths decrease by 1, all other outputs are copied from the previous timestep. Do
             # not need to add anything to logp since these 'predictions' have probability 1 under
             # the model.
-            deterministic_mask = prev_mention_lengths > 1
+            deterministic_mask = prev_mention_lengths > 0
             deterministic_mask = deterministic_mask & mask[:, timestep].byte()
             if deterministic_mask.any():
                 entity_types[deterministic_mask, timestep] = entity_types[deterministic_mask, timestep - 1]
@@ -389,7 +389,7 @@ class EntityNLMDiscriminator(Model):
         entity_ids = output['entity_ids']
 
         # Find ongoing mentions.
-        ongoing = mention_lengths > 1
+        ongoing = mention_lengths > 0
 
         # Make probability zero for all ongoing entries...
         logp[ongoing] = -float('inf')
@@ -572,7 +572,7 @@ class EntityNLMDiscriminator(Model):
                                'sequences have been split). Cannot predict top-K annotations in '
                                'this setting!')
         self.reset_states(reset)
-        prev_mention_lengths = source['tokens'].new_ones(batch_size)
+        prev_mention_lengths = source['tokens'].new_zeros(batch_size)
 
         # Embed and encode the tokens up front.
         embeddings = self._text_field_embedder(source)
@@ -640,7 +640,7 @@ class EntityNLMDiscriminator(Model):
 
         # Need to track previous mention lengths in order to know when to measure loss.
         if self._state is None:
-            prev_mention_lengths = mention_lengths.new_ones(batch_size)
+            prev_mention_lengths = mention_lengths.new_zeros(batch_size)
         else:
             prev_mention_lengths = self._state['prev_mention_lengths']
 
@@ -666,7 +666,7 @@ class EntityNLMDiscriminator(Model):
             # We only predict types / ids / lengths if we are not currently in the process of
             # generating a mention (e.g. if the previous remaining mention length is 1). Indexing /
             # masking with ``predict_all`` makes it possible to do this in batch.
-            predict_all = prev_mention_lengths == 1
+            predict_all = prev_mention_lengths == 0
             predict_all = predict_all & mask[:, timestep].byte()
             if predict_all.any():
 
@@ -750,7 +750,7 @@ class EntityNLMDiscriminator(Model):
         """Resets the model's internals. Should be called at the start of a new batch."""
         if reset.any() and (self._state is not None):
             # Zero out any previous elements
-            self._state['prev_mention_lengths'][reset] = 1
+            self._state['prev_mention_lengths'][reset] = 0
 
         # Reset the dynamic embeddings and lstm
         self._dynamic_embeddings.reset_states(reset)

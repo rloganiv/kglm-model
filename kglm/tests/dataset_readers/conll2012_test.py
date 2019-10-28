@@ -54,11 +54,11 @@ class TestConll2012DatasetReader:
                                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                                     0, 0, 0, 0, 0, 0, 0])
         np.testing.assert_allclose(instances[0]["mention_lengths"].array,
-                                   [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                                    1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1,
-                                    1, 1, 1, 6, 5, 4, 3, 2, 1, 1, 1, 1, 2, 1, 1,
-                                    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                                    1, 1, 1, 1, 1, 1, 1])
+                                   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 5, 4, 3, 2, 1, 0, 0, 0, 0, 1, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0])
 
 class TestConll2012JsonlReader:
     @pytest.mark.parametrize('lazy', (True, False))
@@ -86,4 +86,4 @@ class TestConll2012JsonlReader:
         np.testing.assert_allclose(second_instance_entity_ids[(30 - offset):(32 - offset)],
                                    np.array([1, 1], dtype=np.int64))
         np.testing.assert_allclose(second_instance_mention_lengths[(30 - offset):(32 - offset)],
-                                   np.array([2, 1], dtype=np.int64))
+                                   np.array([1, 0], dtype=np.int64))

@@ -56,7 +56,7 @@ class EntityDiscTest(KglmModelTestCase):
         logp = torch.zeros(batch_size, k, self.model.num_possible_annotations)
         output = {
             'entity_ids': torch.LongTensor([[0, 0, 0], [3, 0, 0]]),
-            'mention_lengths': torch.LongTensor([[1, 1, 1],[3, 1, 1]])
+            'mention_lengths': torch.LongTensor([[0, 0, 0], [2, 0, 0]])
         }
 
         # See that adjustment works
@@ -67,7 +67,7 @@ class EntityDiscTest(KglmModelTestCase):
         # Only element with probability should have entity id == 3 and mention length == 2
         pred = logp[1, 0].argmax()
         assert self.model.entity_id_lookup[pred] == 3
-        assert self.model.mention_length_lookup[pred] == 2
+        assert self.model.mention_length_lookup[pred] == 1
 
     def test_top_k_annotations(self):
         batch_size = 2
@@ -93,4 +93,4 @@ class EntityDiscTest(KglmModelTestCase):
         vocab_size = self.model.vocab.get_vocab_size('tokens')
         source = {'tokens': torch.randint(vocab_size, size=(batch_size, seq_len))}
         reset = torch.ones(batch_size, dtype=torch.uint8)
-        self.model.beam_search(source, reset, k)
+        out = self.model.beam_search(source, reset, k)

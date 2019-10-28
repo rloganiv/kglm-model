@@ -23,9 +23,9 @@ class TestEnhancedWikitextEntityNLMReader:
         np.testing.assert_allclose(instances[1]["entity_ids"].array[:5], [0, 0, 1, 1, 1])
         np.testing.assert_allclose(instances[1]["entity_ids"].array[-5:], [0, 0, 0, 0, 0])
         np.testing.assert_allclose(instances[1]["mention_lengths"].array[:5],
-                                   [1, 1, 5, 4, 3])
+                                   [0, 0, 4, 3, 2])
         np.testing.assert_allclose(instances[1]["mention_lengths"].array[-5:],
-                                   [1, 1, 1, 1, 1])
+                                   [0, 0, 0, 0, 0])
 
 
 class TestEnhancedWikitextKglmReader:

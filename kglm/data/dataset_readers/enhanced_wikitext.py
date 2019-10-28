@@ -91,7 +91,7 @@ class EnhancedWikitextEntityNlmReader(DatasetReader):
             seen_entities: Set[str] = set()
             entity_types = np.zeros(shape=(len(tokens),))
             entity_ids = np.zeros(shape=(len(tokens),))
-            mention_lengths = np.ones(shape=(len(tokens),))
+            mention_lengths = np.zeros(shape=(len(tokens),))
 
             # Process annotations
             for annotation in data['annotations']:
@@ -105,7 +105,7 @@ class EnhancedWikitextEntityNlmReader(DatasetReader):
                     # Note: +1 offset to account for start token.
                     entity_types[i] = 1
                     entity_ids[i] = len(seen_entities)
-                    mention_lengths[i] = length
+                    mention_lengths[i] = length - 1
                     length -= 1
 
             fields['entity_types'] = SequentialArrayField(entity_types, dtype=np.uint8)
