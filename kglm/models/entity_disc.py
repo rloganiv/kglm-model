@@ -17,7 +17,7 @@ from overrides import overrides
 import torch
 import torch.nn.functional as F
 
-from kglm.modules import DynamicEmbedding,  WeightDroppedLstm
+from kglm.modules import DynamicEmbedding, WeightDroppedLstm
 from kglm.nn.util import sample_from_logp
 
 logger = logging.getLogger(__name__)
@@ -324,12 +324,12 @@ class EntityNLMDiscriminator(Model):
 
     @property
     def entity_id_lookup(self):
-        entity_id_lookup = [0] + list(range(self._max_embeddings)) * self._max_mention_length
+        entity_id_lookup = [0] + [i for i in range(self._max_embeddings) for _ in range(self._max_mention_length)]
         return torch.LongTensor(entity_id_lookup)
 
     @property
     def mention_length_lookup(self):
-        mention_length_lookup = [1] + [i  for i in range(self._max_mention_length) for _ in range(self._max_embeddings)]
+        mention_length_lookup = [1] + list(range(self._max_mention_length)) * self._max_embeddings
         return torch.LongTensor(mention_length_lookup)
 
     def _annotation_logp(self,
@@ -345,7 +345,7 @@ class EntityNLMDiscriminator(Model):
         Returns
         =======
         A tensor of log-probabilities for the possible annotations of shape
-        (batch_size, num_annotations).
+        (batch_size, sequence_length, num_annotations).
         """
         batch_size, hidden_dim = hidden.shape
         logp = hidden.new_zeros((batch_size, len(beam_states), self.num_possible_annotations))
@@ -368,9 +368,12 @@ class EntityNLMDiscriminator(Model):
             mention_length_logits = self._mention_length_projection(concatenated)
             mention_length_logp = F.log_softmax(mention_length_logits, -1).view(batch_size, -1)
 
+            # Lastly, we need to tile entity id log probs properly.
+            entity_id_logp = entity_id_logp.unsqueeze(-1).repeat(1, 1, self._max_mention_length).view(batch_size, -1)
+
             logp[:, i, 0] += entity_type_logp[:, 0]
             logp[:, i, 1:] += entity_type_logp[:, 1:]
-            logp[:, i, 1:] += entity_id_logp.repeat((1, self._max_mention_length))
+            logp[:, i, 1:] += entity_id_logp
             logp[:, i ,1:] += mention_length_logp
 
         return logp
@@ -394,7 +397,7 @@ class EntityNLMDiscriminator(Model):
         # ...except the deterministic output
         new_lengths = mention_lengths[ongoing] - 1
         entity_ids = entity_ids[ongoing]
-        annotation_idx = 1 + entity_ids + new_lengths * self._max_embeddings
+        annotation_idx = 1 + entity_ids * self._max_mention_length + new_lengths
         logp[ongoing, annotation_idx] = 0
 
         return logp
@@ -423,15 +426,15 @@ class EntityNLMDiscriminator(Model):
 
         # Retrieve backpointers from the indices
         # (batch_size, k)
-        backpointers = top_indices // self.num_possible_annotations
+        backpointers = top_indices // k
 
         # Also need to index correctly into the lookup
         lookup_indices = flat_indices.gather(-1, top_indices)
 
         # Use lookup indices to get the top annotation variables
-        entity_types = self.entity_type_lookup.take(lookup_indices)
-        entity_ids = self.entity_id_lookup.take(lookup_indices)
-        mention_lengths = self.mention_length_lookup.take(lookup_indices)
+        entity_types = self.entity_type_lookup.to(device=lookup_indices.device).take(lookup_indices)
+        entity_ids = self.entity_id_lookup.to(device=lookup_indices.device).take(lookup_indices)
+        mention_lengths = self.mention_length_lookup.to(device=lookup_indices.device).take(lookup_indices)
 
         output = {
             'logp': top_logp,
@@ -495,8 +498,8 @@ class EntityNLMDiscriminator(Model):
                             predictions: List[Dict[str, torch.Tensor]]) -> Dict[str, Any]:
         batch_size, seq_length = source['tokens'].shape
 
-        new_reset = reset.repeat(1, k).view(batch_size * k)
-        new_source = {key: value.repeat(1, k, 1).view(batch_size * k, -1) for key, value in source.items()}
+        new_reset = reset.unsqueeze(1).repeat(1, k).view(batch_size * k)
+        new_source = {key: value.unsqueeze(1).repeat(1, k, 1).view(batch_size * k, -1) for key, value in source.items()}
 
         entity_types = []
         entity_ids = []
@@ -512,7 +515,10 @@ class EntityNLMDiscriminator(Model):
                 entity_types.append(prediction['entity_types'].gather(1, backpointer))
                 entity_ids.append(prediction['entity_ids'].gather(1, backpointer))
                 mention_lengths.append(prediction['mention_lengths'].gather(1, backpointer))
-            backpointer = prediction['backpointers']
+            if backpointer is None:
+                backpointer = prediction['backpointers']
+            else:
+                backpointer = prediction['backpointers'].gather(1, backpointer)
 
         entity_types = torch.stack(entity_types[::-1], dim=-1).view(batch_size * k, -1)
         entity_ids = torch.stack(entity_ids[::-1], dim=-1).view(batch_size * k, -1)
@@ -576,17 +582,15 @@ class EntityNLMDiscriminator(Model):
         predictions: List[Dict[str, torch.Tensor]] = []
         beam_states = [self._dynamic_embeddings.state_dict()]
         output = None
-        for timestep in range(1, sequence_length):
+        for timestep in range(sequence_length):
             # Get log probabilities of annotations
             # (batch_size, k, num_annotations)
             logp = self._annotation_logp(hidden[:, timestep], timestep, beam_states)
-
+            # Accout for ongoing mentions
+            logp = self._adjust_for_ongoing_mentions(logp, output)
             # Add to cumulative log probabilities of beams (which have shape (batch_size, k))
             if output:
                 logp += output['logp'].unsqueeze(-1)
-
-            # Accout for ongoing mentions
-            logp = self._adjust_for_ongoing_mentions(logp, output)
 
             output = self._top_k_annotations(logp, k)
             beam_states = self._update_beam_states(hidden[:, timestep], timestep, beam_states, output)
