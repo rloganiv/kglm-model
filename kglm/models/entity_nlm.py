@@ -17,7 +17,7 @@ import torch
 from torch.nn import Parameter
 import torch.nn.functional as F
 
-from kglm.modules import DynamicEmbedding, WeightDrop
+from kglm.modules import DynamicEmbedding, WeightDroppedLstm
 from kglm.training.metrics import Ppl
 # from kglm.training.metrics import Perplexity, UnknownPenalizedPerplexity
 
@@ -81,22 +81,7 @@ class EntityNLM(Model):
         self._tie_weights = tie_weights
         self._variational_dropout_rate = variational_dropout_rate
         self._dropout_rate = dropout_rate
-
-        #  Rnn Encoders.
-        rnns: List[torch.nn.Module] = []
-        for i in range(num_layers):
-            if i == 0:
-                input_size = embedding_dim
-            else:
-                input_size = hidden_size
-            if (i == num_layers - 1):
-                output_size = embedding_dim
-            else:
-                output_size = hidden_size
-            rnns.append(torch.nn.LSTM(input_size, output_size, batch_first=True))
-        rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=variational_dropout_rate) for rnn in rnns]
-        self.rnns = torch.nn.ModuleList(rnns)
-
+        self._rnn = WeightDroppedLstm(num_layers, embedding_dim, hidden_size, variational_dropout_rate)
         self._state: Optional[StateDict] = None
 
         # Input variational dropout
@@ -133,9 +118,6 @@ class EntityNLM(Model):
         self._entity_id_accuracy = CategoricalAccuracy()
         self._mention_length_accuracy = CategoricalAccuracy()
         self._perplexity = Ppl()
-
-        if tie_weights:
-            self._vocab_projection.weight = self._text_field_embedder._token_embedders['tokens'].weight  # pylint: disable=W0212
 
         initializer(self)
 
@@ -248,25 +230,7 @@ class EntityNLM(Model):
         mask = get_text_field_mask(tokens).byte()
         embeddings = self._text_field_embedder(tokens)
         embeddings = self._variational_dropout(embeddings)
-
-        current_input = embeddings
-        hidden_list = []
-        for layer, rnn in enumerate(self.rnns):
-            # Retrieve previous hidden state for layer.
-            if self._state is not None:
-                prev_hidden = self._state['layer_%i' % layer]
-            else:
-                prev_hidden = None
-            # Forward-pass.
-            output, hidden = rnn(current_input, prev_hidden)
-            output = output.contiguous()
-            # Update hidden state for layer.
-            hidden = tuple(h.detach() for h in hidden)
-            hidden_list.append(hidden)
-            current_input = output
-        hidden = current_input
-
-        self._state = {'layer_%i' % i: h for i, h in enumerate(hidden_list)}
+        hidden = self._rnn(embeddings)
 
         # Initialize losses
         entity_type_loss = 0.0
@@ -314,11 +278,10 @@ class EntityNLM(Model):
             # require access to the **next** hidden state, which does not exist during generation).
             next_entity_ids = next_entity_ids.clone()  # This prevents mutating the source data.
             next_entity_ids[next_entity_ids == self._dynamic_embeddings.num_embeddings] = 0
-
             # We only predict the types / ids / lengths of the next mention if we are not currently
             # in the process of generating it (e.g. if the current remaining mention length is 1).
             # Indexing / masking with ``predict_all`` makes it possible to do this in batch.
-            predict_all = (current_mention_lengths == 1) & next_mask
+            predict_all = (current_mention_lengths == 0) & next_mask
             if predict_all.any():
 
                 # Equation 3 in the paper.
@@ -432,12 +395,13 @@ class EntityNLM(Model):
                 'penalized_logp': -total_loss * mask.sum()
         }
 
-        # Update the model state
-        self._state['prev_tokens'] = {field: tokens[field][:, -1].unsqueeze(1).detach() for field in tokens}
-        self._state['prev_entity_types'] = entity_types[:, -1].unsqueeze(1).detach()
-        self._state['prev_entity_ids'] = entity_ids[:, -1].unsqueeze(1).detach()
-        self._state['prev_mention_lengths'] = mention_lengths[:, -1].unsqueeze(1).detach()
-        self._state['prev_contexts'] = contexts.detach()
+        self._state = {
+            'prev_tokens': {field: tokens[field][:, -1].unsqueeze(1).detach() for field in tokens},
+            'prev_entity_types': entity_types[:, -1].unsqueeze(1).detach(),
+            'prev_entity_ids': entity_ids[:, -1].unsqueeze(1).detach(),
+            'prev_mention_lengths': mention_lengths[:, -1].unsqueeze(1).detach(),
+            'prev_contexts': contexts.detach()
+        }
 
         return output_dict
 
@@ -449,15 +413,10 @@ class EntityNLM(Model):
             self._state['prev_entity_ids'][reset].zero_()
             self._state['prev_mention_lengths'][reset].zero_()
             self._state['prev_contexts'][reset].zero_()
-            # Zero out the hidden state
-            for layer in range(self._num_layers):
-                h, c = self._state['layer_%i' % layer]
-                h[:, reset, :] = torch.zeros_like(h[:, reset, :])
-                c[:, reset, :] = torch.zeros_like(c[:, reset, :])
-                self._state['layer_%i' % layer] = (h, c)
 
         # Reset the dynamic embeddings
         self._dynamic_embeddings.reset_states(reset)
+        self._rnn.reset(reset)
 
     def detach_states(self):
         """Detaches the model's state to enforce truncated backpropagation."""
@@ -488,3 +447,5 @@ class EntityNLM(Model):
                 'ml_acc': self._mention_length_accuracy.get_metric(reset),
                 'ppl': self._perplexity.get_metric(reset)
         }
+
+        hidden = self._rnn(embeddings)
