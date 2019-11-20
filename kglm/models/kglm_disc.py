@@ -128,6 +128,50 @@ class KglmDisc(Model):
 
         initializer(self)
 
+    @overrides
+    def forward(self,  # pylint: disable=arguments-differ
+                source: Dict[str, torch.Tensor],
+                reset: torch.Tensor,
+                metadata: List[Dict[str, Any]],
+                mention_type: torch.Tensor = None,
+                raw_entity_ids: Dict[str, torch.Tensor] = None,
+                entity_ids: Dict[str, torch.Tensor] = None,
+                parent_ids: Dict[str, torch.Tensor] = None,
+                relations: Dict[str, torch.Tensor] = None,
+                shortlist: Dict[str, torch.Tensor] = None,
+                shortlist_inds: torch.Tensor = None) -> Dict[str, torch.Tensor]:
+
+        # Tensorize the alias_database - this will only perform the operation once.
+        alias_database = metadata[0]['alias_database']
+        alias_database.tensorize(vocab=self.vocab)
+
+        # Reset the model if needed
+        if reset.any() and (self._state is not None):
+            for layer in range(self._num_layers):
+                h, c = self._state['layer_%i' % layer]
+                h[:, reset, :] = torch.zeros_like(h[:, reset, :])
+                c[:, reset, :] = torch.zeros_like(c[:, reset, :])
+                self._state['layer_%i' % layer] = (h, c)
+        self._recent_entities.reset(reset)
+
+        if entity_ids is not None:
+            output_dict = self._forward_loop(
+                source=source,
+                alias_database=alias_database,
+                mention_type=mention_type,
+                raw_entity_ids=raw_entity_ids,
+                entity_ids=entity_ids,
+                parent_ids=parent_ids,
+                relations=relations,
+                shortlist=shortlist,
+                shortlist_inds=shortlist_inds)
+        else:
+            # TODO: Figure out what we want here - probably to do some king of inference on
+            # entities / mention types.
+            output_dict = {}
+
+        return output_dict
+
     def sample(self,
                source: Dict[str, torch.Tensor],
                target: Dict[str, torch.Tensor],
@@ -328,50 +372,6 @@ class KglmDisc(Model):
         }
         logp = mention_logp + new_entity_logp + derived_entity_logp
         return {'sample': sample, 'logp': logp}
-
-    @overrides
-    def forward(self,  # pylint: disable=arguments-differ
-                source: Dict[str, torch.Tensor],
-                reset: torch.Tensor,
-                metadata: List[Dict[str, Any]],
-                mention_type: torch.Tensor = None,
-                raw_entity_ids: Dict[str, torch.Tensor] = None,
-                entity_ids: Dict[str, torch.Tensor] = None,
-                parent_ids: Dict[str, torch.Tensor] = None,
-                relations: Dict[str, torch.Tensor] = None,
-                shortlist: Dict[str, torch.Tensor] = None,
-                shortlist_inds: torch.Tensor = None) -> Dict[str, torch.Tensor]:
-
-        # Tensorize the alias_database - this will only perform the operation once.
-        alias_database = metadata[0]['alias_database']
-        alias_database.tensorize(vocab=self.vocab)
-
-        # Reset the model if needed
-        if reset.any() and (self._state is not None):
-            for layer in range(self._num_layers):
-                h, c = self._state['layer_%i' % layer]
-                h[:, reset, :] = torch.zeros_like(h[:, reset, :])
-                c[:, reset, :] = torch.zeros_like(c[:, reset, :])
-                self._state['layer_%i' % layer] = (h, c)
-        self._recent_entities.reset(reset)
-
-        if entity_ids is not None:
-            output_dict = self._forward_loop(
-                source=source,
-                alias_database=alias_database,
-                mention_type=mention_type,
-                raw_entity_ids=raw_entity_ids,
-                entity_ids=entity_ids,
-                parent_ids=parent_ids,
-                relations=relations,
-                shortlist=shortlist,
-                shortlist_inds=shortlist_inds)
-        else:
-            # TODO: Figure out what we want here - probably to do some king of inference on
-            # entities / mention types.
-            output_dict = {}
-
-        return output_dict
 
     def _encode_source(self, source: Dict[str, torch.Tensor]) -> torch.Tensor:
 
