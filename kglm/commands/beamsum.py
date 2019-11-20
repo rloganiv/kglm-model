@@ -61,30 +61,18 @@ class BeamSum(Subcommand):
                                default=None,
                                help='Split size (default: whatever iterator was set to)')
 
-        subparser.add_argument('-k', '--beam-width',
+        subparser.add_argument('--beam-width',
                                type=int,
-                               default=None,
+                               default=2,
                                help='Beam width')
+
+        subparser.set_defaults(func=evaluate_from_args)
 
         return subparser
 
 
-def logsumexp(prev: torch.FloatTensor,
-              current: torch.FloatTensor,
-              i: int,
-              samples_per_batch: int):
-    # NOTE: n is number of samples
-    current_avg = current.view(samples_per_batch, -1).sum(dim=-1).logsumexp(dim=0) - np.log(samples_per_batch).item()
-    if prev is None:
-        return current_avg
-    a = torch.max(prev, current_avg)
-    sumexp = torch.exp(prev - a) * i / (i + 1) + torch.exp(current_avg - a) / (i + 1)
-    return a + torch.log(sumexp)
-
-
 def evaluate_perplexity(model: Model,
                         sampler: Model,
-                        num_samples: int,
                         instances: Iterator[Instance],
                         data_iterator: DataIterator,
                         cuda_device: int,
@@ -112,11 +100,12 @@ def evaluate_perplexity(model: Model,
     for batch, _ in generator_tqdm:
 
         # We need sequence length to help compute perplexity
+        batch_size, _ = batch['source']['tokens'].shape
         n_tokens = util.get_text_field_mask(batch['source']).float().sum(dim=-1)
         if denom is None:
-            denom = n_tokens
+            denom = n_tokens.sum()
         else:
-            denom += n_tokens
+            denom += n_tokens.sum()
 
         summand = util.move_to_device(summand, cuda_device)
         batch = util.move_to_device(batch, cuda_device)
@@ -132,13 +121,15 @@ def evaluate_perplexity(model: Model,
             model_output = model(**sample)
 
         model_logp = model_output['logp']
+        model_logp = model_logp.view(batch_size, beam_width)
+        model_logp = torch.logsumexp(model_logp, -1)
 
-        print(torch.exp(-model_logp / n_tokens))
+        print(torch.exp(-model_logp.sum() / n_tokens.sum()))
 
         if summand is None:
-            summand = model_logp
+            summand = model_logp.sum()
         else:
-            summand += model_logp
+            summand += model_logp.sum()
 
     ppl = torch.exp(-summand / denom)
 
@@ -165,6 +156,7 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     sampler = sampler_archive.model
     sampler.eval()
 
+
     # Load the evaluation data. NOTE: We are using the model's reader!
     validation_dataset_reader_params = config.pop('validation_dataset_reader', None)
     if validation_dataset_reader_params is not None:
@@ -185,8 +177,8 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     iterator_params['truncate'] = False
     iterator = DataIterator.from_params(iterator_params)
     iterator.index_with(model.vocab)
-    metrics = evaluate_perplexity(model, sampler, args.num_samples, instances,
-                                  iterator, args.cuda_device, args.beam_width)
+    metrics = evaluate_perplexity(model, sampler, instances, iterator,
+                                  args.cuda_device, args.beam_width)
 
     logger.info('Finished evaluating.')
     logger.info('Metrics:')

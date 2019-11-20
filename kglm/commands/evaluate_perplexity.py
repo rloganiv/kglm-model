@@ -142,8 +142,6 @@ def evaluate_perplexity(model: Model,
     # penalized_summands = []
     trajectory = np.zeros(num_samples // samples_per_batch)
     individual_estimates = np.zeros(num_samples // samples_per_batch)
-    s_probs = np.zeros((348, num_samples // samples_per_batch))
-
 
     weight = None
 
@@ -207,6 +205,8 @@ def evaluate_perplexity(model: Model,
 
         current_avg = summand.view(samples_per_batch, -1).sum(dim=-1).logsumexp(dim=0) - np.log(samples_per_batch).item()
         instance_ppl = torch.exp(-current_avg.sum() / denom.sum())
+        print(denom.sum())
+
 
         weight = logsumexp(weight, summand, i, samples_per_batch)
         ppl = torch.exp(-weight / denom.sum())
@@ -214,7 +214,6 @@ def evaluate_perplexity(model: Model,
         individual_estimates[i] = instance_ppl.item()
         trajectory[i] = ppl.item()
 
-        s_probs[:, i] = torch.exp(-summand.cpu() / denom.cpu()).numpy()
         # summands.append(summand)
         # # penalized_summands.append(penalized_summand)
         # # if i == 0:
@@ -241,8 +240,7 @@ def evaluate_perplexity(model: Model,
         'ppl': ppl,
         # 'upp': upp,
         'trajectory': trajectory,
-        'individual_estimates': individual_estimates,
-        's_probs': s_probs
+        'individual_estimates': individual_estimates
     }
     return metrics
 
@@ -297,6 +295,5 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     if output_file:
         np.save(output_file + '.trajectory.npy', metrics['trajectory'])
         np.save(output_file + '.individual_estimates.npy', metrics['individual_estimates'])
-        np.save(output_file + '.s_probs.npy', metrics['s_probs'])
     return metrics
 

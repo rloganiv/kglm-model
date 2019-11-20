@@ -1,6 +1,7 @@
 """
 Discriminative version of EntityNLM for importance sampling.
 """
+from copy import deepcopy
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -299,7 +300,7 @@ class EntityNLMDiscriminator(Model):
             prev_mention_lengths = mention_lengths[:, timestep]
 
         # Update state
-        self._state['prev_mention_lengths'] = prev_mention_lengths.detach()
+        self._state = {'prev_mention_lengths': prev_mention_lengths.detach()}
 
         return {
                 'logp': logp,
@@ -329,7 +330,7 @@ class EntityNLMDiscriminator(Model):
 
     @property
     def mention_length_lookup(self):
-        mention_length_lookup = [1] + list(range(self._max_mention_length)) * self._max_embeddings
+        mention_length_lookup = [0] + list(range(self._max_mention_length)) * self._max_embeddings
         return torch.LongTensor(mention_length_lookup)
 
     def _annotation_logp(self,
@@ -402,7 +403,9 @@ class EntityNLMDiscriminator(Model):
 
         return logp
 
-    def _top_k_annotations(self, logp: torch.FloatTensor, k: int):
+    def _top_k_annotations(self,
+                           logp: torch.FloatTensor,
+                           k: int):
         """Extracts the top-k annotations.
 
         Parameters
@@ -462,32 +465,39 @@ class EntityNLMDiscriminator(Model):
         # Concat all the dynamic entity embeddings and trace backpointers to make sure the proper
         # embeddings are loaded for each beam.
         all_prev_entity_embeddings = logp.new_zeros(batch_size, len(beam_states), self._max_embeddings, self._embedding_dim)
-        all_prev_num_entities = backpointers.new_zeros(batch_size, len(beam_states))
+        all_prev_num_embeddings = backpointers.new_zeros(batch_size, len(beam_states))
         all_prev_last_seen = backpointers.new_zeros(batch_size, len(beam_states), self._max_embeddings)
         for i, beam_state in enumerate(beam_states):
             self._dynamic_embeddings.load_state_dict(beam_state)
             all_prev_entity_embeddings[:, i] = self._dynamic_embeddings.embeddings
-            all_prev_num_entities[:, i] = self._dynamic_embeddings.num_embeddings
+            all_prev_num_embeddings[:, i] = self._dynamic_embeddings.num_embeddings
             all_prev_last_seen[:, i] = self._dynamic_embeddings.last_seen
 
         new_beam_states: List[Dict[str, Any]] = []
         for i in range(k):
             # Trace backpointers to get correct params
             self._dynamic_embeddings.embeddings = all_prev_entity_embeddings[torch.arange(batch_size), backpointers[:, i]]
-            self._dynamic_embeddings.num_entities = all_prev_num_entities[torch.arange(batch_size), backpointers[:, i]]
+            self._dynamic_embeddings.num_embeddings = all_prev_num_embeddings[torch.arange(batch_size), backpointers[:, i]]
             self._dynamic_embeddings.last_seen = all_prev_last_seen[torch.arange(batch_size), backpointers[:, i]]
 
             # Add and update embeddings
             entity_ids = output['entity_ids'][:, i]
             entity_types = output['entity_types'][:, i]
-            new_entities = entity_ids == self._dynamic_embeddings.num_embeddings
+            new_entities = (entity_ids == 0) & entity_types
+
+            # Gotta make the output handle new entities correctly
+            # TODO: Be a better programmer
+            entity_ids[new_entities] = self._dynamic_embeddings.num_embeddings[new_entities]
+            output['entity_ids'][:, i] = entity_ids
+
+            # Now do this right...
             self._dynamic_embeddings.add_embeddings(timestep, new_entities)
             self._dynamic_embeddings.update_embeddings(hidden=hidden,
                                                        update_indices=entity_ids,
                                                        timestep=timestep,
                                                        mask=entity_types)
 
-            new_beam_states.append(self._dynamic_embeddings.state_dict())
+            new_beam_states.append(deepcopy(self._dynamic_embeddings.state_dict()))
 
         return new_beam_states
 
@@ -744,7 +754,6 @@ class EntityNLMDiscriminator(Model):
         }
 
         return output_dict
-
 
     def reset_states(self, reset: torch.ByteTensor) -> None:
         """Resets the model's internals. Should be called at the start of a new batch."""
