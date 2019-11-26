@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 
 from kglm.data import AliasDatabase
-from kglm.modules import (embedded_dropout, LockedDropout, WeightDrop, KnowledgeGraphLookup,
+from kglm.modules import (embedded_dropout, LockedDropout, WeightDroppedLstm, KnowledgeGraphLookup,
     RecentEntities)
 from kglm.nn.util import nested_enumerate, parallel_sample
 from kglm.training.metrics import Ppl
@@ -83,20 +83,12 @@ class KglmDisc(Model):
         token_embedding_dim = token_embedder.get_output_dim()
         self.entity_embedding_dim = entity_embedding_dim
         self.token_embedding_dim = token_embedding_dim
-
-        rnns: List[torch.nn.Module] = []
-        for i in range(num_layers):
-            if i == 0:
-                input_size = token_embedding_dim
-            else:
-                input_size = hidden_size
-            if (i == num_layers - 1):
-                output_size = token_embedding_dim + 2 * entity_embedding_dim
-            else:
-                output_size = hidden_size
-            rnns.append(torch.nn.LSTM(input_size, output_size, batch_first=True))
-        rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in rnns]
-        self.rnns = torch.nn.ModuleList(rnns)
+        rnn_output_dim = token_embedding_dim + 2 * entity_embedding_dim
+        self._rnn = WeightDroppedLstm(num_layers=num_layers,
+                                      input_embedding_dim=self.token_embedding_dim,
+                                      hidden_size=self._hidden_size,
+                                      output_embedding_dim=rnn_output_dim,
+                                      dropout=self._wdrop)
 
         # Various linear transformations.
         self._fc_mention_type = torch.nn.Linear(
@@ -110,8 +102,6 @@ class KglmDisc(Model):
 
             if tie_weights:
                 self._fc_new_entity.weight = self._entity_embedder.weight
-
-        self._state: Optional[Dict[str, Any]] = None
 
         # Metrics
         self._unk_index = vocab.get_token_index(DEFAULT_OOV_TOKEN)
@@ -146,13 +136,7 @@ class KglmDisc(Model):
         alias_database.tensorize(vocab=self.vocab)
 
         # Reset the model if needed
-        if reset.any() and (self._state is not None):
-            for layer in range(self._num_layers):
-                h, c = self._state['layer_%i' % layer]
-                h[:, reset, :] = torch.zeros_like(h[:, reset, :])
-                c[:, reset, :] = torch.zeros_like(c[:, reset, :])
-                self._state['layer_%i' % layer] = (h, c)
-        self._recent_entities.reset(reset)
+        self.reset_states(reset)
 
         if entity_ids is not None:
             output_dict = self._forward_loop(
@@ -190,13 +174,7 @@ class KglmDisc(Model):
         alias_database.tensorize(vocab=self.vocab)
 
         # Reset the model if needed
-        if reset.any() and (self._state is not None):
-            for layer in range(self._num_layers):
-                h, c = self._state['layer_%i' % layer]
-                h[:, reset, :] = torch.zeros_like(h[:, reset, :])
-                c[:, reset, :] = torch.zeros_like(c[:, reset, :])
-                self._state['layer_%i' % layer] = (h, c)
-        self._recent_entities.reset(reset)
+        self.reset_states(reset)
 
         logp = 0.0
 
@@ -375,41 +353,17 @@ class KglmDisc(Model):
 
     def _encode_source(self, source: Dict[str, torch.Tensor]) -> torch.Tensor:
 
-        # Extract and embed source tokens.
+        # Extract, embed and encode source tokens.
         source_embeddings = embedded_dropout(
             embed=self._token_embedder,
             words=source,
             dropout=self._dropoute if self.training else 0)
         source_embeddings = self._locked_dropout(source_embeddings, self._dropouti)
+        encoded_raw = self._rnn(source_embeddings)
+        encoded = self._locked_dropout(encoded_raw)
 
-        # Encode.
-        current_input = source_embeddings
-        hidden_states = []
-        for layer, rnn in enumerate(self.rnns):
-            # Retrieve previous hidden state for layer.
-            if self._state is not None:
-                prev_hidden = self._state['layer_%i' % layer]
-            else:
-                prev_hidden = None
-            # Forward-pass.
-            output, hidden = rnn(current_input, prev_hidden)
-            output = output.contiguous()
-            # Update hidden state for layer.
-            hidden = tuple(h.detach() for h in hidden)
-            hidden_states.append(hidden)
-            # Apply dropout.
-            if layer == self._num_layers - 1:
-                dropped_output = self._locked_dropout(output, self._dropout)
-            else:
-                dropped_output = self._locked_dropout(output, self._dropouth)
-            current_input = dropped_output
-        encoded = current_input
-
-        alpha_loss = dropped_output.pow(2).mean()
-        beta_loss = (output[:, 1:] - output[:, :-1]).pow(2).mean()
-
-        # Update state.
-        self._state = {'layer_%i' % i: h for i, h in enumerate(hidden_states)}
+        alpha_loss = encoded.pow(2).mean()
+        beta_loss = (encoded_raw[:, 1:] - encoded_raw[:, :-1]).pow(2).mean()
 
         return encoded, alpha_loss, beta_loss
 
@@ -669,18 +623,17 @@ class KglmDisc(Model):
 
     @overrides
     def train(self, mode=True):
-        # TODO: This is a temporary hack to ensure that the internal state resets when the model
-        # switches from training to evaluation. The complication arises from potentially differing
-        # batch sizes (e.g. the `reset` tensor will not be the right size). In future
-        # implementations this should be handled more robustly.
+        # This is a hack to ensure that the internal state resets when the model switches from
+        # training to evaluation. The complication arises from potentially differing batch sizes
+        # (e.g. the `reset` tensor will not be the right size).
         super().train(mode)
-        self._state = None
+        self._rnn.reset()
 
     @overrides
     def eval(self):
-        # TODO: See train.
+        # See train.
         super().eval()
-        self._state = None
+        self._rnn.reset()
 
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         out =  {
@@ -702,3 +655,7 @@ class KglmDisc(Model):
         out['parent_ppl'] = self._parent_ppl.get_metric(reset)
         out['relation_ppl'] = self._relation_ppl.get_metric(reset)
         return out
+
+    def reset_states(self, reset):
+        self._rnn.reset(reset)
+        self._recent_entities.reset(reset)

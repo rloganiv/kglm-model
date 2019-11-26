@@ -97,9 +97,11 @@ class WeightDroppedLstm(torch.nn.Module):
         self._state = {'layer_%i' % i: h for i, h in enumerate(hidden_list)}
         return current_input
 
-    def reset(self, reset: torch.ByteTensor) -> None:
+    def reset(self, reset: torch.ByteTensor = None) -> None:
         """Resets the internal hidden states"""
         # pylint: disable=invalid-name
+        if reset is None:
+            self._state = None
         if self._state is None:
             return
         for layer in range(self._num_layers):
