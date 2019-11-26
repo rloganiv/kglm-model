@@ -77,7 +77,10 @@ class EntityNLMDiscriminator(Model):
         self._max_embeddings = max_embeddings
         self._sos_token = self.vocab.get_token_index('@@START@@', 'tokens')
         self._eos_token = self.vocab.get_token_index('@@END@@', 'tokens')
-        self._rnn = WeightDroppedLstm(num_layers, embedding_dim, hidden_size, variational_dropout_rate)
+        self._rnn = WeightDroppedLstm(num_layers=num_layers,
+                                      input_embedding_dim=embedding_dim,
+                                      hidden_size=hidden_size,
+                                      dropout=variational_dropout_rate)
         self._state: Optional[StateDict] = None
 
         # Input variational dropout

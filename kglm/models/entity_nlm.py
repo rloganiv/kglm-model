@@ -81,7 +81,10 @@ class EntityNLM(Model):
         self._tie_weights = tie_weights
         self._variational_dropout_rate = variational_dropout_rate
         self._dropout_rate = dropout_rate
-        self._rnn = WeightDroppedLstm(num_layers, embedding_dim, hidden_size, variational_dropout_rate)
+        self._rnn = WeightDroppedLstm(num_layers=num_layers,
+                                      input_embedding_dim=embedding_dim,
+                                      hidden_size=hidden_size,
+                                      dropout=variational_dropout_rate)
         self._state: Optional[StateDict] = None
 
         # Input variational dropout
