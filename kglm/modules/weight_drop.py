@@ -46,14 +46,19 @@ class WeightDrop(torch.nn.Module):
 class WeightDroppedLstm(torch.nn.Module):
     def __init__(self,
                  num_layers: int,
-                 embedding_dim: int,
+                 input_embedding_dim: int,
                  hidden_size: int,
-                 dropout: float) -> None:
+                 output_embedding_dim: Optional[int] = None,
+                 dropout: Optional[float] = 0.0) -> None:
         super().__init__()
 
         self._num_layers = num_layers
-        self._embedding_dim = embedding_dim
+        self._input_embedding_dim = input_embedding_dim
         self._hidden_size = hidden_size
+        if output_embedding_dim is not None:
+            self._output_embedding_dim = output_embedding_dim
+        else:
+            self._output_embedding_dim = input_embedding_dim
         self._dropout = dropout
         self._state: Optional[StateDict] = None
 
@@ -61,11 +66,11 @@ class WeightDroppedLstm(torch.nn.Module):
         rnns: List[torch.nn.Module] = []
         for i in range(num_layers):
             if i == 0:
-                input_size = embedding_dim
+                input_size = self._input_embedding_dim
             else:
-                input_size = hidden_size
+                input_size = self._hidden_size
             if i == num_layers - 1:
-                output_size = embedding_dim
+                output_size = self._output_embedding_dim
             else:
                 output_size = hidden_size
             rnns.append(torch.nn.LSTM(input_size, output_size, batch_first=True))
