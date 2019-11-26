@@ -45,12 +45,9 @@ class DynamicEmbedding(Module):
                                                  out_features=embedding_dim,
                                                  bias=False)
 
-        self.register_buffer('embeddings', None)
-        self.register_buffer('num_embeddings', None)
-        self.register_buffer('last_seen', None)
-        # self.embeddings: torch.Tensor = None  # Storage for embeddings
-        # self.num_embeddings: torch.Tensor = None  # Tracks how many embeddings are in use
-        # self.last_seen: torch.Tensor = None  # Tracks last time embedding was seen
+        self.embeddings: torch.Tensor = None  # Storage for embeddings
+        self.num_embeddings: torch.Tensor = None  # Tracks how many embeddings are in use
+        self.last_seen: torch.Tensor = None  # Tracks last time embedding was seen
 
     def reset_states(self, reset: torch.ByteTensor) -> None:
         """
