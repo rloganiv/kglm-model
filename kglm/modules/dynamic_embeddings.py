@@ -244,14 +244,14 @@ class DynamicEmbedding(Module):
         return out
 
     def beam_state(self):
-        return {
-            'embeddings': self.embeddings,
-            'num_embeddings': self.num_embeddings,
-            'last_seen': self.last_seen
+        beam_state = {
+            'embeddings': self.embeddings.detach(),
+            'num_embeddings': self.num_embeddings.detach(),
+            'last_seen': self.last_seen.detach()
         }
+        return beam_state
 
     def load_beam_state(self, beam_state):
         self.embeddings = beam_state.get('embeddings', None)
         self.num_embeddings = beam_state.get('num_embeddings', None)
         self.last_seen = beam_state.get('last_seen', None)
-
