@@ -42,7 +42,7 @@ class EntityDiscTest(KglmModelTestCase):
 
         # Apply to random hidden state
         hidden = torch.randn(batch_size, self.model._embedding_dim)
-        beam_states = [self.model._dynamic_embeddings.state_dict()]
+        beam_states = [self.model._dynamic_embeddings.beam_state()]
         logp = self.model._annotation_logp(hidden, timestep=0, beam_states=beam_states)
 
         # Check that output has correct shape

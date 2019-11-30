@@ -1,5 +1,6 @@
-from typing import Dict, Optional
+from copy import deepcopy
 import logging
+from typing import Dict, Optional
 
 from overrides import overrides
 import torch
@@ -241,3 +242,16 @@ class DynamicEmbedding(Module):
             out['loss'] = loss
 
         return out
+
+    def beam_state(self):
+        return {
+            'embeddings': self.embeddings,
+            'num_embeddings': self.num_embeddings,
+            'last_seen': self.last_seen
+        }
+
+    def load_beam_state(self, beam_state):
+        self.embeddings = beam_state.get('embeddings', None)
+        self.num_embeddings = beam_state.get('num_embeddings', None)
+        self.last_seen = beam_state.get('last_seen', None)
+

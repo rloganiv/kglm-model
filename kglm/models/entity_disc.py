@@ -1,7 +1,6 @@
 """
 Discriminative version of EntityNLM for importance sampling.
 """
-from copy import deepcopy
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -355,7 +354,7 @@ class EntityNLMDiscriminator(Model):
         logp = hidden.new_zeros((batch_size, len(beam_states), self.num_possible_annotations))
 
         for i, beam_state in enumerate(beam_states):
-            self._dynamic_embeddings.load_state_dict(beam_state)
+            self._dynamic_embeddings.load_beam_state(beam_state)
 
             # Entity type log probabilities: (batch_size, 2)
             entity_type_logits = self._entity_type_projection(hidden)
@@ -471,7 +470,7 @@ class EntityNLMDiscriminator(Model):
         all_prev_num_embeddings = backpointers.new_zeros(batch_size, len(beam_states))
         all_prev_last_seen = backpointers.new_zeros(batch_size, len(beam_states), self._max_embeddings)
         for i, beam_state in enumerate(beam_states):
-            self._dynamic_embeddings.load_state_dict(beam_state)
+            self._dynamic_embeddings.load_beam_state(beam_state)
             all_prev_entity_embeddings[:, i] = self._dynamic_embeddings.embeddings
             all_prev_num_embeddings[:, i] = self._dynamic_embeddings.num_embeddings
             all_prev_last_seen[:, i] = self._dynamic_embeddings.last_seen
@@ -500,7 +499,7 @@ class EntityNLMDiscriminator(Model):
                                                        timestep=timestep,
                                                        mask=entity_types)
 
-            new_beam_states.append(deepcopy(self._dynamic_embeddings.state_dict()))
+            new_beam_states.append(self._dynamic_embeddings.beam_state())
 
         return new_beam_states
 
@@ -593,7 +592,7 @@ class EntityNLMDiscriminator(Model):
 
         # Beam search logic
         predictions: List[Dict[str, torch.Tensor]] = []
-        beam_states = [self._dynamic_embeddings.state_dict()]
+        beam_states = [self._dynamic_embeddings.beam_state()]
         output = None
         for timestep in range(sequence_length):
             # Get log probabilities of annotations
