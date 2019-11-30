@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import Dict, List, Tuple
 
 from allennlp.modules.token_embedders import TokenEmbedder
@@ -156,3 +157,9 @@ class RecentEntities:
             else:
                 self._remaining[i][values[i].item()] = self._cutoff + 1
 
+    def beam_state(self):
+        beam_state = {'remaining': self._remaining}
+        return deepcopy(beam_state)
+
+    def load_beam_state(self, beam_state):
+        self._remaining = beam_state.get('remaining', [])
