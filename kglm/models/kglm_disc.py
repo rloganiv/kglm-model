@@ -1,6 +1,8 @@
 import logging
+from copy import deepcopy
+from collections import namedtuple
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from allennlp.data.vocabulary import Vocabulary, DEFAULT_OOV_TOKEN
 from allennlp.modules import TextFieldEmbedder, Seq2SeqEncoder
@@ -9,6 +11,7 @@ from allennlp.nn import InitializerApplicator
 from allennlp.nn.util import (get_text_field_mask, masked_log_softmax, masked_softmax,
     sequence_cross_entropy_with_logits)
 from allennlp.training.metrics import Average, CategoricalAccuracy, F1Measure, SequenceAccuracy
+import numpy as np
 from overrides import overrides
 import torch
 import torch.nn.functional as F
@@ -20,6 +23,14 @@ from kglm.nn.util import nested_enumerate, parallel_sample
 from kglm.training.metrics import Ppl
 
 logger = logging.getLogger(__name__)
+
+
+# Decoding from the KGLM discriminator requires ensuring that:
+#   * New mentions cannot be of recently mentioned entities.
+#   * Related mentions must be related to a recently mentioned entity.
+#   * Ongoing mention cannot continue non-mentions.
+# The following structure tracks this information when performing beam search.
+KglmBeamState = namedtuple('KglmBeamState', ['recent_entities', 'ongoing'])
 
 
 @Model.register('kglm-disc')
@@ -351,6 +362,22 @@ class KglmDisc(Model):
         logp = mention_logp + new_entity_logp + derived_entity_logp
         return {'sample': sample, 'logp': logp}
 
+    def get_raw_entity_ids(self, entity_ids: torch.LongTensor) ->  torch.LongTensor:
+        raw_entity_ids = torch.zeros_like(entity_ids)
+        for *index, entity_id in nested_enumerate(entity_ids.tolist()):
+            token = self.vocab.get_token_from_index(entity_id, 'entity_ids')
+            raw_entity_id = self.vocab.get_token_index(token, 'raw_entity_ids')
+            raw_entity_ids[tuple(index)] = raw_entity_id
+        return raw_entity_ids
+
+    def get_entity_ids(self, raw_entity_ids: torch.LongTensor) ->  torch.LongTensor:
+        entity_ids = torch.zeros_like(raw_entity_ids)
+        for *index, raw_entity_id in nested_enumerate(raw_entity_ids.tolist()):
+            token = self.vocab.get_token_from_index(raw_entity_id, 'raw_entity_ids')
+            entity_id = self.vocab.get_token_index(token, 'entity_ids')
+            entity_ids[tuple(index)] = entity_id
+        return entity_ids
+
     def _encode_source(self, source: Dict[str, torch.Tensor]) -> torch.Tensor:
 
         # Extract, embed and encode source tokens.
@@ -390,7 +417,7 @@ class KglmDisc(Model):
 
     def _new_entity_logits(self,
                            encoded: torch.Tensor,
-                           shortlist: torch.Tensor) -> torch.Tensor:
+                           shortlist: torch.Tensor = None) -> torch.Tensor:
         if self._use_shortlist:
             # Embed the shortlist entries
             shortlist_embeddings = embedded_dropout(
@@ -620,6 +647,451 @@ class KglmDisc(Model):
             loss = loss + self._beta * beta_loss
 
         return {'loss': loss}
+
+    def _next_mention_type_logp(self, next_mention_type_logits, beam_states):
+        """
+        Computes log probabilities of mention type for next token, .e.g, adjusts logits to prevent ongoing non-mentions.
+        Intended for use when performing beam search.
+
+        Parameters
+        ==========
+        next_mention_type_logits: torch.FloatTensor
+            Tensor of shape (batch_size, num_mention_types) containing next mention type logits.
+        beam_states: List[KglmBeamState]
+            List of previous beam states.
+
+        Returns
+        =======
+        next_mention_type_logp:
+            Tensor of shape (batch_size, beam_width, num_mention_types) containing next mention type log probabilities.
+        """
+        beam_width = len(beam_states)
+
+        # Tile the mention_logits, and apply penalty to non-ongoing mentions
+        out = next_mention_type_logits.unsqueeze(1).repeat(1, beam_width, 1)
+        for i, beam_state in enumerate(beam_states):
+            out[~beam_state.ongoing, i, -1] = -1e32
+
+        return F.log_softmax(out, dim=-1)
+
+    def  _next_new_entity_logp(self, next_new_entity_logits, beam_states):
+        """
+        Computes log probabilities of new entity mentions.
+        Intended for use when performing beam search.
+
+        Parameters
+        ==========
+        next_new_entity_logits: torch.FloatTensor
+            Tensor of shape (batch_size, num_entities) containing next new entity logits.
+        beam_states: List[KglmBeamState]
+            List of previous beam states.
+
+        Returns
+        =======
+        next_new_entity_logp:
+            Tensor of shape (batch_size, beam_width, num_mention_types) containing next new entity log probabilities.
+        """
+        beam_width = len(beam_states)
+        # Tile the mention_logits, and apply penalty to non-ongoing mentions
+        out = next_new_entity_logits.unsqueeze(1).repeat(1, beam_width, 1)
+        for j, beam_state in enumerate(beam_states):
+            self._recent_entities.load_beam_state(beam_state.recent_entities)
+            for i, recent_ids in enumerate(self._recent_entities._remaining):
+                for recent_id in recent_ids:
+                    out[i, j, recent_id] = -1e32
+        return F.log_softmax(out, dim=-1)
+
+    def _next_related_entity_logp(self, next_encoded_head, next_encoded_relation, beam_states):
+        """
+        Computes log probabilities of related entity mentions.
+        Intended for use when performing beam search.
+
+        Parameters
+        ==========
+        next_encoded_head: torch.FloatTensor
+            Tensor of shape (batch_size, embedding_dim) of the head encodings.
+        next_encoded_relation: torch.FloatTensor
+            Tensor of shape (batch_size, embedding_dim) of the relation encodings.
+        beam_states: List[KglmBeamState]
+            List of previous beam states.
+
+        Returns
+        =======
+        logp:
+            Tensor of shape (batch_size, beam_width, num_candidates) containing the log
+            probability of the parent/relation combination.
+        And a dictionary containing the annotation data.
+            parent_ids:
+                Tensor of shape (batch_size, beam_width, num_candidates)
+            relation_ids:
+                Tensor of shape (batch_size, beam_width, num_candidates)
+            raw_entity_ids:
+                Tensor of shape (batch_size, beam_width, num_candidates)
+        """
+        batch_size = next_encoded_head.size(0)
+        beam_width = len(beam_states)
+        logp_arr = np.empty((batch_size, beam_width), dtype=object)
+        parent_ids_arr = np.empty((batch_size, beam_width), dtype=object)
+        relations_arr = np.empty((batch_size, beam_width), dtype=object)
+        raw_entity_ids_arr = np.empty((batch_size, beam_width),  dtype=object)
+        for j, beam_state in enumerate(beam_states):
+            # Get the set of candidate parents from the RecentEntities module.
+            # Since we are only considering candidates for a single timestep we can get the parents
+            # directly from the RecentEntities._remaining dictionaries' keys.
+            self._recent_entities.load_beam_state(beam_state.recent_entities)
+            for i, candidate_ids in enumerate(self._recent_entities._remaining):
+                # Cast candidate ids to a tensor, lookup embeddings, and compute score.
+                candidate_ids = torch.LongTensor(list(candidate_ids.keys()),
+                                                 device=next_encoded_head.device)
+                candidate_embeddings = self._entity_embedder(candidate_ids)
+                candidate_logits = torch.mv(candidate_embeddings, next_encoded_head[i])
+                candidate_logp = F.log_softmax(candidate_logits)
+
+                # Lookup relations
+                _, s, r, o = self._knowledge_graph_lookup(candidate_ids)
+                relation_embeddings_list = [self._relation_embedder(_r) for _r in r]
+
+                # Stop early if node is isolated
+                if not s:
+                    logp_arr[i, j] = torch.FloatTensor([], device=next_encoded_head.device)
+                    parent_ids_arr[i, j] = torch.LongTensor([], device=next_encoded_head.device)
+                    relations_arr[i, j] = torch.LongTensor([], device=next_encoded_head.device)
+                    raw_entity_ids_arr[i, j] = torch.LongTensor([], device=next_encoded_head.device)
+                    continue
+
+                # Otherwise compute relation probabilities for each parent and combine
+                temp_logp = []
+                temp_parent_ids = []
+                temp_relations = []
+                temp_raw_entity_ids = []
+                for idx, relation_embeddings in enumerate(relation_embeddings_list):
+                    num_relations = relation_embeddings.size(0)
+                    relation_logits = torch.mv(relation_embeddings, next_encoded_relation[i])
+                    relation_logp = F.log_softmax(relation_logits)
+                    temp_logp.append(candidate_logp[idx] + relation_logp)
+                    temp_parent_ids.append(s[idx].repeat(num_relations))
+                    temp_relations.append(r[idx])
+                    temp_raw_entity_ids.append(o[idx])
+                logp_arr[i, j] = torch.cat(temp_logp)
+                parent_ids_arr[i, j] = torch.cat(temp_parent_ids)
+                relations_arr[i, j] = torch.cat(temp_relations)
+                raw_entity_ids_arr[i, j] = torch.cat(temp_raw_entity_ids)
+
+        num_candidates = max(t.size(0) for t in logp_arr.flatten())
+        logp = next_encoded_head.new_full((batch_size, beam_width, num_candidates), -1e32)
+        parent_ids = next_encoded_head.new_zeros((batch_size, beam_width, num_candidates), dtype=torch.int64)
+        relations = next_encoded_head.new_zeros((batch_size, beam_width, num_candidates), dtype=torch.int64)
+        raw_entity_ids = next_encoded_head.new_zeros((batch_size, beam_width, num_candidates), dtype=torch.int64)
+        for i in range(batch_size):
+            for j in range(beam_width):
+                size = logp_arr[i][j].size(0)
+                logp[i, j, :size] = logp_arr[i][j]
+                parent_ids[i, j, :size] = parent_ids_arr[i][j]
+                relations[i, j, :size] = relations_arr[i][j]
+                raw_entity_ids[i ,j, :size] = raw_entity_ids_arr[i][j]
+
+        annotations = {
+            'parent_ids': parent_ids,
+            'relations': relations,
+            'raw_entity_ids': raw_entity_ids
+        }
+
+        return logp, annotations
+
+    def _top_k_annotations(self,
+                           next_mention_type_logp,
+                           next_new_entity_logp,
+                           next_related_entity_logp,
+                           related_entity_annotations,
+                           output,
+                           k):
+        """
+        Aggregate log probabilities and return top-k results.
+
+        Don't be intimidated by the amount of code - almost all of it relates to various
+        bookkeeping tasks to get the annotations.
+        """
+        # === Bookkeeping ====
+        # Need to get all of the relevant sizes
+        batch_size, beam_width, n_new = next_new_entity_logp.size()
+        n_related = next_related_entity_logp.size(-1)
+
+        # Derive the length of the full tensor: # new + # related + ongoing + unrelated
+        length = n_new + n_related + 2
+        total_logp = next_mention_type_logp.new_empty(batch_size, beam_width, length)
+
+        # For clarity, name the slices
+        new_slice = slice(0, n_new)
+        related_slice = slice(n_new, n_new + n_related)
+        ongoing_slice = -2
+        null_slice = -1
+
+        # === Annotation lookups ===
+        mention_type_lookup = torch.zeros_like(total_logp, dtype=torch.int64)
+        parent_id_lookup = torch.zeros_like(total_logp, dtype=torch.int64)
+        relation_lookup = torch.zeros_like(total_logp, dtype=torch.int64)
+        raw_entity_id_lookup = torch.zeros_like(total_logp, dtype=torch.int64)
+        entity_id_lookup = torch.zeros_like(total_logp, dtype=torch.int64)
+
+        # Mention type
+        mention_type_lookup[:, :, new_slice] = 1
+        mention_type_lookup[:, :, related_slice] = 2
+        mention_type_lookup[:, :, ongoing_slice] = 3
+        mention_type_lookup[:, :, null_slice] = 0
+
+        # New
+        id_range = torch.arange(n_new, device=entity_id_lookup.device).view(1, 1, n_new)
+        entity_id_lookup[:, :, new_slice] = id_range
+        raw_entity_id_lookup[:, :, new_slice] = self.get_raw_entity_ids(id_range)
+
+        # Related
+        parent_id_lookup[:, :, related_slice] = related_entity_annotations['parent_ids']
+        relation_lookup[:, :, related_slice] = related_entity_annotations['relations']
+        raw_entity_id_lookup[:, :, related_slice] = related_entity_annotations['raw_entity_ids']
+        entity_id_lookup[:, :, related_slice] = self.get_entity_ids(related_entity_annotations['raw_entity_ids'])
+
+        # Ongoing
+        if output is not None:
+            parent_id_lookup[:, :, ongoing_slice] =  output['parent_ids']
+            relation_lookup[:, :, ongoing_slice] = output['relations']
+            entity_id_lookup[:, :, ongoing_slice] =  output['entity_ids']
+            raw_entity_id_lookup[:, :, ongoing_slice] = output['raw_entity_ids']
+
+        # === Logp ===
+
+        # Set the mention probabilities
+        total_logp[:, :, new_slice] = next_mention_type_logp[:, :, 1].unsqueeze(-1)
+        total_logp[:, :, related_slice] = next_mention_type_logp[:, :, 2].unsqueeze(-1)
+        total_logp[:, :, ongoing_slice] = next_mention_type_logp[:, :, 3]
+        total_logp[:, :, null_slice] = next_mention_type_logp[:, :, 0]
+
+        # Add the entity probabilities
+        total_logp[:, :, new_slice] += next_new_entity_logp
+        total_logp[:, :, related_slice] += next_related_entity_logp
+
+        # If available add the previous beam probabilities
+        if output is not None:
+            total_logp += output['logp'].unsqueeze(-1)
+
+        # Get the top-k outputs
+        top_logp, top_indices = total_logp.view(batch_size, -1).topk(k, dim=-1)
+        output = {
+            'logp': top_logp,
+            'backpointers': top_indices // length,
+            'mention_types':  mention_type_lookup.view(batch_size, -1).gather(-1, top_indices),
+            'parent_ids':  parent_id_lookup.view(batch_size, -1).gather(-1, top_indices),
+            'relations':  relation_lookup.view(batch_size, -1).gather(-1, top_indices),
+            'entity_ids':  entity_id_lookup.view(batch_size, -1).gather(-1, top_indices),
+            'raw_entity_ids':  raw_entity_id_lookup.view(batch_size, -1).gather(-1, top_indices)
+        }
+        return output
+
+    def _update_beam_states(self, output, beam_states):
+        """
+        Ensure that the correct recent entities modules and ongoing flags are properly taken from
+        the last step and updated using the current predicted outputs.
+        """
+        new_beam_states = []
+        backpointers = output['backpointers']
+        batch_size, beam_width =  backpointers.size()
+        # To facilitate indexing with the backpointers, we'll store the RecentEntities' _remaining
+        # dicts in a numpy array.
+        remaining_dicts = np.empty((batch_size, len(beam_states)), dtype=object)
+        for j, beam_state in enumerate(beam_states):
+            self._recent_entities.load_beam_state(beam_state.recent_entities)
+            for i in range(batch_size):
+                remaining_dicts[i, j] = self._recent_entities._remaining[i]
+
+        for i in range(beam_width):
+            # Everything but null mention types can be ongoing in next step.
+            ongoing = output['mention_types'][:, i] != 0
+
+            # Trace backpointers to retrieve correct recent entities dicts, and update using the
+            # current output.
+            bp = backpointers[:, i].cpu().numpy()
+            remaining = remaining_dicts[np.arange(batch_size), bp].tolist()
+            self._recent_entities.load_beam_state({'remaining': remaining})
+            self._recent_entities(output['entity_ids'][:, i].unsqueeze(-1))
+
+            # Add beam states
+            new_beam_states.append(
+                KglmBeamState(recent_entities=self._recent_entities.beam_state(),
+                              ongoing=ongoing)
+            )
+
+        return new_beam_states
+
+    def _to_raw_entity_tokens(self, x):
+        """
+        Returns the raw entity id strings for a nested list of raw entity ids
+        """
+        if isinstance(x, list):
+            return [self._to_raw_entity_tokens(i) for i in x]
+        elif isinstance(x, int):
+            return self.vocab.get_token_from_index(x, 'raw_entity_ids')
+        else:
+            return ValueError('Expecting a nested list of raw entity ids')
+
+    def _trace_backpointers(self,
+                            source,
+                            target,
+                            reset,
+                            metadata,
+                            k,
+                            predictions):
+        """
+        Traces backpointers to collect the top-k annotations.
+        """
+        batch_size, seq_length = source['tokens'].shape
+        alias_database = metadata[0]['alias_database']
+
+        new_source = {key: value.unsqueeze(1).repeat(1, k, 1).view(batch_size * k, -1) for key, value in source.items()}
+        new_target = {key: value.unsqueeze(1).repeat(1, k, 1).view(batch_size * k, -1) for key, value in target.items()}
+        new_reset = reset.unsqueeze(1).repeat(1, k).view(batch_size * k)
+        new_metadata = [metadata[i] for i in range(batch_size) for _ in range(k)]
+
+        mention_types = []
+        parent_ids = []
+        relations = []
+        raw_entity_ids = []
+        entity_ids = []
+
+        backpointer = None
+
+        for prediction in reversed(predictions):
+            if backpointer is None:
+                mention_types.append(prediction['mention_types'])
+                parent_ids.append(prediction['parent_ids'])
+                relations.append(prediction['relations'])
+                raw_entity_ids.append(prediction['raw_entity_ids'])
+                entity_ids.append(prediction['entity_ids'])
+            else:
+                mention_types.append(prediction['mention_types'].gather(1, backpointer))
+                parent_ids.append(prediction['parent_ids'].gather(1, backpointer))
+                relations.append(prediction['relations'].gather(1, backpointer))
+                raw_entity_ids.append(prediction['raw_entity_ids'].gather(1, backpointer))
+                entity_ids.append(prediction['entity_ids'].gather(1, backpointer))
+            if backpointer is None:
+                backpointer = prediction['backpointers']
+            else:
+                backpointer = prediction['backpointers'].gather(1, backpointer)
+
+        mention_types = torch.stack(mention_types[::-1], dim=-1).view(batch_size * k, -1)
+        parent_ids = torch.stack(parent_ids[::-1], dim=-1).view(batch_size * k, -1)
+        relations = torch.stack(relations[::-1], dim=-1).view(batch_size * k, -1)
+        raw_entity_ids = torch.stack(raw_entity_ids[::-1], dim=-1).view(batch_size * k, -1)
+        entity_ids = torch.stack(entity_ids[::-1], dim=-1).view(batch_size * k, -1)
+
+        # One final bit of complexity - we need to get copy indices.
+        raw_entity_tokens = self._to_raw_entity_tokens(raw_entity_ids.tolist())
+        target_tokens = [x['target_tokens'] for x in new_metadata]
+        alias_copy_inds_list = alias_database.nested_token_to_uid(raw_entity_tokens, target_tokens)
+        alias_copy_inds = torch.tensor(alias_copy_inds_list, device=mention_types.device)
+
+        return {
+            'source': new_source,
+            'target': new_target,
+            'reset': new_reset,
+            'metadata': new_metadata,
+            'mention_types': mention_types,
+            'parent_ids': parent_ids,
+            'relations': relations,
+            'raw_entity_ids': raw_entity_ids,
+            'entity_ids': entity_ids,
+            'alias_copy_inds': alias_copy_inds
+        }
+
+    def beam_search(self,
+                    source: Dict[str, torch.Tensor],
+                    target: Dict[str, torch.Tensor],
+                    reset: torch.ByteTensor,
+                    metadata: Dict[str, Any],
+                    k: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Obtain the top-k (approximately) most likely predictions from the model using beam
+        search. Unlike typical beam search all of the beam states are returned instead of just
+        the most likely.
+
+        The returned candidates are intended to be marginalized over to obtain an upper bound for
+        the token-level perplexity of the EntityNLM.
+
+        Parameters
+        ==========
+        source : ``Dict[str, torch.Tensor]``
+            A tensor of shape ``(batch_size, sequence_length)`` containing the sequence of
+            tokens.
+        reset : ``torch.ByteTensor``
+            Whether or not to reset the model's state. This should be done at the start of each
+            new sequence.
+        metadata : ``Dict[str, Any]``
+            Assorted metadata. Should contain the alias database, as well as the token strings (needed to retrieve copy indices).
+        k : ``int``
+            Number of predictions to return.
+
+        Returns
+        =======
+        predictions : ``torch.Tensor``
+            A tensor of shape ``(batch_size * k, sequence_length)`` containing the top-k
+            predictions.
+        logp : ``torch.Tensor``
+            The log-probabilities of each prediction. WARNING: These are returned purely for
+            diagnostic purposes and should not be factored in the the perplexity calculation.
+        """
+        # We want the output fields to be properly aligned for the generative model, which makes
+        # predictions for the **target** tokens! Hence, we feed them as the input (instead of the
+        # source tokens).
+        batch_size, sequence_length = target['tokens'].shape
+
+        # Reset the model's internal state.
+        if not reset.all():
+            raise RuntimeError('Detecting that not all states are being `reset` (e.g., that input '
+                               'sequences have been split). Cannot predict top-K annotations in '
+                               'this setting!')
+        self.reset_states(reset)
+
+        # The following tensors can be computed using only the encoder:
+        #   * The 3-headed encodings.
+        #   * The (unconstrained) mention type logits.
+        #   * The (unconstrained) new entity logits.
+        # Although we can compute the mention type and new entity logits, we will need to compute
+        # the log-probabilities during decoding due to the following constraints:
+        #   * `mention_type` = CONTINUE only if the previous token type was a new or ongoing mention.
+        #   * `new_entity` cannot be in recent entities.
+        encoded, *_ = self._encode_source(target['tokens'])
+        splits = [self.token_embedding_dim] + [self.entity_embedding_dim] * 2
+        encoded_token, encoded_head, encoded_relation = encoded.split(splits, dim=-1)
+        mention_type_logits = self._fc_mention_type(encoded_token)
+        new_entity_logits = self._new_entity_logits(encoded_head + encoded_relation)
+
+        # Beam search logic
+        predictions:  List[Dict[str, torch.Tensor]] = []
+        beam_states = [KglmBeamState(recent_entities=self._recent_entities.beam_state(),
+                                     ongoing=torch.zeros_like(reset))]
+        output = None
+
+        for timestep in range(sequence_length):
+            # Get log probabilities of all next states
+            next_mention_type_logp = self._next_mention_type_logp(mention_type_logits[:, timestep],
+                                                                  beam_states)
+            next_new_entity_logp = self._next_new_entity_logp(new_entity_logits[:, timestep],
+                                                              beam_states)
+            next_related_entity_logp, related_entity_annotations = self._next_related_entity_logp(
+                encoded_head[:, timestep],
+                encoded_relation[:, timestep],
+                beam_states)
+
+            output = self._top_k_annotations(next_mention_type_logp,
+                                             next_new_entity_logp,
+                                             next_related_entity_logp,
+                                             related_entity_annotations,
+                                             output,
+                                             k)
+            beam_states = self._update_beam_states(output, beam_states)
+            predictions.append(output)
+
+        annotation = self._trace_backpointers(source, target, reset, metadata, k, predictions)
+
+        return annotation
 
     @overrides
     def train(self, mode=True):

@@ -90,6 +90,14 @@ class AliasDatabase:
                    id_array_lookup=id_array_lookup,
                    token_to_entity_lookup=token_to_entity_lookup)
 
+    def nested_token_to_uid(self, e, t):
+        if isinstance(e, list) and isinstance(t, list):
+            return [self.nested_token_to_uid(_e, _t) for _e, _t in zip(e, t)]
+        elif isinstance(e, str) and isinstance(t, str):
+            return self.token_to_uid(e, t)
+        else:
+            raise ValueError(f'Encountered error looking up copy indices:\ne:{e}\nt:{t}')
+
     def token_to_uid(self, entity: str, token: str) -> int:
         if entity in self._id_map_lookup:
             id_map = self._id_map_lookup[entity]

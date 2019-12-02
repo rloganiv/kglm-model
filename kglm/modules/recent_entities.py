@@ -73,7 +73,6 @@ class RecentEntities:
                 k = candidate_lookup[i][parent_id]
                 candidate_mask[i, j + 1 : j + self._cutoff + 1, k] = 1
                 # Track how many sequence elements remain
-                remainder = sequence_length - (j + self._cutoff + 1)
                 self._remaining[i][parent_id] = (j + self._cutoff + 1) - sequence_length
 
         # Remove any ids for non-recent parents (e.g. those without remaining mask)
