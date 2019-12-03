@@ -96,27 +96,22 @@ class EntityNLM(Model):
                                                        out_features=2,
                                                        bias=False)
         self._dynamic_embeddings = DynamicEmbedding(embedding_dim=embedding_dim,
-                                                    max_embeddings=max_embeddings)
+                                                    max_embeddings=max_embeddings,
+                                                    tied_weight=self._entity_type_projection.weight)
 
         # For mention length prediction
         self._mention_length_projection = torch.nn.Linear(in_features=2*embedding_dim,
                                                           out_features=max_mention_length)
 
         # For next word prediction
-        self._dummy_context_embedding = Parameter(F.normalize(torch.randn(1, embedding_dim))) # TODO: Maybe squeeze
         self._entity_output_projection = torch.nn.Linear(in_features=embedding_dim,
                                                          out_features=embedding_dim,
                                                          bias=False)
-        self._context_output_projection = torch.nn.Linear(in_features=embedding_dim,
-                                                          out_features=embedding_dim,
-                                                          bias=False)
         self._vocab_projection = torch.nn.Linear(in_features=embedding_dim,
                                                  out_features=vocab.get_vocab_size('tokens'))
         if tie_weights:
             self._vocab_projection.weight = self._text_field_embedder._token_embedders['tokens'].weight  # pylint: disable=W0212
 
-        # self._perplexity = Perplexity()
-        # self._unknown_penalized_perplexity = UnknownPenalizedPerplexity(self.vocab)
         self._entity_type_accuracy = CategoricalAccuracy()
         self._entity_id_accuracy = CategoricalAccuracy()
         self._mention_length_accuracy = CategoricalAccuracy()
@@ -227,7 +222,7 @@ class EntityNLM(Model):
             contexts = self._state['prev_contexts']
             sequence_length += 1
         else:
-            contexts = self._dummy_context_embedding.repeat(batch_size, 1)
+            contexts = tokens['tokens'].new_zeros(batch_size, self._embedding_dim, dtype=torch.float32)
 
         # Embed tokens and get RNN hidden state.
         mask = get_text_field_mask(tokens).byte()
@@ -343,17 +338,23 @@ class EntityNLM(Model):
 
             # Always predict the next word. This is done using the hidden state and contextual bias.
             entity_embeddings = self._dynamic_embeddings.embeddings[next_entity_types, next_entity_ids[next_entity_types]]
-            entity_embeddings = self._entity_output_projection(entity_embeddings)
+            # entity_embeddings = self._entity_output_projection(entity_embeddings)
             context_embeddings = contexts[~next_entity_types]
-            context_embeddings = self._context_output_projection(context_embeddings)
+            # context_embeddings = self._context_output_projection(context_embeddings)
+
+            # Combine entity and context embeddings
+            combined_embeddings = torch.zeros_like(current_hidden)
+            if next_entity_types.any():
+                combined_embeddings[next_entity_types] = entity_embeddings
+            if (~next_entity_types).any():
+                combined_embeddings[~next_entity_types] = context_embeddings
+
+            # Project
+            combined_embeddings_proj = self._entity_output_projection(combined_embeddings)
 
             # The checks in the following block of code are required to prevent adding empty
             # tensors to vocab_features (which causes a floating point error).
-            vocab_features = current_hidden.clone()
-            if next_entity_types.any():
-                vocab_features[next_entity_types] = vocab_features[next_entity_types] + entity_embeddings
-            if (~next_entity_types).any():
-                vocab_features[~next_entity_types] = vocab_features[~next_entity_types] + context_embeddings
+            vocab_features = current_hidden + combined_embeddings_proj
             vocab_logits = self._vocab_projection(vocab_features[next_mask & current_mask])
             vocab_logp = F.log_softmax(vocab_logits, -1)
             _vocab_loss = -vocab_logp.gather(-1, next_tokens[next_mask & current_mask].unsqueeze(-1))
@@ -372,7 +373,7 @@ class EntityNLM(Model):
             #                                    mask=next_mask.float())
 
             # Lastly update contexts
-            contexts = current_hidden
+            contexts = combined_embeddings
 
         self._perplexity(vocab_loss, mask.sum())
 
@@ -420,7 +421,7 @@ class EntityNLM(Model):
             self._state['prev_entity_types'][reset] = 0
             self._state['prev_entity_ids'][reset] = 0
             self._state['prev_mention_lengths'][reset] = 0
-            self._state['prev_contexts'][reset] = 0
+            self._state['prev_contexts'][reset] = 0.0
 
         # Reset the dynamic embeddings
         self._dynamic_embeddings.reset_states(reset)
@@ -437,13 +438,11 @@ class EntityNLM(Model):
         # batch sizes (e.g. the `reset` tensor will not be the right size). In future
         # implementations this should be handled more robustly.
         super().train(mode)
-        self._state = None
 
     @overrides
     def eval(self):
         # TODO: See train.
         super().eval()
-        self._state = None
 
     @overrides
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
