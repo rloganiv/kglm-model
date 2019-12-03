@@ -233,8 +233,6 @@ class Conll2012JsonlReader(DatasetReader):
                          tokens: List[str],
                          clusters: Dict[str, List[Tuple[int, int]]]) -> Instance:
         # pylint: disable=arguments-differ
-        tokens = [_normalize_word(x, self._replace_numbers) for x in tokens]
-        tokens = ['@@START@@', *tokens, '@@END@@']
         fields = {'source': TextField([Token(x) for x in tokens], self._token_indexers)}
 
         entity_types = np.zeros(shape=(len(tokens),))
@@ -244,9 +242,9 @@ class Conll2012JsonlReader(DatasetReader):
         for i, cluster in enumerate(clusters.values()):
             for span in cluster:
                 start, end = span
-                entity_types[(start + 1 - self._offset):(end + 1 - self._offset)] = 1
-                entity_ids[(start + 1 - self._offset):(end + 1 - self._offset)] = i + 1
-                mention_lengths[(start + 1 - self._offset):(end + 1 - self._offset)] = np.arange(end - start, 0, step=-1) - 1
+                entity_types[(start - self._offset):(end - self._offset)] = 1
+                entity_ids[(start - self._offset):(end - self._offset)] = i + 1
+                mention_lengths[(start - self._offset):(end - self._offset)] = np.arange(end - start, 0, step=-1) - 1
 
         fields['entity_types'] = SequentialArrayField(entity_types, dtype=np.uint8)
         fields['entity_ids'] = SequentialArrayField(entity_ids, dtype=np.int64)
