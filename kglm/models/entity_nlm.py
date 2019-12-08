@@ -221,14 +221,16 @@ class EntityNLM(Model):
             mention_lengths = torch.cat((self._state['prev_mention_lengths'], mention_lengths), dim=1)
             contexts = self._state['prev_contexts']
             sequence_length += 1
+            prev_t = self._state['prev_t']
         else:
             contexts = tokens['tokens'].new_zeros(batch_size, self._embedding_dim, dtype=torch.float32)
+            prev_t = tokens['tokens'].new_zeros(batch_size)
 
         # Embed tokens and get RNN hidden state.
         mask = get_text_field_mask(tokens).byte()
         embeddings = self._text_field_embedder(tokens)
         embeddings = self._variational_dropout(embeddings)
-        hidden = self._rnn(embeddings)
+        hidden = self._rnn(embeddings[:,:-1])  # Otherwise will double count on splits
 
         # Initialize losses
         entity_type_loss = 0.0
@@ -264,7 +266,7 @@ class EntityNLM(Model):
             # We also perform updates of the currently observed entities.
             self._dynamic_embeddings.update_embeddings(hidden=current_hidden,
                                                        update_indices=current_entity_ids,
-                                                       timestep=timestep,
+                                                       timestep=prev_t,
                                                        mask=current_entity_types)
 
             # This part is a little counter-intuitive. Because the above code adds a new embedding
@@ -302,7 +304,7 @@ class EntityNLM(Model):
                 if predict_em.any():
                     # Equation 4 in the paper.
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
-                                                                            timestep=timestep,
+                                                                            timestep=prev_t,
                                                                             target=next_entity_ids,
                                                                             mask=predict_em)
                     _entity_id_loss = -entity_id_prediction_outputs['loss']
@@ -374,6 +376,12 @@ class EntityNLM(Model):
 
             # Lastly update contexts
             contexts = combined_embeddings
+            prev_t += 1
+
+            # And to be super careful, we want to reset any rnn hidden states
+            # if the current token is padding (this could impact performance at
+            # the start of a sequence).
+            self._rnn.reset(~current_mask)
 
         self._perplexity(vocab_loss, mask.sum())
 
@@ -390,6 +398,7 @@ class EntityNLM(Model):
         logger.debug('Vocab loss: %0.4f', vocab_loss)
         total_loss = entity_type_loss + entity_id_loss + mention_length_loss + vocab_loss
 
+
         output_dict = {
                 'entity_type_loss': entity_type_loss,
                 'entity_id_loss': entity_id_loss,
@@ -405,7 +414,8 @@ class EntityNLM(Model):
             'prev_entity_types': entity_types[:, -1].unsqueeze(1).detach(),
             'prev_entity_ids': entity_ids[:, -1].unsqueeze(1).detach(),
             'prev_mention_lengths': mention_lengths[:, -1].unsqueeze(1).detach(),
-            'prev_contexts': contexts.detach()
+            'prev_contexts': contexts.detach(),
+            'prev_t': prev_t.detach()
         }
 
         return output_dict
@@ -421,6 +431,7 @@ class EntityNLM(Model):
             self._state['prev_entity_types'][reset] = 0
             self._state['prev_entity_ids'][reset] = 0
             self._state['prev_mention_lengths'][reset] = 0
+            self._state['prev_t'][reset] = 0
             self._state['prev_contexts'][reset] = 0.0
 
         # Reset the dynamic embeddings

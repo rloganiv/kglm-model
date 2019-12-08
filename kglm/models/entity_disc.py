@@ -91,7 +91,8 @@ class EntityNLMDiscriminator(Model):
                                                        out_features=2,
                                                        bias=False)
         self._dynamic_embeddings = DynamicEmbedding(embedding_dim=embedding_dim,
-                                                    max_embeddings=max_embeddings)
+                                                    max_embeddings=max_embeddings,
+                                                    tied_weight=self._entity_type_projection.weight)
 
         # For mention length prediction
         self._mention_length_projection = torch.nn.Linear(in_features=2*embedding_dim,
@@ -197,9 +198,11 @@ class EntityNLMDiscriminator(Model):
             self.reset_states(reset)
 
         if self._state is None:
-            prev_mention_lengths = source['tokens'].new_ones(batch_size)
+            prev_mention_lengths = source['tokens'].new_zeros(batch_size)
+            prev_t = source['tokens'].new_zeros(batch_size)
         else:
             prev_mention_lengths = self._state['prev_mention_lengths']
+            prev_t = self._state['prev_t']
 
         # Embed tokens and get RNN hidden state.
         mask = get_text_field_mask(source)
@@ -248,7 +251,7 @@ class EntityNLMDiscriminator(Model):
                 if predict_em.any():
                     # Predict entity ids
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
-                                                                            timestep=timestep,
+                                                                            timestep=prev_t,
                                                                             mask=predict_em)
                     entity_id_logits = entity_id_prediction_outputs['logits'] / temperature
                     entity_id_mask = entity_id_prediction_outputs['logit_mask']
@@ -284,7 +287,7 @@ class EntityNLMDiscriminator(Model):
                 self._dynamic_embeddings.add_embeddings(timestep, new_entities)
                 self._dynamic_embeddings.update_embeddings(hidden=current_hidden,
                                                            update_indices=entity_ids[:, timestep],
-                                                           timestep=timestep,
+                                                           timestep=prev_t,
                                                            mask=predict_em)
 
             # If the previous mentions are ongoing, we assign the output deterministically. Mention
@@ -300,9 +303,11 @@ class EntityNLMDiscriminator(Model):
 
             # Update mention lengths for next timestep
             prev_mention_lengths = mention_lengths[:, timestep]
+            prev_t += 1
 
         # Update state
-        self._state = {'prev_mention_lengths': prev_mention_lengths.detach()}
+        self._state = {'prev_mention_lengths': prev_mention_lengths.detach(),
+                       'prev_t': prev_t.detach()}
 
         return {
                 'logp': logp,
@@ -337,7 +342,7 @@ class EntityNLMDiscriminator(Model):
 
     def _annotation_logp(self,
                          hidden: torch.FloatTensor,
-                         timestep: int,
+                         timestep: torch.LongTensor,
                          beam_states: List[Dict[str, Any]]) -> torch.Tensor:
         """Computes the log-probability of all possible annotations for a single beam state.
 
@@ -361,6 +366,8 @@ class EntityNLMDiscriminator(Model):
             entity_type_logp = F.log_softmax(entity_type_logits, -1)
 
             # Entity id log probabilities: (batch_size, max_embeddings)
+            # Should be okay to use timestep instead of prev_t since there's no
+            # splitting in beam search.
             entity_id_logits = self._dynamic_embeddings(hidden, timestep)['logits']
             entity_id_logp = F.log_softmax(entity_id_logits, -1)
 
@@ -452,7 +459,7 @@ class EntityNLMDiscriminator(Model):
 
     def _update_beam_states(self,
                             hidden: torch.FloatTensor,
-                            timestep: int,
+                            timestep: torch.LongTensor,
                             beam_states: List[Dict[str, Any]],
                             output: Dict[str, torch.Tensor]) -> List[Dict[str, Any]]:
         """
@@ -493,6 +500,8 @@ class EntityNLMDiscriminator(Model):
             output['entity_ids'][:, i] = entity_ids
 
             # Now do this right...
+            # Should be okay to use timestep instead of prev_t since there's no
+            # splitting in beam search.
             self._dynamic_embeddings.add_embeddings(timestep, new_entities)
             self._dynamic_embeddings.update_embeddings(hidden=hidden,
                                                        update_indices=entity_ids,
@@ -585,6 +594,7 @@ class EntityNLMDiscriminator(Model):
                                'this setting!')
         self.reset_states(reset)
         prev_mention_lengths = source['tokens'].new_zeros(batch_size)
+        prev_t = source['tokens'].new_zeros(batch_size)
 
         # Embed and encode the tokens up front.
         embeddings = self._text_field_embedder(source)
@@ -597,7 +607,7 @@ class EntityNLMDiscriminator(Model):
         for timestep in range(sequence_length):
             # Get log probabilities of annotations
             # (batch_size, k, num_annotations)
-            logp = self._annotation_logp(hidden[:, timestep], timestep, beam_states)
+            logp = self._annotation_logp(hidden[:, timestep], prev_t, beam_states)
             # Accout for ongoing mentions
             logp = self._adjust_for_ongoing_mentions(logp, output)
             # Add to cumulative log probabilities of beams (which have shape (batch_size, k))
@@ -605,8 +615,9 @@ class EntityNLMDiscriminator(Model):
                 logp += output['logp'].unsqueeze(-1)
 
             output = self._top_k_annotations(logp, k)
-            beam_states = self._update_beam_states(hidden[:, timestep], timestep, beam_states, output)
+            beam_states = self._update_beam_states(hidden[:, timestep], prev_t, beam_states, output)
             predictions.append(output)
+            prev_t = prev_t + 1
 
         # Trace backpointers to get annotation.
         annotation = self._trace_backpointers(source, reset, k, predictions)
@@ -653,8 +664,10 @@ class EntityNLMDiscriminator(Model):
         # Need to track previous mention lengths in order to know when to measure loss.
         if self._state is None:
             prev_mention_lengths = mention_lengths.new_zeros(batch_size)
+            prev_t = mention_lengths.new_zeros(batch_size)
         else:
             prev_mention_lengths = self._state['prev_mention_lengths']
+            prev_t = self._state['prev_t']
 
         # Embed tokens and get RNN hidden state.
         mask = get_text_field_mask(tokens)
@@ -701,7 +714,7 @@ class EntityNLMDiscriminator(Model):
                     modified_entity_ids = current_entity_ids.clone()
                     modified_entity_ids[modified_entity_ids == self._dynamic_embeddings.num_embeddings] = 0
                     entity_id_prediction_outputs = self._dynamic_embeddings(hidden=current_hidden,
-                                                                            timestep=timestep,
+                                                                            timestep=prev_t,
                                                                             target=modified_entity_ids,
                                                                             mask=predict_em)
                     _entity_id_loss = -entity_id_prediction_outputs['loss']
@@ -730,10 +743,11 @@ class EntityNLMDiscriminator(Model):
             # We also perform updates of the currently observed entities.
             self._dynamic_embeddings.update_embeddings(hidden=current_hidden,
                                                        update_indices=current_entity_ids,
-                                                       timestep=timestep,
+                                                       timestep=prev_t,
                                                        mask=current_entity_types)
 
             prev_mention_lengths = current_mention_lengths
+            prev_t += 1
 
         # Normalize the losses
         entity_type_loss = entity_type_loss / mask.sum()
@@ -752,7 +766,8 @@ class EntityNLMDiscriminator(Model):
 
         # Update the model state
         self._state = {
-            'prev_mention_lengths': mention_lengths[:, -1].detach()
+            'prev_mention_lengths': mention_lengths[:, -1].detach(),
+            'prev_t': prev_t.detach()
         }
 
         return output_dict
@@ -762,6 +777,7 @@ class EntityNLMDiscriminator(Model):
         if reset.any() and (self._state is not None):
             # Zero out any previous elements
             self._state['prev_mention_lengths'][reset] = 0
+            self._state['prev_t'][reset] = 0
 
         # Reset the dynamic embeddings and lstm
         self._dynamic_embeddings.reset_states(reset)
