@@ -6,12 +6,6 @@
     },
     "dataset_reader": {
         "type": "conll2012_jsonl",
-        "token_indexers": {
-            "tokens": {
-                "type": "single_id",
-                "lowercase_tokens": true
-            }
-        }
     },
     "train_data_path": "data/conll-2012/processed/train.jsonl",
     "validation_data_path": "data/conll-2012/processed/dev.jsonl",

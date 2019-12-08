@@ -53,7 +53,7 @@
         "num_epochs": 750,
         "optimizer": {
             "type": "adam",
-            "lr": 0.0003
+            "lr": 0.0001
         }
     },
     "vocabulary": {
