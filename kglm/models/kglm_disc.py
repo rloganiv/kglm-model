@@ -174,7 +174,7 @@ class KglmDisc(Model):
                metadata: Dict[str, Any],
                alias_copy_inds: torch.Tensor,
                shortlist: Dict[str, torch.Tensor] = None,
-               temperature: float,
+               temperature: float = 1.0,
                **kwargs) -> Dict[str, Any]:  # **kwargs intended to eat the other fields if they are provided.
         """
         Sampling annotations for the generative model. Note that unlike forward, this function
