@@ -1,9 +1,12 @@
+import logging
 from typing import Dict, List, Optional, Tuple
 
 from overrides import overrides
 import torch
 from torch.nn import Parameter
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 
 LstmState = Tuple[torch.FloatTensor, torch.FloatTensor]
@@ -101,6 +104,10 @@ class WeightDroppedLstm(torch.nn.Module):
         """Resets the internal hidden states"""
         # pylint: disable=invalid-name
         if reset is None:
+            logger.debug('Fully resetting LSTM state')
+            self._state = None
+        elif reset.all():
+            logger.debug('Fully resetting LSTM state')
             self._state = None
         if self._state is None:
             return
@@ -109,3 +116,4 @@ class WeightDroppedLstm(torch.nn.Module):
             h[:, reset, :] = torch.zeros_like(h[:, reset, :])
             c[:, reset, :] = torch.zeros_like(c[:, reset, :])
             self._state['layer_%i' % layer] = (h, c)
+
