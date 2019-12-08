@@ -5,10 +5,11 @@ Dockerfile
 old-results/
 .git/
 .gitignore
+.ipynb_checkpoints/
 .mypy_cache
 .pytest_cache/
-results
-scripts
+results/
+scripts/
 .travis.yml
 .venv
 .vscode
