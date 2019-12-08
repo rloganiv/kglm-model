@@ -140,7 +140,7 @@ class KglmDisc(Model):
                 parent_ids: Dict[str, torch.Tensor] = None,
                 relations: Dict[str, torch.Tensor] = None,
                 shortlist: Dict[str, torch.Tensor] = None,
-                shortlist_inds: torch.Tensor = None) -> Dict[str, torch.Tensor]:
+                shortlist_inds: torch.Tensor = None, **kwargs) -> Dict[str, torch.Tensor]:
 
         # Tensorize the alias_database - this will only perform the operation once.
         alias_database = metadata[0]['alias_database']
@@ -174,6 +174,7 @@ class KglmDisc(Model):
                metadata: Dict[str, Any],
                alias_copy_inds: torch.Tensor,
                shortlist: Dict[str, torch.Tensor] = None,
+               temperature: float,
                **kwargs) -> Dict[str, Any]:  # **kwargs intended to eat the other fields if they are provided.
         """
         Sampling annotations for the generative model. Note that unlike forward, this function
@@ -200,7 +201,7 @@ class KglmDisc(Model):
         logp = encoded.new_zeros(batch_size)
 
         # Compute new mention logits
-        mention_logits = self._fc_mention_type(encoded_token)
+        mention_logits = self._fc_mention_type(encoded_token) / temperature
         mention_probs = F.softmax(mention_logits, dim=-1)
         mention_type = parallel_sample(mention_probs)
         _mention_logp = mention_probs.gather(-1, mention_type.unsqueeze(-1)).log()
@@ -209,7 +210,7 @@ class KglmDisc(Model):
 
         # Compute entity logits
         new_entity_mask = mention_type.eq(1)
-        new_entity_logits = self._new_entity_logits(encoded_head + encoded_relation, shortlist)
+        new_entity_logits = self._new_entity_logits(encoded_head + encoded_relation, shortlist) / temperature
         if self._use_shortlist:
             # If using shortlist, then samples are indexed w.r.t the shortlist and entity_ids must be looked up
             shortlist_mask = get_text_field_mask(shortlist)
@@ -270,7 +271,7 @@ class KglmDisc(Model):
 
             # Compute logits w.r.t **current** hidden state only
             current_head_encoding = encoded_head[:, i].unsqueeze(1)
-            selection_logits = torch.bmm(current_head_encoding, candidate_embeddings.transpose(1, 2))
+            selection_logits = torch.bmm(current_head_encoding, candidate_embeddings.transpose(1, 2)) / temperature
             selection_probs = masked_softmax(selection_logits, candidate_mask)
 
             # Only sample if the is at least one viable candidate (e.g. if a sampling distribution
@@ -305,7 +306,7 @@ class KglmDisc(Model):
                 # Compute the score for each relation w.r.t the current encoding. NOTE: In the loss
                 # code index has a slice. We don't need that here since there is always a
                 # **single** parent.
-                logits = torch.mv(relation_embedding, current_relation_encoding[index])
+                logits = torch.mv(relation_embedding, current_relation_encoding[index]) / temperature
                 # Convert to probability
                 tail_probs = F.softmax(logits, dim=-1)
                 # Sample
@@ -467,11 +468,11 @@ class KglmDisc(Model):
         loss = -log_probs.gather(-1, target_inds.unsqueeze(-1)).squeeze(-1)
         loss = loss * target_mask.float()
 
-        if target_mask.any():
-            self._new_entity_accuracy(predictions=log_probs[target_mask],
-                                      gold_labels=target_inds[target_mask])
-            self._new_entity_accuracy20(predictions=log_probs[target_mask],
-                                        gold_labels=target_inds[target_mask])
+        # if target_mask.any():
+        #     self._new_entity_accuracy(predictions=log_probs[target_mask],
+        #                               gold_labels=target_inds[target_mask])
+        #     self._new_entity_accuracy20(predictions=log_probs[target_mask],
+        #                                 gold_labels=target_inds[target_mask])
 
         return loss.sum(-1) # / (target_mask.sum() + 1e-13)
 
