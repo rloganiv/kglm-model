@@ -187,9 +187,8 @@ class KglmDisc(Model):
         # Reset the model if needed
         self.reset_states(reset)
 
-        logp = 0.0
-
         mask = get_text_field_mask(target).byte()
+        batch_size =  mask.shape[0]
         # We encode the target tokens (**not** source) since the discriminitative model makes
         # predictions on the current token, but the generative model expects labels for the
         # **next** (e.g. target) token!
@@ -197,13 +196,16 @@ class KglmDisc(Model):
         splits = [self.token_embedding_dim] + [self.entity_embedding_dim] * 2
         encoded_token, encoded_head, encoded_relation = encoded.split(splits, dim=-1)
 
+        # logp = 0.0
+        logp = encoded.new_zeros(batch_size)
+
         # Compute new mention logits
         mention_logits = self._fc_mention_type(encoded_token)
         mention_probs = F.softmax(mention_logits, dim=-1)
         mention_type = parallel_sample(mention_probs)
-        mention_logp = mention_probs.gather(-1, mention_type.unsqueeze(-1)).log()
-        mention_logp[~mask] = 0
-        mention_logp = mention_logp.sum()
+        _mention_logp = mention_probs.gather(-1, mention_type.unsqueeze(-1)).log()
+        _mention_logp[~mask] = 0
+        mention_logp = _mention_logp.view(batch_size, -1).sum(-1)
 
         # Compute entity logits
         new_entity_mask = mention_type.eq(1)
@@ -221,7 +223,7 @@ class KglmDisc(Model):
             _new_entity_logp = new_entity_probs.gather(-1, shortlist_inds.unsqueeze(-1)).log()
             new_entity_samples = shortlist['entity_ids'].gather(1, shortlist_inds)
         else:
-            new_entity_logits = new_entity_logits
+            new_entity_logits[:,:,:4] = -1e32  # A new entity mustn't be padding, unknown, or a literal
             # If not using shortlist, then samples are indexed w.r.t to the global vocab
             new_entity_probs = F.softmax(new_entity_logits, dim=-1)
             new_entity_samples = parallel_sample(new_entity_probs)
@@ -230,7 +232,7 @@ class KglmDisc(Model):
         # Zero out masked tokens and non-new entity predictions
         _new_entity_logp[~mask] = 0
         _new_entity_logp[~new_entity_mask] = 0
-        new_entity_logp = _new_entity_logp.sum()
+        new_entity_logp = _new_entity_logp.view(batch_size, -1).sum(-1)
 
         # Start filling in the entity ids
         entity_ids = torch.zeros_like(target['tokens'])
@@ -246,7 +248,7 @@ class KglmDisc(Model):
         # Derived mentions need to be computed sequentially.
         parent_ids = torch.zeros_like(target['tokens']).unsqueeze(-1)
         derived_entity_mask = mention_type.eq(2)
-        derived_entity_logp = 0.0
+        derived_entity_logp = torch.zeros_like(new_entity_logp)
 
         sequence_length = target['tokens'].shape[1]
         for i in range(sequence_length):
@@ -287,7 +289,7 @@ class KglmDisc(Model):
                 parent_logp[viable_candidate_mask] = viable_logp.squeeze(-1)
 
             parent_ids[current_mask, i] = _parent_ids[current_mask]  # TODO: Double-check
-            derived_entity_logp += parent_logp[current_mask].sum()
+            derived_entity_logp[current_mask] += parent_logp[current_mask].squeeze(-1)
 
             ## SAMPLE RELATIONS ##
 
@@ -311,7 +313,7 @@ class KglmDisc(Model):
                 # Get logp. Ignoring the current_mask here is **super** dodgy, but since we forced
                 # null parents to zero we shouldn't be accumulating probabilities for unused predictions.
                 tail_logp = tail_probs.gather(-1, tail_sample).log()
-                derived_entity_logp += tail_logp.sum()  # Sum is redundant, just need it to make logp a scalar
+                derived_entity_logp[index[:-1]] += tail_logp.sum()  # Sum is redundant, just need it to make logp a scalar
 
                 # Map back to raw id
                 raw_tail_id = tail_id_lookup[tail_sample]
@@ -402,9 +404,21 @@ class KglmDisc(Model):
         Computes the loss for predicting whether or not the the next token will be part of an
         entity mention.
         """
+    def _mention_type_loss(self,
+                           encoded: torch.Tensor,
+                           mention_type: torch.Tensor,
+                           mask: torch.Tensor) -> torch.Tensor:
+        """
+        Computes the loss for predicting whether or not the the next token will be part of an
+        entity mention.
+        """
         logits = self._fc_mention_type(encoded)
-        mention_type_loss = sequence_cross_entropy_with_logits(logits, mention_type, mask,
-                                                               average='token')
+        mention_logp = F.log_softmax(logits, -1)
+        mention_loss = -mention_logp.gather(-1, mention_type.unsqueeze(-1)).squeeze()
+        mention_loss = mention_loss * mask.float()
+        # mention_loss = sequence_cross_entropy_with_logits(logits, mention_type, mask,
+        #                                                   average='token')
+
         # if not self.training:
         self._new_mention_f1(predictions=logits,
                              gold_labels=mention_type,
@@ -413,7 +427,7 @@ class KglmDisc(Model):
                             gold_labels=mention_type,
                             mask=mask)
 
-        return mention_type_loss
+        return mention_loss.sum(-1)
 
     def _new_entity_logits(self,
                            encoded: torch.Tensor,
@@ -449,23 +463,17 @@ class KglmDisc(Model):
             shortlist_mask = get_text_field_mask(shortlist)
             log_probs = masked_log_softmax(logits, shortlist_mask)
         else:
-            logits = logits
             log_probs = F.log_softmax(logits, dim=-1)
-            num_categories = log_probs.shape[-1]
-            log_probs = log_probs.view(-1, num_categories)
-            target_inds = target_inds.view(-1)
-        target_log_probs = torch.gather(log_probs, -1, target_inds.unsqueeze(-1)).squeeze(-1)
+        loss = -log_probs.gather(-1, target_inds.unsqueeze(-1)).squeeze(-1)
+        loss = loss * target_mask.float()
 
-        mask = ~target_inds.eq(0)
-        target_log_probs[~mask] = 0
+        if target_mask.any():
+            self._new_entity_accuracy(predictions=log_probs[target_mask],
+                                      gold_labels=target_inds[target_mask])
+            self._new_entity_accuracy20(predictions=log_probs[target_mask],
+                                        gold_labels=target_inds[target_mask])
 
-        if mask.any():
-            self._new_entity_accuracy(predictions=log_probs[mask],
-                                    gold_labels=target_inds[mask])
-            self._new_entity_accuracy20(predictions=log_probs[mask],
-                                        gold_labels=target_inds[mask])
-
-        return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
+        return loss.sum(-1) # / (target_mask.sum() + 1e-13)
 
     def _parent_log_probs(self,
                           encoded_head: torch.Tensor,
@@ -577,7 +585,7 @@ class KglmDisc(Model):
         self._parent_ppl(-torch.logsumexp(parent_log_probs, dim=-1)[mask].sum(), mask.float().sum())
         self._relation_ppl(-torch.logsumexp(relation_log_probs, dim=-1)[mask].sum(), mask.float().sum())
         # Lastly return the tokenwise average loss
-        return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
+        return -target_log_probs.sum(-1) # / (target_mask.sum() + 1e-13)
 
     def _forward_loop(self,
                       source: Dict[str, torch.Tensor],
@@ -610,7 +618,7 @@ class KglmDisc(Model):
 
         # Predict whether or not the next token will be an entity mention, and if so which type.
         mention_type_loss = self._mention_type_loss(encoded_token, mention_type, target_mask)
-        self._avg_mention_type_loss(float(mention_type_loss))
+        self._avg_mention_type_loss(float(mention_type_loss.sum()/target_mask.sum()))
 
         # For new mentions, predict which entity (among those in the supplied shortlist) will be
         # mentioned.
@@ -624,8 +632,9 @@ class KglmDisc(Model):
                                                     entity_ids,
                                                     None,
                                                     target_mask)
+        logger.debug('new_entity_loss: %s', new_entity_loss)
 
-        self._avg_new_entity_loss(float(new_entity_loss))
+        self._avg_new_entity_loss(float(new_entity_loss.sum()/target_mask.sum()))
 
         # For derived mentions, first predict which parent(s) to expand...
         knowledge_graph_entity_loss = self._knowledge_graph_entity_loss(encoded_head,
@@ -634,10 +643,10 @@ class KglmDisc(Model):
                                                                         entity_ids,
                                                                         parent_ids,
                                                                         target_mask)
-        self._avg_knowledge_graph_entity_loss(float(knowledge_graph_entity_loss))
+        self._avg_knowledge_graph_entity_loss(float(knowledge_graph_entity_loss.sum()/target_mask.sum()))
 
         # Compute total loss
-        loss = mention_type_loss + new_entity_loss + knowledge_graph_entity_loss
+        loss = (mention_type_loss + new_entity_loss + knowledge_graph_entity_loss).sum() / target_mask.sum()
 
         # Activation regularization
         if self._alpha:

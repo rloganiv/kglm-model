@@ -446,8 +446,8 @@ class Kglm(Model):
 
         # Predict whether or not the next token will be an entity mention, and if so which type.
         mention_type_loss = self._mention_type_loss(encoded_token, mention_type, target_mask)
-        self._avg_mention_type_loss(float(mention_type_loss))
-        logger.debug('mention type loss: %0.4f', mention_type_loss)
+        logger.debug('mention loss: %0.4f', mention_type_loss.sum() / (target_mask.sum().float() + 1e-13))
+        self._avg_mention_type_loss(float(mention_type_loss.sum() / (target_mask.sum().float() + 1e-13)))
 
         # For new mentions, predict which entity (among those in the supplied shortlist) will be
         # mentioned.
@@ -464,8 +464,8 @@ class Kglm(Model):
                                                     None,
                                                     target_mask)
 
-        self._avg_new_entity_loss(float(new_entity_loss))
-        logger.debug('new entity loss: %0.4f', new_entity_loss)
+        logger.debug('new ent loss: %0.4f', new_entity_loss.sum() / (target_mask.sum().float() + 1e-13))
+        self._avg_new_entity_loss(float(new_entity_loss.sum() / (target_mask.sum().float() + 1e-13)))
 
         # For derived mentions, first predict which parent(s) to expand...
         knowledge_graph_entity_loss = self._knowledge_graph_entity_loss(encoded_head,
@@ -474,8 +474,8 @@ class Kglm(Model):
                                                                         entity_ids,
                                                                         parent_ids,
                                                                         target_mask)
-        self._avg_knowledge_graph_entity_loss(float(knowledge_graph_entity_loss))
-        logger.debug('kg entity loss: %0.4f', knowledge_graph_entity_loss)
+        self._avg_knowledge_graph_entity_loss(float(knowledge_graph_entity_loss.sum() / (target_mask.sum().float() + 1e-13)))
+        logger.debug('kg loss: %0.4f', knowledge_graph_entity_loss.sum() / (target_mask.sum().float() + 1e-13))
 
         # Predict generation-mode scores. Note: these are W.R.T to entity_ids since we need the embedding.
         generate_scores = self._generate_scores(encoded_token, entity_ids)
@@ -492,11 +492,13 @@ class Kglm(Model):
                                                             target_mask,
                                                             alias_inds,
                                                             entity_ids.gt(0))
+        logger.debug('vocab loss: %0.4f', vocab_loss.sum() / (target_mask.sum().float() + 1e-13))
 
         # Compute total loss. Also compute logp (needed for importance sampling evaluation).
-        loss = vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss
-        logp = -(vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss) * target_mask.sum()
-        penalized_logp = -(penalized_vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss) * target_mask.sum()
+        loss = (vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss).sum() / (target_mask.sum().float() + 1e-13)
+        logger.debug('loss: %0.4f', loss)
+        logp = -(vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss)
+        penalized_logp = -(penalized_vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss)
 
         # Activation regularization
         if self._alpha:
@@ -681,8 +683,11 @@ class Kglm(Model):
         entity mention.
         """
         logits = self._fc_mention_type(encoded)
-        mention_loss = sequence_cross_entropy_with_logits(logits, mention_type, mask,
-                                                          average='token')
+        mention_logp = F.log_softmax(logits, -1)
+        mention_loss = -mention_logp.gather(-1, mention_type.unsqueeze(-1)).squeeze()
+        mention_loss = mention_loss * mask.float()
+        # mention_loss = sequence_cross_entropy_with_logits(logits, mention_type, mask,
+        #                                                   average='token')
 
         # if not self.training:
         self._new_mention_f1(predictions=logits,
@@ -692,7 +697,7 @@ class Kglm(Model):
                             gold_labels=mention_type,
                             mask=mask)
 
-        return mention_loss
+        return mention_loss.sum(-1)
 
     def _new_entity_logits(self,
                            encoded: torch.Tensor,
@@ -730,18 +735,17 @@ class Kglm(Model):
             log_probs = masked_log_softmax(logits, shortlist_mask)
         else:
             log_probs = F.log_softmax(logits, dim=-1)
-        target_log_probs = torch.gather(log_probs, -1, target_inds.unsqueeze(-1)).squeeze(-1)
-        target_log_probs = target_log_probs * target_mask.float()
-        # Also don't predict on non-mentions
+        target_loss = -log_probs.gather( -1, target_inds.unsqueeze(-1)).squeeze(-1)
+        target_loss = target_loss * target_mask.float()
         mentions = ~entity_ids.eq(0)
-        target_log_probs = target_log_probs * mentions.float()
+        target_loss = target_loss * mentions.float()
 
         # self._new_entity_accuracy(predictions=log_probs[mask],
         #                           gold_labels=target_inds[mask])
         # self._new_entity_accuracy20(predictions=log_probs[mask],
         #                             gold_labels=target_inds[mask])
 
-        return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
+        return target_loss.sum(-1) # / (target_mask.sum(-1).float() + 1e-13)
 
     def _parent_log_probs(self,
                           encoded_head: torch.Tensor,
@@ -854,7 +858,7 @@ class Kglm(Model):
         self._parent_ppl(-torch.logsumexp(parent_log_probs, dim=-1)[mask].sum(), mask.float().sum())
         self._relation_ppl(-torch.logsumexp(relation_log_probs, dim=-1)[mask].sum(), mask.float().sum())
         # Lastly return the tokenwise average loss
-        return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
+        return -target_log_probs.sum(-1) # / (target_mask.sum(-1) + 1e-13)
 
     def _generate_scores(self,
                          encoded: torch.Tensor,
@@ -966,13 +970,13 @@ class Kglm(Model):
         flattened_mask = flattened_mask.squeeze()
         # Zero out padding loss
         combined_log_probs_extended_vocab = combined_log_probs_extended_vocab * flattened_mask.float()
-        vocab_loss = -combined_log_probs_extended_vocab.sum() / (mask.sum() + 1e-13)
+        vocab_loss = -combined_log_probs_extended_vocab.view(batch_size, sequence_length).sum(-1)# / (mask.sum(-1) + 1e-13)
 
         # Unknown penalty - only applies to non-copied unks
         true_unks = unks.squeeze() & ~copied.squeeze() & flattened_mask
         penalized_log_probs = combined_log_probs_extended_vocab - self._unk_penalty * true_unks.float()
         penalized_log_probs[~flattened_mask] = 0
-        penalized_vocab_loss = -penalized_log_probs.sum() / (mask.sum() + 1e-13)
+        penalized_vocab_loss = -penalized_log_probs.view(batch_size, sequence_length).sum(-1)# / (mask.sum(-1) + 1e-13)
 
         # PERPLEXITY ###
         # Our perplexity terms are computed using the log probs computed w.r.t the source
