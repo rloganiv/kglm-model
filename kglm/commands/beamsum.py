@@ -97,7 +97,7 @@ def evaluate_perplexity(model: Model,
 
     held_over_data = None
 
-    for batch, _ in generator_tqdm:
+    for batch in generator_tqdm:
 
         # We need sequence length to help compute perplexity
         batch_size, _ = batch['source']['tokens'].shape
@@ -112,24 +112,29 @@ def evaluate_perplexity(model: Model,
 
         # Draw a sample
         with torch.no_grad():
-            sample = sampler.beam_search(batch['source'],
-                                         batch['reset'],
-                                         beam_width)
+            sample = sampler.beam_search(source=batch['source'],
+                                         reset=batch['reset'],
+                                         k=beam_width)
 
         # Evaluate on sample
         with torch.no_grad():
             model_output = model(**sample)
+            # gold_output = model(**batch)
 
         model_logp = model_output['logp']
+        # logger.debug(model_logp)
+        # logger.debug(gold_output['logp'])
         model_logp = model_logp.view(batch_size, beam_width)
         model_logp = torch.logsumexp(model_logp, -1)
 
-        print(torch.exp(-model_logp.sum() / n_tokens.sum()))
+        # logger.debug(torch.exp(-model_logp.sum() / n_tokens.sum()))
 
         if summand is None:
             summand = model_logp.sum()
         else:
             summand += model_logp.sum()
+
+        logger.debug(torch.exp(-summand / denom))
 
     ppl = torch.exp(-summand / denom)
 
@@ -155,7 +160,6 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     sampler_archive = load_archive(args.sampler_archive_file, args.cuda_device, args.overrides, args.weights_file)
     sampler = sampler_archive.model
     sampler.eval()
-
 
     # Load the evaluation data. NOTE: We are using the model's reader!
     validation_dataset_reader_params = config.pop('validation_dataset_reader', None)

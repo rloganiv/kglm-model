@@ -105,7 +105,7 @@ class FancyIterator(DataIterator):
                     batch.index_instances(self.vocab)
 
                 padding_lengths = batch.get_padding_lengths()
-                yield batch.as_tensor_dict(padding_lengths), 1
+                yield batch.as_tensor_dict(padding_lengths)
 
             self._epochs[key] = epoch + 1
 

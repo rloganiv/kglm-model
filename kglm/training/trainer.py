@@ -288,7 +288,7 @@ class LmTrainer(TrainerBase):
         train_generator_tqdm = Tqdm.tqdm(raw_train_generator,
                                          total=num_training_batches)
         cumulative_batch_size = 0
-        for batch, lr_mult in train_generator_tqdm:
+        for batch in train_generator_tqdm:
             batches_this_epoch += 1
             self._batch_num_total += 1
             batch_num_total = self._batch_num_total
@@ -314,12 +314,6 @@ class LmTrainer(TrainerBase):
             if self._learning_rate_scheduler:
                 self._learning_rate_scheduler.step_batch(batch_num_total)
 
-            # We dynamically adjust the learning rate to account for slight variations in the input
-            # sequences
-            original_lr = self.optimizer.param_groups[0]['lr']
-            batch_lr = original_lr * lr_mult
-            self.optimizer.param_groups[0]['lr'] = batch_lr
-
             if self._tensorboard.should_log_histograms_this_batch():
                 # get the magnitude of parameter updates for logging
                 # We need a copy of current parameters to compute magnitude of updates,
@@ -335,8 +329,6 @@ class LmTrainer(TrainerBase):
                                                        update_norm / (param_norm + 1e-7))
             else:
                 self.optimizer.step()
-
-            self.optimizer.param_groups[0]['lr'] = original_lr
 
             # Update moving averages
             if self._moving_average is not None:
@@ -401,7 +393,7 @@ class LmTrainer(TrainerBase):
                                        total=num_validation_batches)
         batches_this_epoch = 0
         val_loss = 0
-        for batch, _ in val_generator_tqdm:
+        for batch in val_generator_tqdm:
 
             loss = self.batch_loss(batch, for_training=False)
             if loss is not None:
