@@ -53,7 +53,7 @@ class KglmDiscTest(KglmModelTestCase):
         instances = list(reader.read(dataset_file))
         iterator = DataIterator.from_params(generator_params['iterator'])
         iterator.index_with(self.model.vocab)
-        batch, _ = next(iterator(instances, shuffle=False))
+        batch = next(iterator(instances, shuffle=False))
         self.model.sample(**batch)
 
 
@@ -80,7 +80,7 @@ class KglmDiscNoShortlistTest(KglmModelTestCase):
 
         iterator = DataIterator.from_params(generator_params['iterator'])
         iterator.index_with(self.model.vocab)
-        batch, _ = next(iterator(instances, shuffle=False))
+        batch = next(iterator(instances, shuffle=False))
 
         # Samples should match (we'll test by comparing logp)
         torch.manual_seed(123)
@@ -101,7 +101,7 @@ class KglmDiscNoShortlistTest(KglmModelTestCase):
 
         iterator = DataIterator.from_params(generator_params['iterator'])
         iterator.index_with(self.model.vocab)
-        batch, _ = next(iterator(instances, shuffle=False))
+        batch = next(iterator(instances, shuffle=False))
 
         # Just want to check that function does not raise an error for now.
         self.model.beam_search(batch['source'],
@@ -151,8 +151,7 @@ class KglmDiscNoShortlistTest(KglmModelTestCase):
         recent_entities_state_1 = {'remaining': [{}]}
         beam_states = [
             KglmBeamState(recent_entities=recent_entities_state_0, ongoing=ongoing),
-            KglmBeamState(recent_entities=recent_entities_state_1, ongoing=ongoing)
-        ]
+            KglmBeamState(recent_entities=recent_entities_state_1, ongoing=ongoing)]
 
         next_new_entity_logp = self.model._next_new_entity_logp(next_new_entity_logits, beam_states)
         # Log probabilities should be different on first beam, and same on second.
