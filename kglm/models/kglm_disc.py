@@ -175,6 +175,7 @@ class KglmDisc(Model):
                alias_copy_inds: torch.Tensor,
                shortlist: Dict[str, torch.Tensor] = None,
                temperature: float = 1.0,
+               offset: bool = False,
                **kwargs) -> Dict[str, Any]:  # **kwargs intended to eat the other fields if they are provided.
         """
         Sampling annotations for the generative model. Note that unlike forward, this function
@@ -193,7 +194,10 @@ class KglmDisc(Model):
         # We encode the target tokens (**not** source) since the discriminitative model makes
         # predictions on the current token, but the generative model expects labels for the
         # **next** (e.g. target) token!
-        encoded, *_ = self._encode_source(target['tokens'])
+        if not offset:
+            encoded, *_ = self._encode_source(target['tokens'])
+        else:
+            encoded, *_  = self._encode_source(source['tokens'])
         splits = [self.token_embedding_dim] + [self.entity_embedding_dim] * 2
         encoded_token, encoded_head, encoded_relation = encoded.split(splits, dim=-1)
 
