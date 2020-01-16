@@ -24,6 +24,7 @@ KGLM is trained on the *Linked WikiText-2* dataset which can be downloaded at ht
 Additionally, you will need embeddings for entities/relations in the [Wikidata](https://www.wikidata.org/) knowledge graph, as well as access to the knowledge graph itself (in order to look up entity aliases/related entities).
 For convenience, we provide pre-trained embeddings and pickled dictionaries containing the relevant portions of Wikidata [here](https://drive.google.com/file/d/1odypT9EDwtAYqzvRYnA2B_97hN_BWFnr/view?usp=sharing).
 
+If you would like to apply our annotation pipeline to your own data, please refer to: https://github.com/rloganiv/kglm-data.
 
 Training
 ---
