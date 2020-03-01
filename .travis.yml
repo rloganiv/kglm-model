@@ -13,7 +13,7 @@ matrix:
     # and prints a coverage report at the end.
     - env: PYTHON_VERSION="3.6" COVERAGE="true"
     # This environment doesn't run tests, but does check for lint violations.
-    # - env: PYTHON_VERSION="3.6" RUN_LINT="true" SKIP_TESTS="true"
+    - env: PYTHON_VERSION="3.6" RUN_LINT="true" SKIP_TESTS="true"
 
 notifications:
   email: false
