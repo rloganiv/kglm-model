@@ -1,39 +1,37 @@
 {
     "vocabulary": {
         "type": "extended",
-        "directory_path": "data/vocabulary",
-        "extend": false
+        "extend": false,
+        "directory_path": "/kermit/rlogan/entity-nlm/data/vocabulary"
     },
     "dataset_reader": {
         "type": "conll2012_jsonl",
     },
-    "train_data_path": "data/conll-2012/processed/train.jsonl",
-    "validation_data_path": "data/conll-2012/processed/dev.jsonl",
-    "datasets_for_vocab_creation": ["train"],
+    "train_data_path": "/kermit/rlogan/entity-nlm/data/conll-2012/processed/train.jsonl",
+    "validation_data_path": "/kermit/rlogan/entity-nlm/data/conll-2012/processed/dev.jsonl",
     "model": {
-        "type": "entitynlm",
+        "type": "entitydisc",
         "text_field_embedder": {
             "token_embedders": {
                 "tokens": {
                     "type": "embedding",
-                    "embedding_dim": 300,
+                    "embedding_dim": 256,
                     "trainable": true
                 },
             },
         },
-        "embedding_dim": 300,
-        "hidden_size": 300,
+        "embedding_dim": 256,
+        "hidden_size": 256,
         "num_layers": 1,
         "max_mention_length": 100,
         "max_embeddings": 100,
-        "tie_weights": false,
-        "dropout_rate": 0.1,
-        "variational_dropout_rate": 0.2
+        "dropout_rate": 0.4,
+        "variational_dropout_rate": 0.1
     },
     "iterator": {
         "type": "fancy",
-        "batch_size": 256,
-        "split_size": 120,
+        "batch_size": 343,
+        "split_size": 30,
         "splitting_keys": [
             "source",
             "entity_types",
@@ -59,7 +57,8 @@
         "cuda_device": 0,
         "optimizer": {
             "type": "adam",
-            "lr": 1e-3,
-        }
+            "lr": 1e-3
+        },
+        "validation_metric": "+eid_acc"
     }
 }

@@ -54,11 +54,11 @@ class TestConll2012DatasetReader:
                                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                                     0, 0, 0, 0, 0, 0, 0])
         np.testing.assert_allclose(instances[0]["mention_lengths"].array,
-                                   [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                                    1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1,
-                                    1, 1, 1, 6, 5, 4, 3, 2, 1, 1, 1, 1, 2, 1, 1,
-                                    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                                    1, 1, 1, 1, 1, 1, 1])
+                                   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 5, 4, 3, 2, 1, 0, 0, 0, 0, 1, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0])
 
 class TestConll2012JsonlReader:
     @pytest.mark.parametrize('lazy', (True, False))
@@ -70,20 +70,16 @@ class TestConll2012JsonlReader:
         assert len(instances) == 2
 
         first_instance_tokens = [x.text for x in instances[0]['source'].tokens]
-        assert first_instance_tokens[:5] == ["@@START@@", "Jesus", "left", "and", "went"]
-        assert first_instance_tokens[-5:] == [ "long", "ago", ".", "''", "@@END@@"]
+        assert first_instance_tokens[:5] == ["@@START@@", "in", "the", "summer", "of"]
+        assert first_instance_tokens[-5:] == [ "mainland", "china", "tourist", "market", "@@END@@"]
 
         second_instance_entity_ids = instances[1]['entity_ids'].array
         second_instance_mention_lengths = instances[1]['mention_lengths'].array
         second_instance_entity_types = instances[1]['entity_types'].array
 
-        np.testing.assert_allclose(second_instance_entity_types[(1 - offset):(3 - offset)],
-                                   np.array([1,0], dtype=np.uint8))
-        np.testing.assert_allclose(second_instance_entity_ids[(1 - offset):(2 - offset)],
-                                   np.array([1], dtype=np.int64))
-        np.testing.assert_allclose(second_instance_entity_ids[(8 - offset):(9 - offset)],
-                                   np.array([1], dtype=np.int64))
-        np.testing.assert_allclose(second_instance_entity_ids[(30 - offset):(32 - offset)],
+        np.testing.assert_allclose(second_instance_entity_types[(9 - offset):(13 - offset)],
+                                   np.array([0,1,1,0], dtype=np.uint8))
+        np.testing.assert_allclose(second_instance_entity_ids[(10 - offset):(12 - offset)],
                                    np.array([1, 1], dtype=np.int64))
-        np.testing.assert_allclose(second_instance_mention_lengths[(30 - offset):(32 - offset)],
-                                   np.array([2, 1], dtype=np.int64))
+        np.testing.assert_allclose(second_instance_mention_lengths[(10 - offset):(12 - offset)],
+                                   np.array([1, 0], dtype=np.int64))

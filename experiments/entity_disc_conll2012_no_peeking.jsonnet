@@ -6,13 +6,7 @@
     },
     "dataset_reader": {
         "type": "conll2012_jsonl",
-        "offset": 1,
-        "token_indexers": {
-            "tokens": {
-                "type": "single_id",
-                "lowercase_tokens": true
-            }
-        }
+        "offset": 1
     },
     "train_data_path": "data/conll-2012/processed/train.jsonl",
     "validation_data_path": "data/conll-2012/processed/dev.jsonl",
@@ -22,13 +16,13 @@
             "token_embedders": {
                 "tokens": {
                     "type": "embedding",
-                    "embedding_dim": 128,
+                    "embedding_dim": 256,
                     "trainable": true
                 },
             },
         },
-        "embedding_dim": 128,
-        "hidden_size": 128,
+        "embedding_dim": 256,
+        "hidden_size": 256,
         "num_layers": 1,
         "max_mention_length": 100,
         "max_embeddings": 100,
@@ -37,8 +31,8 @@
     },
     "iterator": {
         "type": "fancy",
-        "batch_size": 16,
-        "split_size": 15,
+        "batch_size": 343,
+        "split_size": 30,
         "splitting_keys": [
             "source",
             "entity_types",
@@ -48,8 +42,8 @@
     },
     "validation_iterator": {
         "type": "fancy",
-        "batch_size": 16,
-        "split_size": 15,
+        "batch_size": 343,
+        "split_size": 128,
         "splitting_keys": [
             "source",
             "entity_types",
@@ -64,7 +58,7 @@
         "cuda_device": 0,
         "optimizer": {
             "type": "adam",
-            "lr": 1e-4
+            "lr": 1e-3
         },
         "validation_metric": "+eid_acc"
     }

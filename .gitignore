@@ -3,6 +3,7 @@
 *.pyc
 __pycache__
 .venv/
+.ipynb_checkpoints
 
 
 # Testing
@@ -14,5 +15,9 @@ __pycache__
 
 .vscode/
 
-# AlleNLP
+# Experiment-related
 results/
+data/
+*.yaml
+*.npy
+*.jinja2

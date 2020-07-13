@@ -188,7 +188,7 @@ class Conll2012DatasetReader(DatasetReader):
         # Initialize fields.
         entity_types = np.zeros(shape=(len(tokens),))
         entity_ids = np.zeros(shape=(len(tokens),))
-        mention_lengths = np.ones(shape=(len(tokens),))
+        mention_lengths = np.zeros(shape=(len(tokens),))
 
         if cluster_dict:
             for cluster, entity_id in cluster_dict.items():
@@ -199,7 +199,7 @@ class Conll2012DatasetReader(DatasetReader):
                 entity_ids[cluster[0] + 1:cluster[1] + 1 + 1] = entity_id
                 entity_length = (cluster[1] + 1) - cluster[0]
                 # Fill in mention length
-                mention_lengths[cluster[0] + 1:cluster[1] + 1 + 1] = np.arange(entity_length, 0, step=-1)
+                mention_lengths[cluster[0] + 1:cluster[1] + 1 + 1] = np.arange(entity_length, 0, step=-1) - 1
 
         fields['entity_ids'] = SequentialArrayField(entity_ids, dtype=np.int64)
         fields['mention_lengths'] = SequentialArrayField(mention_lengths, dtype=np.int64)
@@ -233,20 +233,18 @@ class Conll2012JsonlReader(DatasetReader):
                          tokens: List[str],
                          clusters: Dict[str, List[Tuple[int, int]]]) -> Instance:
         # pylint: disable=arguments-differ
-        tokens = [_normalize_word(x, self._replace_numbers) for x in tokens]
-        tokens = ['@@START@@', *tokens, '@@END@@']
         fields = {'source': TextField([Token(x) for x in tokens], self._token_indexers)}
 
         entity_types = np.zeros(shape=(len(tokens),))
         entity_ids = np.zeros(shape=(len(tokens),))
-        mention_lengths = np.ones(shape=(len(tokens),))
+        mention_lengths = np.zeros(shape=(len(tokens),))
 
         for i, cluster in enumerate(clusters.values()):
             for span in cluster:
                 start, end = span
-                entity_types[(start + 1 - self._offset):(end + 1 - self._offset)] = 1
-                entity_ids[(start + 1 - self._offset):(end + 1 - self._offset)] = i + 1
-                mention_lengths[(start + 1 - self._offset):(end + 1 - self._offset)] = np.arange(end - start, 0, step=-1)
+                entity_types[(start - self._offset):(end - self._offset)] = 1
+                entity_ids[(start - self._offset):(end - self._offset)] = i + 1
+                mention_lengths[(start - self._offset):(end - self._offset)] = np.arange(end - start, 0, step=-1) - 1
 
         fields['entity_types'] = SequentialArrayField(entity_types, dtype=np.uint8)
         fields['entity_ids'] = SequentialArrayField(entity_ids, dtype=np.int64)

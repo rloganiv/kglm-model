@@ -1,5 +1,6 @@
-from typing import Dict, Optional
+from copy import deepcopy
 import logging
+from typing import Dict, Optional
 
 from overrides import overrides
 import torch
@@ -30,14 +31,16 @@ class DynamicEmbedding(Module):
     """
     def __init__(self,
                  embedding_dim: int,
-                 max_embeddings: int) -> None:
+                 max_embeddings: int,
+                 tied_weight: Optional[torch.nn.Parameter]) -> None:
         super(DynamicEmbedding, self).__init__()
 
         self._embedding_dim = embedding_dim
         self._max_embeddings = max_embeddings
-        self._initial_embedding = Parameter(F.normalize(torch.randn(embedding_dim), dim=0))
+        self._initial_embedding = tied_weight
+        # self._initial_embedding = Parameter(F.normalize(torch.randn(embedding_dim), dim=0))
 
-        self._distance_scalar = Parameter(torch.tensor(1e-6))  # pylint: disable=E1102
+        self._distance_scalar = Parameter(torch.tensor(1e-3))  # pylint: disable=E1102
         self._embedding_projection = torch.nn.Linear(in_features=embedding_dim,
                                                      out_features=embedding_dim,
                                                      bias=False)
@@ -68,10 +71,10 @@ class DynamicEmbedding(Module):
         # This simplifies the case where the batch_size has been
         if reset.all():
             self.embeddings = self._initial_embedding.new_zeros(batch_size, self._max_embeddings,
-                                                                self._embedding_dim)
+                                                                       self._embedding_dim)
             self.num_embeddings = self._initial_embedding.new_zeros(batch_size, dtype=torch.int64)
             self.last_seen = self._initial_embedding.new_zeros(batch_size, self._max_embeddings,
-                                                               dtype=torch.int64)
+                                                                      dtype=torch.int64)
         else:
             self.embeddings[reset] = 0
             self.num_embeddings[reset] = 0
@@ -87,7 +90,7 @@ class DynamicEmbedding(Module):
         self.embeddings = self.embeddings.detach()
 
     def add_embeddings(self,
-                       timestep: int,
+                       timestep: torch.LongTensor,
                        mask: Optional[torch.Tensor] = None) -> None:
         """
         Adds new embeddings to the current collection of embeddings.
@@ -109,7 +112,7 @@ class DynamicEmbedding(Module):
 
         # Embeddings are initialized by adding a small amount of random noise to the initial
         # embedding tensor then normalizing.
-        initial = self._initial_embedding.repeat((mask.sum(), 1, 1))
+        initial = self._initial_embedding[1].repeat((mask.sum(), 1, 1))
         noise = 1e-4 * torch.randn_like(initial)  # 1e-4 is a magic number from the original implementation
         unnormalized = initial + noise
         normalized = F.normalize(unnormalized, dim=-1)
@@ -121,11 +124,10 @@ class DynamicEmbedding(Module):
         if self.num_embeddings.max() == (self._max_embeddings - 1):
             logger.warning('Embeddings full')
 
-
     def update_embeddings(self,
                           hidden: torch.Tensor,
                           update_indices: torch.Tensor,
-                          timestep: int,
+                          timestep: torch.LongTensor,
                           mask: Optional[torch.Tensor] = None) -> None:
         """
         Updates existing embeddings.
@@ -169,7 +171,7 @@ class DynamicEmbedding(Module):
         # dimension when accessing self.embeddings. Accordingly, the batch dimension of
         # normalized needs to be dropped in this case in order for assignment to work.
         self.embeddings[mask, update_indices[mask]] = normalized.squeeze(0)
-        self.last_seen[mask, update_indices[mask]] = timestep
+        self.last_seen[mask, update_indices[mask]] = timestep[mask]
 
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
@@ -218,7 +220,9 @@ class DynamicEmbedding(Module):
         bilinear = bilinear.view(batch_size, -1)
 
         # Second half of equation 4.
-        distance_score = torch.exp(self._distance_scalar * (self.last_seen[mask].float() - timestep))
+        distance_score = self._distance_scalar * (timestep[mask].float().unsqueeze(-1) - self.last_seen[mask].float())
+        assert not (self.last_seen[mask] - timestep[mask].unsqueeze(-1)).gt(0).any()
+
         logits = bilinear + distance_score
 
         # Since we pre-allocate the embedding array, logits includes scores for all of the
@@ -227,11 +231,12 @@ class DynamicEmbedding(Module):
         num_embeddings = self.num_embeddings[mask].unsqueeze(1)
         arange = torch.arange(self._max_embeddings, device=num_embeddings.device).repeat(mask.sum(), 1)
         logit_mask = arange.lt(num_embeddings)
-        logits[logit_mask != 1] = 1e-34
+        logits[logit_mask != 1] = -1e34
 
         out = {
                 'logits': logits,
-                'logit_mask': logit_mask
+                'logit_mask': logit_mask,
+                'logp': F.log_softmax(logits, -1)
         }
 
         if target is not None:
@@ -241,4 +246,17 @@ class DynamicEmbedding(Module):
             out['loss'] = loss
 
         return out
+
+    def beam_state(self):
+        beam_state = {
+            'embeddings': self.embeddings.detach(),
+            'num_embeddings': self.num_embeddings.detach(),
+            'last_seen': self.last_seen.detach()
+        }
+        return beam_state
+
+    def load_beam_state(self, beam_state):
+        self.embeddings = beam_state.get('embeddings', None)
+        self.num_embeddings = beam_state.get('num_embeddings', None)
+        self.last_seen = beam_state.get('last_seen', None)
 

@@ -15,8 +15,8 @@ import torch
 import torch.nn.functional as F
 
 from kglm.data import AliasDatabase
-from kglm.modules import (
-    embedded_dropout, LockedDropout, WeightDrop, KnowledgeGraphLookup, RecentEntities)
+from kglm.modules import (embedded_dropout, LockedDropout, WeightDroppedLstm,
+    KnowledgeGraphLookup, RecentEntities)
 from kglm.nn.util import nested_enumerate, parallel_sample
 from kglm.training.metrics import Ppl
 
@@ -86,20 +86,12 @@ class Kglm(Model):
         token_embedding_dim = token_embedder.get_output_dim()
         self.entity_embedding_dim = entity_embedding_dim
         self.token_embedding_dim = token_embedding_dim
-
-        rnns: List[torch.nn.Module] = []
-        for i in range(num_layers):
-            if i == 0:
-                input_size = token_embedding_dim
-            else:
-                input_size = hidden_size
-            if (i == num_layers - 1):
-                output_size = token_embedding_dim + 2 * entity_embedding_dim
-            else:
-                output_size = hidden_size
-            rnns.append(torch.nn.LSTM(input_size, output_size, batch_first=True))
-        rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in rnns]
-        self.rnns = torch.nn.ModuleList(rnns)
+        rnn_output_dim = token_embedding_dim + 2 * entity_embedding_dim
+        self._rnn = WeightDroppedLstm(num_layers=num_layers,
+                                      input_embedding_dim=self.token_embedding_dim,
+                                      hidden_size=self._hidden_size,
+                                      output_embedding_dim=rnn_output_dim,
+                                      dropout=self._wdrop)
 
         # Various linear transformations.
         self._fc_mention_type = torch.nn.Linear(
@@ -128,8 +120,6 @@ class Kglm(Model):
 
         if tie_weights:
             self._fc_generate.weight = self._token_embedder.weight
-
-        self._state: Optional[Dict[str, Any]] = None
 
         # Metrics
         self._unk_index = vocab.get_token_index(DEFAULT_OOV_TOKEN)
@@ -293,13 +283,7 @@ class Kglm(Model):
         alias_database.tensorize(vocab=self.vocab)
 
         # Reset
-        if reset.any() and (self._state is not None):
-            for layer in range(self._num_layers):
-                h, c = self._state['layer_%i' % layer]
-                h[:, reset, :] = torch.zeros_like(h[:, reset, :])
-                c[:, reset, :] = torch.zeros_like(c[:, reset, :])
-                self._state['layer_%i' % layer] = (h, c)
-        self._recent_entities.reset(reset)
+        self.reset_states(reset)
 
         # Get source tokens
         source_tokens = source['tokens']
@@ -405,13 +389,7 @@ class Kglm(Model):
         alias_database.tensorize(vocab=self.vocab)
 
         # Reset the model if needed
-        if reset.any() and (self._state is not None):
-            for layer in range(self._num_layers):
-                h, c = self._state['layer_%i' % layer]
-                h[:, reset, :] = torch.zeros_like(h[:, reset, :])
-                c[:, reset, :] = torch.zeros_like(c[:, reset, :])
-                self._state['layer_%i' % layer] = (h, c)
-        self._recent_entities.reset(reset)
+        self.reset_states(reset)
 
         if target is not None:
             output_dict = self._forward_loop(
@@ -468,8 +446,8 @@ class Kglm(Model):
 
         # Predict whether or not the next token will be an entity mention, and if so which type.
         mention_type_loss = self._mention_type_loss(encoded_token, mention_type, target_mask)
-        self._avg_mention_type_loss(float(mention_type_loss))
-        logger.debug('mention type loss: %0.4f', mention_type_loss)
+        logger.debug('mention loss: %0.4f', mention_type_loss.sum() / (target_mask.sum().float() + 1e-13))
+        self._avg_mention_type_loss(float(mention_type_loss.sum() / (target_mask.sum().float() + 1e-13)))
 
         # For new mentions, predict which entity (among those in the supplied shortlist) will be
         # mentioned.
@@ -486,8 +464,8 @@ class Kglm(Model):
                                                     None,
                                                     target_mask)
 
-        self._avg_new_entity_loss(float(new_entity_loss))
-        logger.debug('new entity loss: %0.4f', new_entity_loss)
+        logger.debug('new ent loss: %0.4f', new_entity_loss.sum() / (target_mask.sum().float() + 1e-13))
+        self._avg_new_entity_loss(float(new_entity_loss.sum() / (target_mask.sum().float() + 1e-13)))
 
         # For derived mentions, first predict which parent(s) to expand...
         knowledge_graph_entity_loss = self._knowledge_graph_entity_loss(encoded_head,
@@ -496,8 +474,8 @@ class Kglm(Model):
                                                                         entity_ids,
                                                                         parent_ids,
                                                                         target_mask)
-        self._avg_knowledge_graph_entity_loss(float(knowledge_graph_entity_loss))
-        logger.debug('kg entity loss: %0.4f', knowledge_graph_entity_loss)
+        self._avg_knowledge_graph_entity_loss(float(knowledge_graph_entity_loss.sum() / (target_mask.sum().float() + 1e-13)))
+        logger.debug('kg loss: %0.4f', knowledge_graph_entity_loss.sum() / (target_mask.sum().float() + 1e-13))
 
         # Predict generation-mode scores. Note: these are W.R.T to entity_ids since we need the embedding.
         generate_scores = self._generate_scores(encoded_token, entity_ids)
@@ -514,11 +492,13 @@ class Kglm(Model):
                                                             target_mask,
                                                             alias_inds,
                                                             entity_ids.gt(0))
+        logger.debug('vocab loss: %0.4f', vocab_loss.sum() / (target_mask.sum().float() + 1e-13))
 
         # Compute total loss. Also compute logp (needed for importance sampling evaluation).
-        loss = vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss
-        logp = -(vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss) * target_mask.sum()
-        penalized_logp = -(penalized_vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss) * target_mask.sum()
+        loss = (vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss).sum() / (target_mask.sum().float() + 1e-13)
+        logger.debug('loss: %0.4f', loss)
+        logp = -(vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss)
+        penalized_logp = -(penalized_vocab_loss + mention_type_loss + new_entity_loss + knowledge_graph_entity_loss)
 
         # Activation regularization
         if self._alpha:
@@ -680,42 +660,17 @@ class Kglm(Model):
         return output
 
     def _encode_source(self, source: Dict[str, torch.Tensor]) -> torch.Tensor:
-
-        # Extract and embed source tokens.
+        # Extract, embed and encode source tokens.
         source_embeddings = embedded_dropout(
             embed=self._token_embedder,
             words=source,
             dropout=self._dropoute if self.training else 0)
         source_embeddings = self._locked_dropout(source_embeddings, self._dropouti)
+        encoded_raw = self._rnn(source_embeddings)
+        encoded = self._locked_dropout(encoded_raw)
 
-        # Encode.
-        current_input = source_embeddings
-        hidden_states = []
-        for layer, rnn in enumerate(self.rnns):
-            # Retrieve previous hidden state for layer.
-            if self._state is not None:
-                prev_hidden = self._state['layer_%i' % layer]
-            else:
-                prev_hidden = None
-            # Forward-pass.
-            output, hidden = rnn(current_input, prev_hidden)
-            output = output.contiguous()
-            # Update hidden state for layer.
-            hidden = tuple(h.detach() for h in hidden)
-            hidden_states.append(hidden)
-            # Apply dropout.
-            if layer == self._num_layers - 1:
-                dropped_output = self._locked_dropout(output, self._dropout)
-            else:
-                dropped_output = self._locked_dropout(output, self._dropouth)
-            current_input = dropped_output
-        encoded = current_input
-
-        alpha_loss = dropped_output.pow(2).mean()
-        beta_loss = (output[:, 1:] - output[:, :-1]).pow(2).mean()
-
-        # Update state.
-        self._state = {'layer_%i' % i: h for i, h in enumerate(hidden_states)}
+        alpha_loss = encoded.pow(2).mean()
+        beta_loss = (encoded_raw[:, 1:] - encoded_raw[:, :-1]).pow(2).mean()
 
         return encoded, alpha_loss, beta_loss
 
@@ -728,9 +683,11 @@ class Kglm(Model):
         entity mention.
         """
         logits = self._fc_mention_type(encoded)
-        mention_loss = sequence_cross_entropy_with_logits(logits, mention_type, mask,
-                                                          average='token')
-
+        mention_logp = F.log_softmax(logits, -1)
+        mention_loss = -mention_logp.gather(-1, mention_type.unsqueeze(-1)).squeeze()
+        mention_loss = mention_loss * mask.float()
+        # mention_loss = sequence_cross_entropy_with_logits(logits, mention_type, mask,
+        #                                                   average='token')
 
         # if not self.training:
         self._new_mention_f1(predictions=logits,
@@ -740,7 +697,7 @@ class Kglm(Model):
                             gold_labels=mention_type,
                             mask=mask)
 
-        return mention_loss
+        return mention_loss.sum(-1)
 
     def _new_entity_logits(self,
                            encoded: torch.Tensor,
@@ -778,18 +735,17 @@ class Kglm(Model):
             log_probs = masked_log_softmax(logits, shortlist_mask)
         else:
             log_probs = F.log_softmax(logits, dim=-1)
-        target_log_probs = torch.gather(log_probs, -1, target_inds.unsqueeze(-1)).squeeze(-1)
-        target_log_probs = target_log_probs * target_mask.float()
-        # Also don't predict on non-mentions
+        target_loss = -log_probs.gather( -1, target_inds.unsqueeze(-1)).squeeze(-1)
+        target_loss = target_loss * target_mask.float()
         mentions = ~entity_ids.eq(0)
-        target_log_probs = target_log_probs * mentions.float()
+        target_loss = target_loss * mentions.float()
 
         # self._new_entity_accuracy(predictions=log_probs[mask],
         #                           gold_labels=target_inds[mask])
         # self._new_entity_accuracy20(predictions=log_probs[mask],
         #                             gold_labels=target_inds[mask])
 
-        return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
+        return target_loss.sum(-1) # / (target_mask.sum(-1).float() + 1e-13)
 
     def _parent_log_probs(self,
                           encoded_head: torch.Tensor,
@@ -902,7 +858,7 @@ class Kglm(Model):
         self._parent_ppl(-torch.logsumexp(parent_log_probs, dim=-1)[mask].sum(), mask.float().sum())
         self._relation_ppl(-torch.logsumexp(relation_log_probs, dim=-1)[mask].sum(), mask.float().sum())
         # Lastly return the tokenwise average loss
-        return -target_log_probs.sum() / (target_mask.sum() + 1e-13)
+        return -target_log_probs.sum(-1) # / (target_mask.sum(-1) + 1e-13)
 
     def _generate_scores(self,
                          encoded: torch.Tensor,
@@ -1014,13 +970,13 @@ class Kglm(Model):
         flattened_mask = flattened_mask.squeeze()
         # Zero out padding loss
         combined_log_probs_extended_vocab = combined_log_probs_extended_vocab * flattened_mask.float()
-        vocab_loss = -combined_log_probs_extended_vocab.sum() / (mask.sum() + 1e-13)
+        vocab_loss = -combined_log_probs_extended_vocab.view(batch_size, sequence_length).sum(-1)# / (mask.sum(-1) + 1e-13)
 
         # Unknown penalty - only applies to non-copied unks
         true_unks = unks.squeeze() & ~copied.squeeze() & flattened_mask
         penalized_log_probs = combined_log_probs_extended_vocab - self._unk_penalty * true_unks.float()
         penalized_log_probs[~flattened_mask] = 0
-        penalized_vocab_loss = -penalized_log_probs.sum() / (mask.sum() + 1e-13)
+        penalized_vocab_loss = -penalized_log_probs.view(batch_size, sequence_length).sum(-1)# / (mask.sum(-1) + 1e-13)
 
         # PERPLEXITY ###
         # Our perplexity terms are computed using the log probs computed w.r.t the source
@@ -1061,13 +1017,13 @@ class Kglm(Model):
         # batch sizes (e.g. the `reset` tensor will not be the right size). In future
         # implementations this should be handled more robustly.
         super().train(mode)
-        self._state = None
+        self._rnn.reset()
 
     @overrides
     def eval(self):
         # TODO: See train.
         super().eval()
-        self._state = None
+        self._rnn.reset()
 
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         out =  {
@@ -1095,3 +1051,6 @@ class Kglm(Model):
         out['relation_ppl'] = self._relation_ppl.get_metric(reset)
         return out
 
+    def reset_states(self, reset):
+        self._rnn.reset(reset)
+        self._recent_entities.reset(reset)

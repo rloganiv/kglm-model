@@ -34,7 +34,7 @@ class EvaluatePerplexity(Subcommand):
 
         subparser.add_argument('input_file', type=str, help='path to the file containing the evaluation data')
 
-        subparser.add_argument('--output-file', type=str, help='path to output file')
+        subparser.add_argument('--out', type=str, help='prefix of output files')
 
         subparser.add_argument('--weights-file',
                                type=str,
@@ -53,12 +53,12 @@ class EvaluatePerplexity(Subcommand):
 
         subparser.add_argument('--batch-size',
                                type=int,
-                               default=None,
+                               default=1,
                                help='Batch size (default: whatever iterator was set to)')
 
         subparser.add_argument('--split-size',
                                type=int,
-                               default=None,
+                               default=int(1e10),
                                help='Split size (default: whatever iterator was set to)')
 
         subparser.add_argument('--num-samples',
@@ -83,24 +83,50 @@ class EvaluatePerplexity(Subcommand):
         return subparser
 
 
-PRESERVED_FIELDS = {'source', 'reset'}
+# TODO: Make sure this still makes sense...
+#  PRESERVED_FIELDS = {'source', 'reset'}
+#  
+#  
+# def _offset(sample, held_over_data):
+#     batch_size = sample['reset'].size(0)
+#     new_sample = {'source': sample['source'],
+#                   'reset': sample['reset']}
+#     new_held_over_data = {}
+#     for field in sample:
+#         if field in PRESERVED_FIELDS:
+#             continue
+#         if held_over_data is None:
+#             prefix = sample[field].new_zeros(batch_size)
+#         else:
+#             prefix = held_over_data[field]
+#         new_sample[field] = torch.cat((prefix.unsqueeze(1), sample[field][:,:-1]), dim=1)
+#         new_held_over_data[field] = sample[field][:,-1]
+#     return new_sample, new_held_over_data
 
+UNSPLIT_FIELDS = {'reset', 'metadata', 'shortlist'}
+def split(batch, split_size: int):
+    sequence_length = batch['source']['tokens'].shape[1]
+    num_splits = sequence_length // split_size
+    if not ((sequence_length % split_size) == 0):
+        num_splits += 1
+    else:
+        logger.warning('Perfect split')
 
-def _offset(sample, held_over_data):
-    batch_size = sample['reset'].size(0)
-    new_sample = {'source': sample['source'],
-                  'reset': sample['reset']}
-    new_held_over_data = {}
-    for field in sample:
-        if field in PRESERVED_FIELDS:
-            continue
-        if held_over_data is None:
-            prefix = sample[field].new_zeros(batch_size)
-        else:
-            prefix = held_over_data[field]
-        new_sample[field] = torch.cat((prefix.unsqueeze(1), sample[field][:,:-1]), dim=1)
-        new_held_over_data[field] = sample[field][:,-1]
-    return new_sample, new_held_over_data
+    def _chunk(x, start, stop):
+        if isinstance(x, dict):
+            return {k: v if k in UNSPLIT_FIELDS else _chunk(v, start, stop) for k, v in x.items()}
+        if isinstance(x, torch.Tensor):
+            return x[:, start:stop].contiguous()
+
+    chunks = []
+    for i in range(num_splits):
+        chunk = _chunk(batch, i * split_size, (i + 1) * split_size)
+
+        if i > 0:
+            chunk['reset'] = torch.zeros_like(chunk['reset'])
+
+        chunks.append(chunk)
+    return chunks
 
 
 def tile(t, amount):
@@ -110,19 +136,21 @@ def tile(t, amount):
         return t.repeat(*args)
     elif isinstance(t, dict):
         return {k: tile(v, amount) for k, v in t.items()}
+    elif isinstance(t, list):
+        return [x for x in t for _ in range(amount)]
 
 
-def logsumexp(prev: torch.FloatTensor,
-              current: torch.FloatTensor,
-              i: int,
-              samples_per_batch: int):
-    # NOTE: n is number of samples
-    current_avg = current.view(samples_per_batch, -1).sum(dim=-1).logsumexp(dim=0) - np.log(samples_per_batch).item()
-    if prev is None:
-        return current_avg
-    a = torch.max(prev, current_avg)
-    sumexp = torch.exp(prev - a) * i / (i + 1) + torch.exp(current_avg - a) / (i + 1)
-    return a + torch.log(sumexp)
+# def logsumexp(prev: torch.FloatTensor,
+#               current: torch.FloatTensor,
+#               i: int,
+#               samples_per_batch: int):
+#     # NOTE: n is number of samples
+#     current_avg = current.view(samples_per_batch, -1).sum(dim=-1).logsumexp(dim=0) - np.log(samples_per_batch).item()
+#     if prev is None:
+#         return current_avg
+#     a = torch.max(prev, current_avg)
+#     sumexp = torch.exp(prev - a) * i / (i + 1) + torch.exp(current_avg - a) / (i + 1)
+#     return a + torch.log(sumexp)
 
 
 def evaluate_perplexity(model: Model,
@@ -133,116 +161,110 @@ def evaluate_perplexity(model: Model,
                         cuda_device: int,
                         temperature: float = 1.0,
                         offset: bool = False,
-                        samples_per_batch: int = 1) -> Dict[str, Any]:
+                        samples_per_batch: int = 1,
+                        split_size: int = int(1e10)) -> Dict[str, Any]:
+
     check_for_gpu(cuda_device)
-
     logger.info('Iterating over dataset')
+    # weight = None
 
-    # summands = []
-    # penalized_summands = []
-    trajectory = np.zeros(num_samples // samples_per_batch)
-    individual_estimates = np.zeros(num_samples // samples_per_batch)
-    s_probs = np.zeros((348, num_samples // samples_per_batch))
+    model.eval()
+    sampler.eval()
 
+    iterator = data_iterator(instances, num_epochs=1, shuffle=False)
+    generator_tqdm = Tqdm.tqdm(iterator, total=0)
 
-    weight = None
+    summand = 0.0
+    denom = 0.0
+    fp = []
+    q = []
+    all_weights = []
 
-    for i in range(num_samples // samples_per_batch):
-        iterator = data_iterator(instances, num_epochs=1, shuffle=False)
-        generator_tqdm = Tqdm.tqdm(iterator, total=0)
+    for batch in generator_tqdm:
 
-        model.eval()
-        sampler.eval()
-        sampler._state = None
+        batch_size = batch['reset'].shape[0]
 
-        summand = None
-        denom = None
-        #summand = torch.tensor(0.0)
-        # penalized_summand = torch.tensor(0.0)
+        n_tokens = util.get_text_field_mask(batch['source']).float().sum()
+        denom += n_tokens
 
-        held_over_data = None
+        epoch_weights = []
+        epoch_fp = []
+        epoch_q = []
 
-        for batch, _ in generator_tqdm:
+        batch = util.move_to_device(batch, cuda_device)
 
-            # We need sequence length to help compute perplexity
-            n_tokens = util.get_text_field_mask(batch['source']).float().sum(dim=-1)
-            if denom is None:
-                denom = n_tokens
-            else:
-                denom += n_tokens
+        # Tile if that's what we're doing
+        if samples_per_batch > 1:
+            batch = tile(batch, samples_per_batch)
 
-            summand = util.move_to_device(summand, cuda_device)
-            batch = util.move_to_device(batch, cuda_device)
+        for i in range(num_samples // samples_per_batch):
 
-            # Tile if that's what we're doing
-            if samples_per_batch > 1:
-                batch = tile(batch, samples_per_batch)
+            # summand = util.move_to_device(summand, cuda_device)
+            # batch = util.move_to_device(batch, cuda_device)
 
-            # Draw a sample
-            with torch.no_grad():
-                sampler_output = sampler.sample(**batch,
-                                                temperature=temperature,
-                                                offset=offset)
-            sample_logp = sampler_output['logp']
-            sample = sampler_output['sample']
+            weights = None
+            for j, chunk in enumerate(split(batch, split_size)):
+                generator_tqdm.set_description(f"i={i} j={j}")
 
-            if offset:
-                sample, held_over_data = _offset(sample, held_over_data)
+                chunk_tokens = util.get_text_field_mask(batch['source']).int().sum()
+                if chunk_tokens == 0:
+                    logger.debug('Zero chunk, skipping')
+                    continue
 
-            # Evaluate on sample
-            with torch.no_grad():
-                model_output = model(**sample)
+                # Draw a sample
+                with torch.no_grad():
+                    sampler_output = sampler.sample(**chunk,
+                                                    temperature=temperature,
+                                                    offset=offset)
+                sample_logp = sampler_output['logp']
+                sample = sampler_output['sample']
 
-            model_logp = model_output['logp']
-            if summand is None:
-                summand = (model_logp - sample_logp)
-            else:
-                summand += (model_logp - sample_logp)
+                # if offset:
+                #     sample, held_over_data = _offset(sample, held_over_data)
 
-            # model_penalized_logp = model_output['penalized_logp']
-            # penalized_summand += (model_penalized_logp - sample_logp)
+                with torch.no_grad():
+                    model_output = model(**sample)
 
-            # generator_tqdm.set_description('Instantaneous PPL: %0.4f' % torch.exp((sample_logp - model_logp) / n_tokens).item())
+                model_logp = model_output['logp']
+                split_weights = (model_logp - sample_logp).view(batch_size, samples_per_batch)
 
+                if weights is None:
+                    weights = split_weights
+                else:
+                    weights += split_weights
+                # logger.debug(torch.exp(-split_weights/split_size))
 
-        current_avg = summand.view(samples_per_batch, -1).sum(dim=-1).logsumexp(dim=0) - np.log(samples_per_batch).item()
-        instance_ppl = torch.exp(-current_avg.sum() / denom.sum())
+            epoch_weights.append(weights) #.cpu())
+            epoch_fp.append(model_logp.view(batch_size, samples_per_batch))# .cpu())
+            epoch_q.append(sample_logp.view(batch_size, samples_per_batch))# .cpu())
 
-        weight = logsumexp(weight, summand, i, samples_per_batch)
-        ppl = torch.exp(-weight / denom.sum())
+        # Combine all the epoch weights
+        combined_weights = torch.cat(epoch_weights, dim=1)
+        combined_fp = torch.cat(epoch_fp, dim=1)
+        combined_q = torch.cat(epoch_q, dim=1)
+        all_weights.append(combined_weights)
+        fp.append(combined_fp)
+        q.append(combined_q)
 
-        individual_estimates[i] = instance_ppl.item()
-        trajectory[i] = ppl.item()
+        # Compute importance sampled logp of the sequences in the batch
+        logp_hat = combined_weights.logsumexp(dim=1) - math.log(samples_per_batch)
+        summand +=  logp_hat.sum()
 
-        s_probs[:, i] = torch.exp(-summand.cpu() / denom.cpu()).numpy()
-        # summands.append(summand)
-        # # penalized_summands.append(penalized_summand)
-        # # if i == 0:
-        # #     t = summand.unsqueeze(0)
-        # #     p = penalized_summand.unsqueeze(0)
-        # # else:
-        # #     t = torch.stack(summands, dim=0)
-        # #     # p = torch.stack(penalized_summands, dim=0)
-        # t = torch.cat(summands, dim=0)
-        # t_sum = torch.logsumexp(t, dim=0)
-        # # p_sum = torch.logsumexp(p, dim=0)
-        # sum_logp = (t_sum - math.log((i+1)*1000)).item()
-        # # sum_logp_penalized = (p_sum - math.log((i+1)*1000)).item()
-        # ppl = math.exp(-sum_logp / 659)
-        # # upp = math.exp(-sum_logp_penalized / denom)
+        logger.info(f'PPL: {torch.exp(-summand / denom)}')
 
-        # trajectory[i] = ppl
-        # # individual_estimates[i] = math.exp(-summand.item() / denom)
+    # Create array of all the weights
+    all_weights_array = torch.cat(all_weights, dim=0).cpu().numpy()
+    fp_array = torch.cat(fp, dim=0).cpu().numpy()
+    q_array = torch.cat(q, dim=0).cpu().numpy()
 
-        # print('PPL: %f' % ppl)
-        # # print('UPP: %f' % upp)
+    # Compute perplexity
+    ppl = torch.exp(-summand / denom)
 
     metrics = {
         'ppl': ppl,
-        # 'upp': upp,
-        'trajectory': trajectory,
-        'individual_estimates': individual_estimates,
-        's_probs': s_probs
+        'weights': all_weights_array,
+        'fp': fp_array,
+        'q': q_array
     }
     return metrics
 
@@ -251,6 +273,7 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     logging.getLogger('allennlp.common.params').disabled = True
     logging.getLogger('allennlp.nn.initializers').disabled = True
     logging.getLogger('allennlp.modules.token_embedders.embedding').setLevel(logging.INFO)
+    logger.warning('This code will return improper results if sequences are split')
 
     # Load model from archive
     model_archive = load_archive(args.model_archive_file, args.cuda_device, args.overrides, args.weights_file)
@@ -274,29 +297,27 @@ def evaluate_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     logger.info('Reading evaluation data from: %s', evaluation_data_path)
     instances = dataset_reader.read(evaluation_data_path)
 
-    # To avoid hairy issues with splitting, we opt to use a basic iterator so that we can
-    # generate samples for entire sequences.
     iterator_params = config.pop('iterator', 'None')
-    if args.batch_size is not None:
-        iterator_params['batch_size'] = args.batch_size
-    if args.split_size is not None:
-        iterator_params['split_size'] = args.split_size
-    iterator_params['truncate'] = False
+    iterator_params['batch_size'] = args.batch_size
+    # Make split size really large to prevent splits (otherwise we'd have to
+    # deal with averaging the importance samples across splits ...
+    # if args.split_size is not None:
+        # iterator_params['split_size'] = args.split_size
+    iterator_params['split_size'] = int(1e10)
+    iterator_params['truncate'] = False  # TODO: Shouldn't need this anymore...
     iterator = DataIterator.from_params(iterator_params)
     iterator.index_with(model.vocab)
     metrics = evaluate_perplexity(model, sampler, args.num_samples, instances,
                                   iterator, args.cuda_device, args.temperature,
-                                  args.offset, args.samples_per_batch)
+                                  args.offset, args.samples_per_batch,
+                                  args.split_size)
 
     logger.info('Finished evaluating.')
-    logger.info('Metrics:')
-    for key, metric in metrics.items():
-        logger.info('%s: %s', key, metric)
 
-    output_file = args.output_file
-    if output_file:
-        np.save(output_file + '.trajectory.npy', metrics['trajectory'])
-        np.save(output_file + '.individual_estimates.npy', metrics['individual_estimates'])
-        np.save(output_file + '.s_probs.npy', metrics['s_probs'])
+    if args.out:
+        np.save(args.out + '_weights.npy', metrics['weights'])
+        np.save(args.out + '_fp.npy', metrics['fp'])
+        np.save(args.out + '_q.npy', metrics['q'])
+
     return metrics
 
