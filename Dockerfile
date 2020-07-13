@@ -1,5 +1,5 @@
-FROM python:3.6.8-jessie
-
+# FROM python:3.6.8-jessie
+FROM pytorch/pytorch:1.1.0-cuda10.0-cudnn7.5-runtime
 ENV LC_ALL=C.UTF-8
 ENV LANG=C.UTF-8
 
@@ -18,6 +18,7 @@ WORKDIR /workspace
 RUN chmod -R a+w /workspace
 
 COPY requirements.txt .
+RUN pip install --upgrade pip
 RUN pip install -r requirements.txt
 
 COPY .pylintrc .pylintrc

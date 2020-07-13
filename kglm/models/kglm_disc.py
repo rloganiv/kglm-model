@@ -755,8 +755,9 @@ class KglmDisc(Model):
             self._recent_entities.load_beam_state(beam_state.recent_entities)
             for i, candidate_ids in enumerate(self._recent_entities._remaining):
                 # Cast candidate ids to a tensor, lookup embeddings, and compute score.
-                candidate_ids = torch.LongTensor(list(candidate_ids.keys()),
-                                                 device=next_encoded_head.device)
+                candidate_ids = torch.tensor(list(candidate_ids.keys()),
+                                             dtype=torch.int64,
+                                             device=next_encoded_head.device)
                 candidate_embeddings = self._entity_embedder(candidate_ids)
                 candidate_logits = torch.mv(candidate_embeddings, next_encoded_head[i])
                 candidate_logp = F.log_softmax(candidate_logits)
@@ -767,10 +768,10 @@ class KglmDisc(Model):
 
                 # Stop early if node is isolated
                 if not s:
-                    logp_arr[i, j] = torch.FloatTensor([], device=next_encoded_head.device)
-                    parent_ids_arr[i, j] = torch.LongTensor([], device=next_encoded_head.device)
-                    relations_arr[i, j] = torch.LongTensor([], device=next_encoded_head.device)
-                    raw_entity_ids_arr[i, j] = torch.LongTensor([], device=next_encoded_head.device)
+                    logp_arr[i, j] = torch.tensor([], dtype=torch.float32, device=next_encoded_head.device)
+                    parent_ids_arr[i, j] = torch.tensor([], dtype=torch.int64, device=next_encoded_head.device)
+                    relations_arr[i, j] = torch.tensor([], dtype=torch.int64, device=next_encoded_head.device)
+                    raw_entity_ids_arr[i, j] = torch.tensor([], dtype=torch.int64, device=next_encoded_head.device)
                     continue
 
                 # Otherwise compute relation probabilities for each parent and combine
@@ -1020,7 +1021,8 @@ class KglmDisc(Model):
                     target: Dict[str, torch.Tensor],
                     reset: torch.ByteTensor,
                     metadata: Dict[str, Any],
-                    k: int) -> Tuple[torch.Tensor, torch.Tensor]:
+                    k: int,
+                    **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Obtain the top-k (approximately) most likely predictions from the model using beam
         search. Unlike typical beam search all of the beam states are returned instead of just
@@ -1084,6 +1086,7 @@ class KglmDisc(Model):
         output = None
 
         for timestep in range(sequence_length):
+            logger.debug(timestep)
             # Get log probabilities of all next states
             next_mention_type_logp = self._next_mention_type_logp(mention_type_logits[:, timestep],
                                                                   beam_states)

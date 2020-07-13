@@ -556,7 +556,8 @@ class EntityNLMDiscriminator(Model):
     def beam_search(self,
                     source: Dict[str, torch.Tensor],
                     reset: torch.ByteTensor,
-                    k: int) -> Tuple[torch.Tensor, torch.Tensor]:
+                    k: int,
+                    **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Obtain the top-k (approximately) most likely predictions from the model using beam
         search. Unlike typical beam search all of the beam states are returned instead of just

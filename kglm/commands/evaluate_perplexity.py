@@ -118,13 +118,15 @@ def split(batch, split_size: int):
         if isinstance(x, torch.Tensor):
             return x[:, start:stop].contiguous()
 
+    chunks = []
     for i in range(num_splits):
         chunk = _chunk(batch, i * split_size, (i + 1) * split_size)
 
         if i > 0:
             chunk['reset'] = torch.zeros_like(chunk['reset'])
 
-        yield chunk
+        chunks.append(chunk)
+    return chunks
 
 
 def tile(t, amount):
@@ -138,17 +140,17 @@ def tile(t, amount):
         return [x for x in t for _ in range(amount)]
 
 
-def logsumexp(prev: torch.FloatTensor,
-              current: torch.FloatTensor,
-              i: int,
-              samples_per_batch: int):
-    # NOTE: n is number of samples
-    current_avg = current.view(samples_per_batch, -1).sum(dim=-1).logsumexp(dim=0) - np.log(samples_per_batch).item()
-    if prev is None:
-        return current_avg
-    a = torch.max(prev, current_avg)
-    sumexp = torch.exp(prev - a) * i / (i + 1) + torch.exp(current_avg - a) / (i + 1)
-    return a + torch.log(sumexp)
+# def logsumexp(prev: torch.FloatTensor,
+#               current: torch.FloatTensor,
+#               i: int,
+#               samples_per_batch: int):
+#     # NOTE: n is number of samples
+#     current_avg = current.view(samples_per_batch, -1).sum(dim=-1).logsumexp(dim=0) - np.log(samples_per_batch).item()
+#     if prev is None:
+#         return current_avg
+#     a = torch.max(prev, current_avg)
+#     sumexp = torch.exp(prev - a) * i / (i + 1) + torch.exp(current_avg - a) / (i + 1)
+#     return a + torch.log(sumexp)
 
 
 def evaluate_perplexity(model: Model,
@@ -204,7 +206,7 @@ def evaluate_perplexity(model: Model,
             for j, chunk in enumerate(split(batch, split_size)):
                 generator_tqdm.set_description(f"i={i} j={j}")
 
-                chunk_tokens = util.get_text_field_mask(batch['source']).int().sum().item()
+                chunk_tokens = util.get_text_field_mask(batch['source']).int().sum()
                 if chunk_tokens == 0:
                     logger.debug('Zero chunk, skipping')
                     continue
@@ -230,11 +232,11 @@ def evaluate_perplexity(model: Model,
                     weights = split_weights
                 else:
                     weights += split_weights
-                logger.debug(torch.exp(-split_weights/split_size))
+                # logger.debug(torch.exp(-split_weights/split_size))
 
-            epoch_weights.append(weights.cpu())
-            epoch_fp.append(model_logp.view(batch_size, samples_per_batch).cpu())
-            epoch_q.append(sample_logp.view(batch_size, samples_per_batch).cpu())
+            epoch_weights.append(weights) #.cpu())
+            epoch_fp.append(model_logp.view(batch_size, samples_per_batch))# .cpu())
+            epoch_q.append(sample_logp.view(batch_size, samples_per_batch))# .cpu())
 
         # Combine all the epoch weights
         combined_weights = torch.cat(epoch_weights, dim=1)
@@ -251,9 +253,9 @@ def evaluate_perplexity(model: Model,
         logger.info(f'PPL: {torch.exp(-summand / denom)}')
 
     # Create array of all the weights
-    all_weights_array = torch.cat(all_weights, dim=0).numpy()
-    fp_array = torch.cat(fp, dim=0).numpy()
-    q_array = torch.cat(q, dim=0).numpy()
+    all_weights_array = torch.cat(all_weights, dim=0).cpu().numpy()
+    fp_array = torch.cat(fp, dim=0).cpu().numpy()
+    q_array = torch.cat(q, dim=0).cpu().numpy()
 
     # Compute perplexity
     ppl = torch.exp(-summand / denom)

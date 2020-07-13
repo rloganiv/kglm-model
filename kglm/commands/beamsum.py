@@ -112,9 +112,12 @@ def evaluate_perplexity(model: Model,
 
         # Draw a sample
         with torch.no_grad():
-            sample = sampler.beam_search(source=batch['source'],
-                                         reset=batch['reset'],
-                                         k=beam_width)
+            # sample = sampler.beam_search(source=batch['source'],
+            #                              reset=batch['reset'],
+            #                              target=batch['target'],
+            #                              metadata=batch['metadata'],
+            #                              k=beam_width)
+            sample = sampler.beam_search(**batch, k=beam_width)
 
         # Evaluate on sample
         with torch.no_grad():
